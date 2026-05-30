@@ -20,6 +20,9 @@ namespace CCPad
         private ReleaseInfo? _releaseInfo;
         private WebTerminalServer? _webServer;
 
+        private Microsoft.UI.Dispatching.DispatcherQueueTimer? _autosaveTimer;
+        private bool _autosaveSubscribed;
+
         public MainWindow()
         {
             InitializeComponent();
@@ -27,6 +30,7 @@ namespace CCPad
             Activated += OnFirstActivated;
             Closed += OnWindowClosed;
             InitAboutMenu();
+            SessionRecovery.MarkRunning();
         }
 
         private async void OnFirstActivated(object sender, WindowActivatedEventArgs e)
@@ -38,9 +42,9 @@ namespace CCPad
             var startDir = app?.StartupWorkingDir;
             var workspaceFile = app?.StartupWorkspaceFile;
 
+            // Workspace file from command-line takes precedence over recovery.
             if (workspaceFile != null)
             {
-                // Launched from .ccpad-workspace file → enter workspace mode
                 var ws = WorkspaceConfig.LoadFromFile(workspaceFile);
                 if (ws?.Layout != null)
                 {
@@ -52,8 +56,27 @@ namespace CCPad
                     _currentWorkspaceFile = workspaceFile;
                     EnterWorkspaceMode();
                     Activated += OnActivated;
+                    AttachAutosave();
                     _ = DelayedUpdateCheckAsync();
                     return;
+                }
+            }
+
+            // Crash recovery: only when no explicit workspace/dir argument
+            // and the feature is enabled in prefs.
+            if (workspaceFile == null && startDir == null && AppConfig.Load().SessionRecoveryEnabled)
+            {
+                var recovered = SessionRecovery.DetectCrashedSession();
+                if (recovered?.Layout != null)
+                {
+                    var restored = await TryShowRecoveryDialogAsync(recovered, projects);
+                    if (restored)
+                    {
+                        Activated += OnActivated;
+                        AttachAutosave();
+                        _ = DelayedUpdateCheckAsync();
+                        return;
+                    }
                 }
             }
 
@@ -65,7 +88,60 @@ namespace CCPad
 
             RefreshWorkspaceFlyout();
             Activated += OnActivated;
+            AttachAutosave();
             _ = DelayedUpdateCheckAsync();
+        }
+
+        private async System.Threading.Tasks.Task<bool> TryShowRecoveryDialogAsync(
+            WorkspaceEntry recovered, List<ProjectEntry> projects)
+        {
+            // Content must be created after the window has a XamlRoot.
+            var dontAskAgain = new CheckBox { Content = "以后不再询问，直接全新开始" };
+            var panel = new StackPanel { Spacing = 8 };
+            panel.Children.Add(new TextBlock
+            {
+                Text = "上次会话似乎是异常退出的。是否恢复之前的窗口布局？",
+                TextWrapping = TextWrapping.Wrap
+            });
+            panel.Children.Add(new TextBlock
+            {
+                Text = "注意：仅恢复标签和工作目录，终端内的对话历史无法恢复。",
+                FontSize = 12,
+                Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 150, 150, 150)),
+                TextWrapping = TextWrapping.Wrap
+            });
+            panel.Children.Add(dontAskAgain);
+
+            var dlg = new ContentDialog
+            {
+                Title = "恢复上次会话？",
+                Content = panel,
+                PrimaryButtonText = "恢复",
+                CloseButtonText = "全新开始",
+                XamlRoot = Content.XamlRoot
+            };
+
+            var result = await dlg.ShowAsync();
+
+            if (dontAskAgain.IsChecked == true)
+            {
+                var prefs = AppConfig.Load();
+                prefs.SessionRecoveryEnabled = false;
+                AppConfig.Save(prefs);
+            }
+
+            if (result != ContentDialogResult.Primary)
+            {
+                SessionRecovery.ClearSnapshot();
+                return false;
+            }
+
+            _splitHost = SplitHost.RestoreFromLayout(recovered.Layout!, projects);
+            RootGrid.Children.Add(_splitHost);
+            RestoreWindowSize(recovered);
+            await _splitHost.InitializeTerminals();
+            RefreshWorkspaceFlyout();
+            return true;
         }
 
         private async System.Threading.Tasks.Task DelayedUpdateCheckAsync()
@@ -290,6 +366,32 @@ namespace CCPad
             };
             _remoteMenuItem.Click += (_, _) => OnRemoteTerminalClick();
             AboutFlyout.Items.Add(_remoteMenuItem);
+
+            AboutFlyout.Items.Add(new MenuFlyoutSeparator());
+
+            var recoveryToggle = new ToggleMenuFlyoutItem
+            {
+                Text = "异常退出时恢复会话",
+                Icon = new FontIcon { Glyph = "\uE777" },
+                IsChecked = AppConfig.Load().SessionRecoveryEnabled
+            };
+            recoveryToggle.Click += (s, _) =>
+            {
+                var prefs = AppConfig.Load();
+                prefs.SessionRecoveryEnabled = ((ToggleMenuFlyoutItem)s).IsChecked;
+                AppConfig.Save(prefs);
+                if (!prefs.SessionRecoveryEnabled)
+                    SessionRecovery.ClearSnapshot();
+            };
+            AboutFlyout.Items.Add(recoveryToggle);
+
+            var clearSessionItem = new MenuFlyoutItem
+            {
+                Text = "清除会话恢复记录",
+                Icon = new FontIcon { Glyph = "\uE74D" }
+            };
+            clearSessionItem.Click += (_, _) => SessionRecovery.ClearSnapshot();
+            AboutFlyout.Items.Add(clearSessionItem);
 
             AboutFlyout.Items.Add(new MenuFlyoutSeparator());
 
@@ -667,6 +769,54 @@ namespace CCPad
                 _splitHost.DisposeAll();
             }
             _webServer?.Dispose();
+
+            // Clean exit — clear lock + snapshot so next launch starts fresh.
+            try
+            {
+                SessionRecovery.MarkClosedCleanly();
+                SessionRecovery.ClearSnapshot();
+            }
+            catch { }
         }
+
+        // ── Session-recovery autosave ───────────────────────────────────
+
+        private void AttachAutosave()
+        {
+            if (_autosaveSubscribed || _splitHost == null) return;
+            _autosaveSubscribed = true;
+
+            // Throttle: schedule a single write 2s after the latest change.
+            _autosaveTimer = DispatcherQueue.CreateTimer();
+            _autosaveTimer.Interval = TimeSpan.FromSeconds(2);
+            _autosaveTimer.IsRepeating = false;
+            _autosaveTimer.Tick += (_, _) => WriteRecoverySnapshot();
+
+            _splitHost.LayoutChanged += ScheduleAutosave;
+
+            // Initial snapshot so a crash before any layout change still recovers.
+            WriteRecoverySnapshot();
+        }
+
+        private void ScheduleAutosave()
+        {
+            if (!AppConfig.Load().SessionRecoveryEnabled) return;
+            _autosaveTimer?.Start(); // Start() restarts the countdown if already pending
+        }
+
+        private void WriteRecoverySnapshot()
+        {
+            if (_splitHost == null) return;
+            if (!AppConfig.Load().SessionRecoveryEnabled) return;
+            try
+            {
+                var snapshot = CreateSnapshot();
+                SessionRecovery.SaveSnapshot(snapshot);
+            }
+            catch { }
+        }
+
+        /// <summary>Called by SplitHost when layout/tabs change.</summary>
+        public void NotifyLayoutChanged() => ScheduleAutosave();
     }
 }

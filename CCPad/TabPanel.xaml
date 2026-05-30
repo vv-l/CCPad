@@ -20,6 +20,9 @@
             <TabView.TabStripFooter>
                 <StackPanel Orientation="Horizontal" Padding="0,0,8,0"
                             HorizontalAlignment="Right">
+                    <!-- Reserves space for the global WorkspaceButton overlay declared in MainWindow.xaml,
+                         so tabs don't extend underneath it. -->
+                    <Grid Width="110"/>
                     <DropDownButton x:Name="ProjectButton"
                                     ToolTipService.ToolTip="从项目启动新标签页"
                                     Padding="8,4"
@@ -40,6 +43,22 @@
               Width="1" Height="1" Opacity="0"
               IsHitTestVisible="False"
               HorizontalAlignment="Left" VerticalAlignment="Top"/>
+
+        <!-- Drag handle: thin strip overlaid on the bottom edge of the tab strip.
+             Margin.Top is recalculated from TabHeightManager.Height in code-behind. -->
+        <Border x:Name="ResizeHandle"
+                Height="6"
+                VerticalAlignment="Top"
+                HorizontalAlignment="Stretch"
+                Background="Transparent"
+                ToolTipService.ToolTip="拖拽调整页签高度 · 双击恢复默认"
+                PointerEntered="OnHandlePointerEntered"
+                PointerExited="OnHandlePointerExited"
+                PointerPressed="OnHandlePointerPressed"
+                PointerMoved="OnHandlePointerMoved"
+                PointerReleased="OnHandlePointerReleased"
+                PointerCaptureLost="OnHandlePointerReleased"
+                DoubleTapped="OnHandleDoubleTapped"/>
     </Grid>
 
 </UserControl>

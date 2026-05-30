@@ -18,8 +18,23 @@ namespace CCPad.Terminal
         private IntPtr _hPipeOutRead = IntPtr.Zero;
         private IntPtr _attributeList = IntPtr.Zero;
         private volatile bool _disposed;
+        private volatile bool _consoleReady;
+        private readonly object _procLock = new();
 
         public event Action<byte[]>? OutputReceived;
+
+        /// <summary>
+        /// Fires when the CURRENT child process exits. The pseudoconsole stays
+        /// alive, so the consumer can spawn a follow-up process (e.g. a shell)
+        /// on the same console without losing scrollback. Invoked on a
+        /// background thread.
+        /// </summary>
+        public event Action? ProcessExited;
+
+        /// <summary>
+        /// Fires when the output pipe hits EOF — i.e. the pseudoconsole itself
+        /// is being torn down (typically during Dispose).
+        /// </summary>
         public event Action? Exited;
 
         public int Cols { get; private set; }
@@ -28,11 +43,16 @@ namespace CCPad.Terminal
         public static ConPtySession Start(string command, int cols, int rows, string? workingDir = null)
         {
             var session = new ConPtySession { Cols = cols, Rows = rows };
-            session.Launch(command, cols, rows, workingDir);
+            session.InitConsole(cols, rows);
+            session.SpawnProcess(command, workingDir);
             return session;
         }
 
-        private void Launch(string command, int cols, int rows, string? workingDir = null)
+        /// <summary>
+        /// One-time setup: create the pipes + pseudoconsole and start pumping
+        /// output. The console outlives individual child processes.
+        /// </summary>
+        private void InitConsole(int cols, int rows)
         {
             if (!CreatePipe(out var hPipeInRead, out _hPipeInWrite, IntPtr.Zero, 0))
                 throw new InvalidOperationException($"CreatePipe(stdin) failed: {Marshal.GetLastWin32Error()}");
@@ -51,35 +71,80 @@ namespace CCPad.Terminal
             CloseHandle(hPipeInRead);
             CloseHandle(hPipeOutWrite);
 
-            var siEx = BuildStartupInfo();
+            BuildAttributeList();
+            _consoleReady = true;
+
+            Task.Factory.StartNew(ReadOutput, TaskCreationOptions.LongRunning);
+        }
+
+        /// <summary>
+        /// Launch a process attached to this console. Can be called repeatedly:
+        /// after one child exits, spawn the next (e.g. a fallback shell) on the
+        /// same console so previous output (scrollback) is preserved.
+        /// </summary>
+        public void SpawnProcess(string command, string? workingDir = null)
+        {
+            if (_disposed || !_consoleReady) return;
+
+            var siEx = new STARTUPINFOEX
+            {
+                StartupInfo = new STARTUPINFO { cb = Marshal.SizeOf<STARTUPINFOEX>() },
+                lpAttributeList = _attributeList
+            };
 
             string dir = workingDir ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
             IntPtr envBlock = BuildUtf8EnvironmentBlock();
             try
             {
-            bool ok = CreateProcess(
-                null, command,
-                IntPtr.Zero, IntPtr.Zero, false,
-                EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
-                envBlock, dir,
-                ref siEx, out var pi);
+                bool ok = CreateProcess(
+                    null, command,
+                    IntPtr.Zero, IntPtr.Zero, false,
+                    EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+                    envBlock, dir,
+                    ref siEx, out var pi);
 
-            if (!ok)
-                throw new InvalidOperationException($"CreateProcess failed: {Marshal.GetLastWin32Error()}");
+                if (!ok)
+                    throw new InvalidOperationException($"CreateProcess failed: {Marshal.GetLastWin32Error()}");
 
-            _hProcess = pi.hProcess;
-            _hThread = pi.hThread;
+                lock (_procLock)
+                {
+                    _hProcess = pi.hProcess;
+                    _hThread = pi.hThread;
+                }
             }
             finally
             {
                 Marshal.FreeHGlobal(envBlock);
             }
 
-            Task.Factory.StartNew(ReadOutput, TaskCreationOptions.LongRunning);
+            Task.Factory.StartNew(() => WaitForProcessExit(_hProcess), TaskCreationOptions.LongRunning);
         }
 
-        private STARTUPINFOEX BuildStartupInfo()
+        /// <summary>
+        /// Block on the child's process handle. Unlike the output pipe, this is
+        /// reliable: the pseudoconsole host keeps the pipe's write end open after
+        /// the child dies, so the pipe never hits EOF on its own.
+        /// </summary>
+        private void WaitForProcessExit(IntPtr hProcess)
+        {
+            if (hProcess == IntPtr.Zero) return;
+            WaitForSingleObject(hProcess, INFINITE);
+            CloseProcessHandles();
+            if (!_disposed)
+                ProcessExited?.Invoke();
+        }
+
+        private void CloseProcessHandles()
+        {
+            lock (_procLock)
+            {
+                if (_hProcess != IntPtr.Zero) { CloseHandle(_hProcess); _hProcess = IntPtr.Zero; }
+                if (_hThread != IntPtr.Zero) { CloseHandle(_hThread); _hThread = IntPtr.Zero; }
+            }
+        }
+
+        private void BuildAttributeList()
         {
             IntPtr size = IntPtr.Zero;
             InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref size);
@@ -96,12 +161,6 @@ namespace CCPad.Terminal
                     _hPC, (IntPtr)IntPtr.Size,
                     IntPtr.Zero, IntPtr.Zero))
                 throw new InvalidOperationException($"UpdateProcThreadAttribute failed: {Marshal.GetLastWin32Error()}");
-
-            return new STARTUPINFOEX
-            {
-                StartupInfo = new STARTUPINFO { cb = Marshal.SizeOf<STARTUPINFOEX>() },
-                lpAttributeList = _attributeList
-            };
         }
 
         private void ReadOutput()
@@ -178,9 +237,11 @@ namespace CCPad.Terminal
             if (_disposed) return;
             _disposed = true;
 
+            // Closing the pseudoconsole signals the attached child to exit and
+            // unblocks the ReadOutput pump. The WaitForProcessExit thread closes
+            // the process/thread handles once the child actually goes away.
             if (_hPC != IntPtr.Zero) { ClosePseudoConsole(_hPC); _hPC = IntPtr.Zero; }
-            if (_hProcess != IntPtr.Zero) { CloseHandle(_hProcess); _hProcess = IntPtr.Zero; }
-            if (_hThread != IntPtr.Zero) { CloseHandle(_hThread); _hThread = IntPtr.Zero; }
+            CloseProcessHandles();
             if (_hPipeInWrite != IntPtr.Zero) { CloseHandle(_hPipeInWrite); _hPipeInWrite = IntPtr.Zero; }
             if (_hPipeOutRead != IntPtr.Zero) { CloseHandle(_hPipeOutRead); _hPipeOutRead = IntPtr.Zero; }
             if (_attributeList != IntPtr.Zero)

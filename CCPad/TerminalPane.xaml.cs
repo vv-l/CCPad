@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.Web.WebView2.Core;
 using CCPad.Terminal;
@@ -17,18 +18,23 @@ namespace CCPad
         private ConPtySession? _session;
         private bool _disposed;
         private bool _awaitingRestart;
+        private bool _inShell;
         private bool _ready;
         private bool _sessionPending;
         private bool _focusOnFirstOutput;
         private int _cols = 120;
         private int _rows = 30;
         private TaskCompletionSource? _readyTcs;
+        private TaskCompletionSource? _loadedTcs;
         private bool _autoConfirm;
         private string _recentOutput = "";
         private Timer? _autoConfirmTimer;
         private static readonly string[] ConfirmHints = [
             "Do you want to proceed?", "Are you sure?", "Continue?", "Proceed?", "是否继续"
         ];
+
+        /// <summary>Shell to drop into when the launched CLI exits.</summary>
+        private const string ShellCommand = "cmd.exe";
 
         /// <summary>Unique ID for this pane, used by Web remote access.</summary>
         public string PaneId { get; } = Guid.NewGuid().ToString("N")[..8];
@@ -49,6 +55,9 @@ namespace CCPad
         public string Command => _command;
         public string? WorkingDir => _workingDir;
 
+        /// <summary>CLI mode this pane was launched with ("claude" / "codex"). Null until LaunchSession/InitializeAsync.</summary>
+        public string? CliMode { get; private set; }
+
         public TerminalPane()
         {
             InitializeComponent();
@@ -63,12 +72,21 @@ namespace CCPad
         {
             if (!WebView.IsLoaded)
             {
-                var tcs = new TaskCompletionSource();
-                WebView.Loaded += (_, _) => tcs.TrySetResult();
-                await tcs.Task;
+                _loadedTcs = new TaskCompletionSource();
+                RoutedEventHandler? loaded = null;
+                loaded = (_, _) =>
+                {
+                    if (loaded != null)
+                        WebView.Loaded -= loaded;
+                    _loadedTcs?.TrySetResult();
+                };
+                WebView.Loaded += loaded;
+                await _loadedTcs.Task;
             }
+            if (_disposed) throw new ObjectDisposedException(nameof(TerminalPane));
 
             await WebView.EnsureCoreWebView2Async();
+            if (_disposed) throw new ObjectDisposedException(nameof(TerminalPane));
 
             if (WebView.CoreWebView2 == null)
                 throw new InvalidOperationException("WebView2 failed to initialize.");
@@ -92,10 +110,11 @@ namespace CCPad
         /// Phase 2: Start the ConPty session. If prewarm isn't done yet, it will
         /// start automatically once xterm reports ready.
         /// </summary>
-        public void LaunchSession(string command, string? workingDir = null, bool focusOnReady = false)
+        public void LaunchSession(string command, string? workingDir = null, bool focusOnReady = false, string? cliMode = null)
         {
             _command = command;
             _workingDir = workingDir;
+            CliMode = cliMode;
             _sessionPending = true;
             _focusOnFirstOutput = focusOnReady;
             if (_ready)
@@ -105,10 +124,11 @@ namespace CCPad
         /// <summary>
         /// Combined init for non-prewarmed path (first tab).
         /// </summary>
-        public async Task InitializeAsync(string command, string? workingDir = null, bool focusOnReady = false)
+        public async Task InitializeAsync(string command, string? workingDir = null, bool focusOnReady = false, string? cliMode = null)
         {
             _command = command;
             _workingDir = workingDir;
+            CliMode = cliMode;
             _sessionPending = true;
             _focusOnFirstOutput = focusOnReady;
             await PrewarmAsync();
@@ -134,11 +154,12 @@ namespace CCPad
             _session?.Dispose();
             _session = null;
             _awaitingRestart = false;
+            _inShell = false;
             try
             {
                 _session = ConPtySession.Start(_command, _cols, _rows, _workingDir);
                 _session.OutputReceived += OnOutput;
-                _session.Exited += OnExited;
+                _session.ProcessExited += OnProcessExited;
 
                 TerminalSessionRegistry.Register(PaneId, new SessionEntry
                 {
@@ -225,14 +246,32 @@ namespace CCPad
             }, null, 300, Timeout.Infinite);
         }
 
-        private void OnExited()
+        private void OnProcessExited()
         {
-            _session = null;
-            _awaitingRestart = true;
-            TerminalSessionRegistry.Unregister(PaneId);
-            TerminalSessionRegistry.NotifyChanged();
-            SendOutput(Encoding.UTF8.GetBytes(
-                "\r\n\x1b[33m[Process exited — press Enter to restart]\x1b[0m\r\n"));
+            if (_disposed) return;
+
+            if (!_inShell)
+            {
+                // The launched CLI (claude/codex) exited. Instead of leaving a
+                // dead terminal, drop into a shell in the project directory. The
+                // pseudoconsole stays alive, so prior output — including claude's
+                // "claude --resume <id>" banner — remains in the scrollback above
+                // the new prompt, ready to copy.
+                _inShell = true;
+                SendOutput(Encoding.UTF8.GetBytes(
+                    "\r\n\x1b[90m[CLI exited — dropped to cmd. Resume command is above; type 'exit' to relaunch.]\x1b[0m\r\n"));
+                _session?.SpawnProcess(ShellCommand, _workingDir);
+            }
+            else
+            {
+                // The fallback shell exited too — offer to relaunch the CLI.
+                _inShell = false;
+                _awaitingRestart = true;
+                TerminalSessionRegistry.Unregister(PaneId);
+                TerminalSessionRegistry.NotifyChanged();
+                SendOutput(Encoding.UTF8.GetBytes(
+                    "\r\n\x1b[33m[Process exited — press Enter to restart]\x1b[0m\r\n"));
+            }
         }
 
         private void SendOutput(byte[] data)
@@ -349,16 +388,25 @@ namespace CCPad
         {
             if (_disposed) return;
             _disposed = true;
+            _loadedTcs?.TrySetCanceled();
+            _readyTcs?.TrySetCanceled();
             _autoConfirmTimer?.Dispose();
             TerminalSessionRegistry.Unregister(PaneId);
             TerminalSessionRegistry.NotifyChanged();
             if (_session != null)
             {
                 _session.OutputReceived -= OnOutput;
-                _session.Exited -= OnExited;
+                _session.ProcessExited -= OnProcessExited;
                 _session.Dispose();
                 _session = null;
             }
+            try
+            {
+                if (WebView.CoreWebView2 != null)
+                    WebView.CoreWebView2.WebMessageReceived -= OnWebMessage;
+                WebView.Close();
+            }
+            catch { }
         }
 
         private const string TerminalHtml = """

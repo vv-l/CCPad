@@ -83,6 +83,11 @@ namespace CCPad.Terminal
         [DllImport("kernel32.dll", SetLastError = true)]
         internal static extern bool CloseHandle(IntPtr hObject);
 
+        internal const uint INFINITE = 0xFFFFFFFF;
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        internal static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
+
         [StructLayout(LayoutKind.Sequential)]
         internal struct COORD
         {

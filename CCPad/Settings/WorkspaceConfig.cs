@@ -10,6 +10,9 @@ namespace CCPad.Settings
     {
         public string Name { get; set; } = "";
         public string WorkingDir { get; set; } = "";
+
+        /// <summary>"claude" or "codex". Empty/missing → use AppPrefs default at restore time.</summary>
+        public string CliMode { get; set; } = "";
     }
 
     public class LayoutNode

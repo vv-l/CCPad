@@ -402,7 +402,7 @@ namespace CCPad
             };
             githubItem.Click += async (_, _) =>
             {
-                await Windows.System.Launcher.LaunchUriAsync(new Uri("https://github.com/nuomiaa/CCPad"));
+                await Windows.System.Launcher.LaunchUriAsync(new Uri("https://github.com/YOUR_GH_USERNAME/CCPad"));
             };
             AboutFlyout.Items.Add(githubItem);
 

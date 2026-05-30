@@ -12,6 +12,10 @@
   <a href="https://ccpad.dev">Website</a> · <a href="README.zh-CN.md">中文文档</a> · <a href="LICENSE">License (GPL-3.0)</a>
 </p>
 
+<p align="center">
+  <em>⚡ A community fork of <a href="https://github.com/nuomiaa/CCPad">nuomiaa/CCPad</a> — adds Codex CLI support, Chrome-style session recovery, and a resilient terminal. Licensed under GPL-3.0; original copyright © the upstream authors. See <a href="#fork-changes">Fork Changes</a>.</em>
+</p>
+
 ---
 
 ## Features
@@ -26,6 +30,9 @@
 - **Web Remote Terminal** — Built-in HTTP/WebSocket server lets you view and control any session from a browser on the same LAN. Optional token authentication. Touch-friendly UI with on-screen keys for mobile devices.
 - **Context Menu Integration** — Right-click any folder in Explorer to open it in CC Pad.
 - **File Association** — Double-click `.ccpad-workspace` files to open them directly.
+- **Dual-CLI (Claude + Codex)** *(fork)* — Run Claude and Codex tabs side by side in one window. Pick a default CLI; open any pinned project with either CLI.
+- **Session Recovery** *(fork)* — Chrome-style crash recovery (on by default): after an unexpected exit, restore your tabs and working directories.
+- **Resilient Terminal** *(fork)* — When the CLI exits, the terminal drops into a shell in the same directory (scrollback preserved) instead of dying; press Enter to relaunch the CLI.
 
 ## Screenshots
 
@@ -45,8 +52,8 @@ Download the latest `CCPad-Setup-x64.exe` from the [Releases](../../releases) pa
 - Windows 10 (Build 17763) or later
 
 ```bash
-# Clone
-git clone https://github.com/nuomiaa/CCPad.git
+# Clone (this fork)
+git clone https://github.com/YOUR_GH_USERNAME/CCPad.git
 cd CCPad
 
 # Build (Debug)
@@ -142,7 +149,10 @@ CCPad/
 │   └── GridSplitter.cs      # Draggable split ratio control
 ├── Settings/
 │   ├── WorkspaceConfig.cs   # .ccpad-workspace file I/O
-│   └── ProjectConfig.cs     # Project list persistence
+│   ├── ProjectConfig.cs     # Project list persistence
+│   ├── AppConfig.cs         # App prefs (default CLI, recovery toggle)  [fork]
+│   ├── CliMode.cs           # Claude/Codex resolution + cmd /c wrapping [fork]
+│   └── SessionRecovery.cs   # Crash-recovery snapshots                  [fork]
 └── Assets/
     └── xterm/               # xterm.js terminal emulator
 ```
@@ -156,9 +166,20 @@ CCPad/
 - Windows 10 version 1809 (Build 17763) or later
 - WebView2 Runtime (bundled with Windows 11, auto-installed on Windows 10)
 
+## Fork Changes
+
+This is a community fork of [nuomiaa/CCPad](https://github.com/nuomiaa/CCPad) (based on upstream **v1.0.2**). Changes made in this fork:
+
+- **Dual-CLI (Claude + Codex)** — mixed Claude/Codex tabs in one window; PATH/PATHEXT executable resolution with `cmd /c` wrapping for `.cmd`/`.bat` (fixes `codex.cmd` "CreateProcess failed: 2"); default-CLI preference and per-tab CLI persisted across restarts.
+- **Session recovery** — Chrome-style crash recovery (default on); state under `%LOCALAPPDATA%\CCPad\sessions\`; restores tabs and working directories.
+- **Resilient terminal** — the pseudoconsole outlives its child process; on CLI exit it drops into `cmd.exe` (scrollback preserved) and offers an Enter-to-relaunch; reliable exit detection via `WaitForSingleObject`.
+- **Build fix** — disabled trimming, which had stripped `WinRT.Runtime` methods and crashed startup (`MissingMethodException`); version bumped to 1.0.4.
+
+In keeping with GPL-3.0, the original copyright and license are preserved, and these modifications are documented here and in the commit history.
+
 ## License
 
-This project is licensed under the [GNU General Public License v3.0](LICENSE).
+This project is licensed under the [GNU General Public License v3.0](LICENSE), the same license as the upstream project. Original copyright © the upstream [nuomiaa/CCPad](https://github.com/nuomiaa/CCPad) authors; fork modifications © their respective contributors.
 
 ## Contributing
 

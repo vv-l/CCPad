@@ -12,6 +12,10 @@
   <a href="https://ccpad.dev">官网</a> · <a href="README.md">English</a> · <a href="LICENSE">许可证 (GPL-3.0)</a>
 </p>
 
+<p align="center">
+  <em>⚡ 这是 <a href="https://github.com/nuomiaa/CCPad">nuomiaa/CCPad</a> 的社区 fork —— 增加了 Codex CLI 支持、Chrome 式会话恢复、不死终端。基于 GPL-3.0 许可,原始版权归上游作者所有。详见<a href="#衍生版改动">衍生版改动</a>。</em>
+</p>
+
 ---
 
 ## 功能特性
@@ -26,6 +30,9 @@
 - **网页远程终端** — 内置 HTTP/WebSocket 服务器，可在局域网内通过浏览器实时查看和控制任意终端会话。支持可选的令牌认证。移动端友好，提供触屏虚拟按键。
 - **右键菜单集成** — 在资源管理器中右键任意文件夹即可在 CC Pad 中打开。
 - **文件关联** — 双击 `.ccpad-workspace` 文件直接打开。
+- **双 CLI(Claude + Codex)** *(fork)* — 同一窗口并排开 Claude 和 Codex 标签;可设默认 CLI,固定项目可用任一 CLI 打开。
+- **会话恢复** *(fork)* — Chrome 式崩溃恢复(默认开启):异常退出后恢复标签和工作目录。
+- **不死终端** *(fork)* — CLI 退出后终端不再变死,自动落到同目录的 shell(保留滚动历史);按回车可重新启动 CLI。
 
 ## 截图
 
@@ -45,8 +52,8 @@
 - Windows 10（Build 17763）或更高版本
 
 ```bash
-# 克隆仓库
-git clone https://github.com/nuomiaa/CCPad.git
+# 克隆仓库（本 fork）
+git clone https://github.com/YOUR_GH_USERNAME/CCPad.git
 cd CCPad
 
 # 构建（Debug）
@@ -142,7 +149,10 @@ CCPad/
 │   └── GridSplitter.cs      # 可拖拽分屏比例控件
 ├── Settings/
 │   ├── WorkspaceConfig.cs   # .ccpad-workspace 文件读写
-│   └── ProjectConfig.cs     # 项目列表持久化
+│   ├── ProjectConfig.cs     # 项目列表持久化
+│   ├── AppConfig.cs         # 应用偏好(默认 CLI、恢复开关)  [fork]
+│   ├── CliMode.cs           # Claude/Codex 解析 + cmd /c 包裹 [fork]
+│   └── SessionRecovery.cs   # 崩溃恢复快照                    [fork]
 └── Assets/
     └── xterm/               # xterm.js 终端模拟器
 ```
@@ -156,9 +166,20 @@ CCPad/
 - Windows 10 版本 1809（Build 17763）或更高版本
 - WebView2 运行时（Windows 11 已内置，Windows 10 会自动安装）
 
+## 衍生版改动
+
+本项目是 [nuomiaa/CCPad](https://github.com/nuomiaa/CCPad) 的社区 fork(基于上游 **v1.0.2**)。本 fork 的改动:
+
+- **双 CLI(Claude + Codex)** — 同窗口混开 Claude/Codex 标签;按 PATH/PATHEXT 解析真实可执行文件,`.cmd`/`.bat` 用 `cmd /c` 包裹(修复 `codex.cmd` 的 "CreateProcess failed: 2");默认 CLI 偏好和每个标签的 CLI 类型在重启后保留。
+- **会话恢复** — Chrome 式崩溃恢复(默认开启);状态存于 `%LOCALAPPDATA%\CCPad\sessions\`;恢复标签和工作目录。
+- **不死终端** — 伪控制台生命周期独立于子进程;CLI 退出后落到 `cmd.exe`(保留滚动历史)并提示按回车重启;用 `WaitForSingleObject` 可靠检测进程退出。
+- **构建修复** — 关闭 trim(它曾裁掉 `WinRT.Runtime` 方法导致启动崩溃 `MissingMethodException`);版本号升到 1.0.4。
+
+遵循 GPL-3.0,保留原始版权与许可证,改动在此处及提交历史中记录。
+
 ## 许可证
 
-本项目基于 [GNU 通用公共许可证 v3.0](LICENSE) 授权。
+本项目基于 [GNU 通用公共许可证 v3.0](LICENSE) 授权,与上游项目相同。原始版权归上游 [nuomiaa/CCPad](https://github.com/nuomiaa/CCPad) 作者所有;fork 改动版权归各自贡献者所有。
 
 ## 参与贡献
 

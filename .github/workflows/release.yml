@@ -1,0 +1,60 @@
+name: Release
+
+# Tag like v1.0.4 to build and publish a GitHub Release with both a
+# portable ZIP and a Windows installer.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version tag (e.g. v1.0.4)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          $ref = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { '${{ github.event.inputs.tag }}' }
+          $v = $ref.TrimStart('v')
+          "version=$v"  >> $env:GITHUB_OUTPUT
+          "tag=v$v"     >> $env:GITHUB_OUTPUT
+
+      - name: Publish (self-contained, x64, untrimmed)
+        run: dotnet publish CCPad/CCPad.csproj -c Release -r win-x64 --self-contained true -p:Platform=x64 -o publish --nologo
+
+      - name: Portable ZIP
+        shell: pwsh
+        run: Compress-Archive -Path publish\* -DestinationPath CCPad-x64.zip -Force
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DMyAppVersion=${{ steps.ver.outputs.version }}" installer\installer.iss
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: CC Pad ${{ steps.ver.outputs.tag }}
+          generate_release_notes: true
+          files: |
+            CCPad-x64.zip
+            installer/dist/CCPad-Setup-x64.exe

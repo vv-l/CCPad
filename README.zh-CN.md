@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://ccpad.dev">官网</a> · <a href="README.md">English</a> · <a href="LICENSE">许可证 (GPL-3.0)</a>
+  <a href="README.md">English</a> · <a href="LICENSE">许可证 (GPL-3.0)</a>
 </p>
 
 <p align="center">
@@ -53,7 +53,7 @@
 
 ```bash
 # 克隆仓库（本 fork）
-git clone https://github.com/YOUR_GH_USERNAME/CCPad.git
+git clone https://github.com/vv-l/CCPad.git
 cd CCPad
 
 # 构建（Debug）

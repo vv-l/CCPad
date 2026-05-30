@@ -170,7 +170,6 @@ namespace CCPad.Web
       <div id="terminal"></div>
       <div id="status-bar">
         <span id="status">Connecting...</span>
-        <a id="status-brand" href="https://ccpad.dev" target="_blank" rel="noopener" style="color: #fff;">CCPAD.DEV</a>
         <span id="session-info"></span>
       </div>
     </div>

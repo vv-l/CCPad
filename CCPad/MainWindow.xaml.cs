@@ -402,20 +402,9 @@ namespace CCPad
             };
             githubItem.Click += async (_, _) =>
             {
-                await Windows.System.Launcher.LaunchUriAsync(new Uri("https://github.com/YOUR_GH_USERNAME/CCPad"));
+                await Windows.System.Launcher.LaunchUriAsync(new Uri("https://github.com/vv-l/CCPad"));
             };
             AboutFlyout.Items.Add(githubItem);
-
-            var websiteItem = new MenuFlyoutItem
-            {
-                Text = "CCPad.dev",
-                Icon = new FontIcon { Glyph = "\uE774" }
-            };
-            websiteItem.Click += async (_, _) =>
-            {
-                await Windows.System.Launcher.LaunchUriAsync(new Uri("https://ccpad.dev"));
-            };
-            AboutFlyout.Items.Add(websiteItem);
         }
 
         // ── Update check ────────────────────────────────────────────────

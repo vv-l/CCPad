@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://ccpad.dev">Website</a> · <a href="README.zh-CN.md">中文文档</a> · <a href="LICENSE">License (GPL-3.0)</a>
+  <a href="README.zh-CN.md">中文文档</a> · <a href="LICENSE">License (GPL-3.0)</a>
 </p>
 
 <p align="center">
@@ -53,7 +53,7 @@ Download the latest `CCPad-Setup-x64.exe` from the [Releases](../../releases) pa
 
 ```bash
 # Clone (this fork)
-git clone https://github.com/YOUR_GH_USERNAME/CCPad.git
+git clone https://github.com/vv-l/CCPad.git
 cd CCPad
 
 # Build (Debug)

@@ -383,3 +383,4 @@ Generated\ Files/
 publish/
 installer/dist/
 *.zip
+!installer/installer.iss

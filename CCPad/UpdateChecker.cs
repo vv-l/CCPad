@@ -22,10 +22,10 @@ namespace CCPad
         // Fork: points at this fork's releases, not upstream nuomiaa/CCPad,
         // so auto-update pulls this fork's installers.
         private const string ReleasesApiUrl =
-            "https://api.github.com/repos/YOUR_GH_USERNAME/CCPad/releases/latest";
+            "https://api.github.com/repos/vv-l/CCPad/releases/latest";
 
         public const string ReleasesPageUrl =
-            "https://github.com/YOUR_GH_USERNAME/CCPad/releases";
+            "https://github.com/vv-l/CCPad/releases";
 
         private static readonly HttpClient _http = CreateClient();
 

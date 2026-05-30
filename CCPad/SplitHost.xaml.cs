@@ -15,6 +15,9 @@ namespace CCPad
         private PaneNode _activePane = null!;
         private List<ProjectEntry> _projects = new();
 
+        /// <summary>Fired whenever layout or tab state changes (for autosave).</summary>
+        public event Action? LayoutChanged;
+
         public SplitHost(List<ProjectEntry> projects)
         {
             InitializeComponent();
@@ -122,6 +125,7 @@ namespace CCPad
                 if (node != null) SetActivePane(node);
             };
             panel.NavigateRequested += (src, dir) => NavigateFocus(dir);
+            panel.TabsChanged += () => LayoutChanged?.Invoke();
             return panel;
         }
 
@@ -222,6 +226,8 @@ namespace CCPad
             DispatcherQueue.TryEnqueue(
                 Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
                 () => ForEachPanel(_root, p => p.RefitAllTerminals()));
+
+            LayoutChanged?.Invoke();
         }
 
         private static void DetachPanels(SplitNode node)

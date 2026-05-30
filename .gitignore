@@ -379,3 +379,7 @@ installer_output/
 # WinUI generated files
 *.xbf
 Generated\ Files/
+# CC Pad release artifacts
+publish/
+installer/dist/
+*.zip

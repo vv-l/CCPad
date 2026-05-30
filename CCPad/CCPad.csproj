@@ -21,9 +21,9 @@
     <Company>CCPad.dev</Company>
     <Authors>CC Pad</Authors>
     <Copyright>Copyright © 2026 CC Pad</Copyright>
-    <Version>1.0.3</Version>
-    <FileVersion>1.0.3.1</FileVersion>
-    <InformationalVersion>1.0.3</InformationalVersion>
+    <Version>1.0.4</Version>
+    <FileVersion>1.0.4.0</FileVersion>
+    <InformationalVersion>1.0.4</InformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>
@@ -82,8 +82,9 @@
   <PropertyGroup>
     <PublishReadyToRun Condition="'$(Configuration)' == 'Debug'">False</PublishReadyToRun>
     <PublishReadyToRun Condition="'$(Configuration)' != 'Debug'">True</PublishReadyToRun>
-    <PublishTrimmed Condition="'$(Configuration)' == 'Debug'">False</PublishTrimmed>
-    <PublishTrimmed Condition="'$(Configuration)' != 'Debug'">True</PublishTrimmed>
+    <!-- Trimming disabled: WinUI/CsWinRT trimming removed WinRT.Runtime methods
+         (e.g. InitializeComWrappers) the app calls, causing MissingMethodException at startup. -->
+    <PublishTrimmed>False</PublishTrimmed>
     <UseWindowsForms>False</UseWindowsForms>
     <AssemblyName>CCPad</AssemblyName>
     <ApplicationIcon>Assets\claude.ico</ApplicationIcon>

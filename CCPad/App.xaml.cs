@@ -19,6 +19,30 @@ namespace CCPad
         public App()
         {
             InitializeComponent();
+            UnhandledException += OnUnhandledException;
+        }
+
+        private void OnUnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs e)
+        {
+            // Persist a record before WinUI fail-fasts. The running lock is left
+            // in place on purpose so crash recovery can offer to restore on the
+            // next launch — the recovery path is now hardened against re-crashing.
+            LogStartupError("UnhandledException", e.Exception);
+        }
+
+        /// <summary>Best-effort append of a startup/runtime error to a log file.</summary>
+        public static void LogStartupError(string context, Exception? ex)
+        {
+            try
+            {
+                var dir = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "CCPad", "logs");
+                Directory.CreateDirectory(dir);
+                var file = Path.Combine(dir, "startup-error.log");
+                File.AppendAllText(file, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {context}\n{ex}\n\n");
+            }
+            catch { }
         }
 
         protected override void OnLaunched(LaunchActivatedEventArgs args)

@@ -27,74 +27,108 @@ namespace CCPad
         {
             InitializeComponent();
             SystemBackdrop = new MicaBackdrop { Kind = MicaKind.BaseAlt };
-            Activated += OnFirstActivated;
+            // Trigger first-time init from Loaded rather than Activated: at
+            // Loaded time the element is in the live visual tree so XamlRoot is
+            // guaranteed available. (Activated can fire while Content.XamlRoot
+            // is still null, which made ContentDialog.ShowAsync throw E_INVALIDARG.)
+            RootGrid.Loaded += OnRootLoaded;
             Closed += OnWindowClosed;
             InitAboutMenu();
             SessionRecovery.MarkRunning();
         }
 
-        private async void OnFirstActivated(object sender, WindowActivatedEventArgs e)
+        private bool _initialized;
+
+        private async void OnRootLoaded(object sender, RoutedEventArgs e)
         {
-            Activated -= OnFirstActivated;
+            if (_initialized) return;
+            _initialized = true;
+            RootGrid.Loaded -= OnRootLoaded;
 
             var app = Application.Current as App;
             var projects = ProjectConfig.Load();
             var startDir = app?.StartupWorkingDir;
             var workspaceFile = app?.StartupWorkspaceFile;
 
-            // Workspace file from command-line takes precedence over recovery.
-            if (workspaceFile != null)
+            try
             {
-                var ws = WorkspaceConfig.LoadFromFile(workspaceFile);
-                if (ws?.Layout != null)
+                // Workspace file from command-line takes precedence over recovery.
+                if (workspaceFile != null)
                 {
-                    _splitHost = SplitHost.RestoreFromLayout(ws.Layout, projects);
-                    RootGrid.Children.Add(_splitHost);
-                    RestoreWindowSize(ws);
-                    await _splitHost.InitializeTerminals();
-
-                    _currentWorkspaceFile = workspaceFile;
-                    EnterWorkspaceMode();
-                    Activated += OnActivated;
-                    AttachAutosave();
-                    _ = DelayedUpdateCheckAsync();
-                    return;
-                }
-            }
-
-            // Crash recovery: only when no explicit workspace/dir argument
-            // and the feature is enabled in prefs.
-            if (workspaceFile == null && startDir == null && AppConfig.Load().SessionRecoveryEnabled)
-            {
-                var recovered = SessionRecovery.DetectCrashedSession();
-                if (recovered?.Layout != null)
-                {
-                    var restored = await TryShowRecoveryDialogAsync(recovered, projects);
-                    if (restored)
+                    var ws = WorkspaceConfig.LoadFromFile(workspaceFile);
+                    if (ws?.Layout != null)
                     {
+                        _splitHost = SplitHost.RestoreFromLayout(ws.Layout, projects);
+                        RootGrid.Children.Add(_splitHost);
+                        RestoreWindowSize(ws);
+                        await _splitHost.InitializeTerminals();
+
+                        _currentWorkspaceFile = workspaceFile;
+                        EnterWorkspaceMode();
                         Activated += OnActivated;
                         AttachAutosave();
                         _ = DelayedUpdateCheckAsync();
                         return;
                     }
                 }
+
+                // Crash recovery: only when no explicit workspace/dir argument
+                // and the feature is enabled in prefs.
+                if (workspaceFile == null && startDir == null && AppConfig.Load().SessionRecoveryEnabled)
+                {
+                    var recovered = SessionRecovery.DetectCrashedSession();
+                    if (recovered?.Layout != null)
+                    {
+                        var restored = await TryShowRecoveryDialogAsync(recovered, projects);
+                        if (restored)
+                        {
+                            Activated += OnActivated;
+                            AttachAutosave();
+                            _ = DelayedUpdateCheckAsync();
+                            return;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                // Workspace/recovery restore failed. Never let this propagate:
+                // an unhandled throw here fail-fasts WinUI and, because the
+                // running lock is left behind, becomes a launch-time crash loop.
+                // Log it and fall through to a clean blank launch instead.
+                App.LogStartupError("OnRootLoaded/restore", ex);
+                try { RootGrid.Children.Clear(); } catch { }
+                _splitHost = null;
+                _currentWorkspaceFile = null;
             }
 
-            // Normal launch — fresh terminal, no workspace
-            _splitHost = new SplitHost(projects);
-            RootGrid.Children.Add(_splitHost);
-            var startName = startDir != null ? System.IO.Path.GetFileName(startDir) : null;
-            await _splitHost.InitializeFirstTab(startName, startDir);
+            // Normal launch — fresh terminal, no workspace.
+            try
+            {
+                _splitHost = new SplitHost(projects);
+                RootGrid.Children.Add(_splitHost);
+                var startName = startDir != null ? System.IO.Path.GetFileName(startDir) : null;
+                await _splitHost.InitializeFirstTab(startName, startDir);
 
-            RefreshWorkspaceFlyout();
-            Activated += OnActivated;
-            AttachAutosave();
-            _ = DelayedUpdateCheckAsync();
+                RefreshWorkspaceFlyout();
+                Activated += OnActivated;
+                AttachAutosave();
+                _ = DelayedUpdateCheckAsync();
+            }
+            catch (Exception ex)
+            {
+                App.LogStartupError("OnRootLoaded/normal-launch", ex);
+            }
         }
 
         private async System.Threading.Tasks.Task<bool> TryShowRecoveryDialogAsync(
             WorkspaceEntry recovered, List<ProjectEntry> projects)
         {
+            // ContentDialog.ShowAsync throws E_INVALIDARG without a XamlRoot.
+            // If it is somehow still unavailable, skip recovery rather than crash.
+            var xamlRoot = Content?.XamlRoot;
+            if (xamlRoot == null) return false;
+
             // Content must be created after the window has a XamlRoot.
             var dontAskAgain = new CheckBox { Content = "以后不再询问，直接全新开始" };
             var panel = new StackPanel { Spacing = 8 };
@@ -118,7 +152,7 @@ namespace CCPad
                 Content = panel,
                 PrimaryButtonText = "恢复",
                 CloseButtonText = "全新开始",
-                XamlRoot = Content.XamlRoot
+                XamlRoot = xamlRoot
             };
 
             var result = await dlg.ShowAsync();

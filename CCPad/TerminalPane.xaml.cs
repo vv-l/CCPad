@@ -254,12 +254,15 @@ namespace CCPad
             {
                 // The launched CLI (claude/codex) exited. Instead of leaving a
                 // dead terminal, drop into a shell in the project directory. The
-                // pseudoconsole stays alive, so prior output — including claude's
-                // "claude --resume <id>" banner — remains in the scrollback above
-                // the new prompt, ready to copy.
+                // pseudoconsole stays alive, so prior scrollback is preserved.
+                //
+                // Don't rely on Claude having printed its own "claude --resume
+                // <id>" banner: on an abnormal exit (API error / crash / idle
+                // disconnect) it never gets the chance. Instead, look up the
+                // latest session file on disk ourselves and print the exact
+                // resume command, so recovery works even when Claude died hard.
                 _inShell = true;
-                SendOutput(Encoding.UTF8.GetBytes(
-                    "\r\n\x1b[90m[CLI exited — dropped to cmd. Resume command is above; type 'exit' to relaunch.]\x1b[0m\r\n"));
+                SendOutput(Encoding.UTF8.GetBytes(BuildExitBanner()));
                 _session?.SpawnProcess(ShellCommand, _workingDir);
             }
             else
@@ -272,6 +275,79 @@ namespace CCPad
                 SendOutput(Encoding.UTF8.GetBytes(
                     "\r\n\x1b[33m[Process exited — press Enter to restart]\x1b[0m\r\n"));
             }
+        }
+
+        /// <summary>
+        /// Build the gray banner shown when the CLI exits and we drop to cmd.
+        /// For Claude, append the exact "claude --resume &lt;id&gt;" command by
+        /// reading the latest session file from disk, since an abnormal exit
+        /// won't have printed Claude's own banner.
+        /// </summary>
+        private string BuildExitBanner()
+        {
+            const string head = "\r\n\x1b[90m[CLI exited — dropped to cmd. Type 'exit' to relaunch.]\x1b[0m\r\n";
+
+            // Codex has its own resume flow ("codex resume"); don't fake a claude command.
+            if (string.Equals(CliMode, Settings.CliMode.Codex, StringComparison.OrdinalIgnoreCase))
+                return head;
+
+            var id = FindLatestClaudeSessionId();
+            if (id == null)
+            {
+                // No session file found — still point the user at --continue.
+                return head +
+                    "\x1b[36mResume the last conversation:\x1b[0m \x1b[33mclaude --continue\x1b[0m\r\n";
+            }
+
+            return head +
+                "\x1b[36mResume this conversation:\x1b[0m \x1b[33mclaude --resume " + id + "\x1b[0m" +
+                "  \x1b[90m(or: claude --continue)\x1b[0m\r\n";
+        }
+
+        /// <summary>
+        /// Find the most recently written Claude session id for the pane's
+        /// working directory. Claude stores transcripts under
+        /// %USERPROFILE%\.claude\projects\&lt;encoded-cwd&gt;\&lt;session-id&gt;.jsonl,
+        /// where the cwd is encoded by replacing every non-[A-Za-z0-9] char
+        /// with '-' (non-collapsing). Returns null on any failure.
+        /// </summary>
+        private string? FindLatestClaudeSessionId()
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(_workingDir)) return null;
+
+                string dir = System.IO.Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                    ".claude", "projects", EncodeProjectDir(_workingDir));
+                if (!System.IO.Directory.Exists(dir)) return null;
+
+                string? latest = null;
+                DateTime latestTime = DateTime.MinValue;
+                foreach (var f in System.IO.Directory.GetFiles(dir, "*.jsonl"))
+                {
+                    var t = System.IO.File.GetLastWriteTimeUtc(f);
+                    if (t > latestTime) { latestTime = t; latest = f; }
+                }
+                return latest == null ? null : System.IO.Path.GetFileNameWithoutExtension(latest);
+            }
+            catch { return null; }
+        }
+
+        /// <summary>
+        /// Encode a working directory the way Claude Code names its project
+        /// folders: every character that is not an ASCII letter or digit becomes
+        /// '-'. Dashes are NOT collapsed (e.g. "C:\Users" -> "C--Users").
+        /// </summary>
+        private static string EncodeProjectDir(string path)
+        {
+            var sb = new StringBuilder(path.Length);
+            foreach (char c in path)
+            {
+                bool ascii = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+                sb.Append(ascii ? c : '-');
+            }
+            return sb.ToString();
         }
 
         private void SendOutput(byte[] data)

@@ -172,7 +172,8 @@ CCPad/
 
 - **双 CLI(Claude + Codex)** — 同窗口混开 Claude/Codex 标签;按 PATH/PATHEXT 解析真实可执行文件,`.cmd`/`.bat` 用 `cmd /c` 包裹(修复 `codex.cmd` 的 "CreateProcess failed: 2");默认 CLI 偏好和每个标签的 CLI 类型在重启后保留。
 - **会话恢复** — Chrome 式崩溃恢复(默认开启);状态存于 `%LOCALAPPDATA%\CCPad\sessions\`;恢复标签和工作目录。
-- **不死终端** — 伪控制台生命周期独立于子进程;CLI 退出后落到 `cmd.exe`(保留滚动历史)并提示按回车重启;用 `WaitForSingleObject` 可靠检测进程退出。
+- **不死终端** — 伪控制台生命周期独立于子进程;CLI 退出后落到 `cmd.exe`(保留滚动历史)并提示按回车重启;用 `WaitForSingleObject` 可靠检测进程退出。Claude 异常退出时还会打印精确的 `claude --resume <id>` 命令(从磁盘上的会话记录解析得到),便于恢复对话。
+- **Ctrl+滚轮缩放修复** — 关闭 WebView2 内置页面缩放(其持久化的 `ZoomFactor` 会累计逼近 ~5× 上限,导致面板用久后"能缩小却不能放大");现在 Ctrl+滚轮改为调整终端字号(钳制 8–40),并支持 Ctrl `+` / `-` / `0` 键盘缩放。版本号升到 1.0.6。
 - **构建修复** — 关闭 trim(它曾裁掉 `WinRT.Runtime` 方法导致启动崩溃 `MissingMethodException`);版本号升到 1.0.4。
 
 遵循 GPL-3.0,保留原始版权与许可证,改动在此处及提交历史中记录。

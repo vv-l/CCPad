@@ -93,6 +93,11 @@ namespace CCPad
 
             WebView.CoreWebView2.Settings.IsWebMessageEnabled = true;
             WebView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
+            // Disable WebView2's built-in page zoom (Ctrl+wheel / Ctrl +-0). Its
+            // ZoomFactor is a persistent, accumulating property capped at 5x, so a
+            // long-lived pane drifts to the ceiling and "can't zoom in any more".
+            // We handle Ctrl+wheel ourselves as terminal font-size zoom instead.
+            WebView.CoreWebView2.Settings.IsZoomControlEnabled = false;
             WebView.CoreWebView2.WebMessageReceived += OnWebMessage;
             WebView.GotFocus += (_, _) => PaneFocused?.Invoke();
 
@@ -553,6 +558,20 @@ namespace CCPad
                 term.open(document.getElementById('terminal'));
                 fit.fit();
 
+                /* ── Ctrl+wheel font-size zoom (replaces WebView2 native page zoom) ── */
+                const FONT_MIN = 8, FONT_MAX = 40, FONT_DEFAULT = 14;
+                function setFontSize(s) {
+                  s = Math.min(FONT_MAX, Math.max(FONT_MIN, Math.round(s)));
+                  if (s === term.options.fontSize) return;
+                  term.options.fontSize = s;
+                  fit.fit();
+                }
+                document.addEventListener('wheel', e => {
+                  if (!e.ctrlKey) return;
+                  e.preventDefault();
+                  setFontSize(term.options.fontSize + (e.deltaY < 0 ? 1 : -1));
+                }, { passive: false });
+
                 /* ── Auto-confirm toggle ── */
                 let autoConfirm = false;
                 const ACBtn = document.getElementById('auto-confirm-btn');
@@ -600,6 +619,18 @@ namespace CCPad
                   }
                   if (e.ctrlKey && e.shiftKey && e.key === 'W') {
                     window.chrome.webview.postMessage(JSON.stringify({ type: 'closePane' }));
+                    return false;
+                  }
+                  if (e.ctrlKey && (e.key === '=' || e.key === '+')) {
+                    setFontSize(term.options.fontSize + 1);
+                    return false;
+                  }
+                  if (e.ctrlKey && e.key === '-') {
+                    setFontSize(term.options.fontSize - 1);
+                    return false;
+                  }
+                  if (e.ctrlKey && e.key === '0') {
+                    setFontSize(FONT_DEFAULT);
                     return false;
                   }
                   return true;

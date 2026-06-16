@@ -1,5 +1,6 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
+using CCPad.Localization;
 using CCPad.Settings;
 using CCPad.Web;
 using Microsoft.UI;
@@ -34,6 +35,8 @@ namespace CCPad
             RootGrid.Loaded += OnRootLoaded;
             Closed += OnWindowClosed;
             InitAboutMenu();
+            ApplyLocalizedChrome();
+            Loc.LanguageChanged += OnLanguageChanged;
             SessionRecovery.MarkRunning();
         }
 
@@ -130,16 +133,16 @@ namespace CCPad
             if (xamlRoot == null) return false;
 
             // Content must be created after the window has a XamlRoot.
-            var dontAskAgain = new CheckBox { Content = "以后不再询问，直接全新开始" };
+            var dontAskAgain = new CheckBox { Content = Loc.T("recovery_dontask") };
             var panel = new StackPanel { Spacing = 8 };
             panel.Children.Add(new TextBlock
             {
-                Text = "上次会话似乎是异常退出的。是否恢复之前的窗口布局？",
+                Text = Loc.T("recovery_body"),
                 TextWrapping = TextWrapping.Wrap
             });
             panel.Children.Add(new TextBlock
             {
-                Text = "注意：仅恢复标签和工作目录，终端内的对话历史无法恢复。",
+                Text = Loc.T("recovery_note"),
                 FontSize = 12,
                 Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 150, 150, 150)),
                 TextWrapping = TextWrapping.Wrap
@@ -148,10 +151,10 @@ namespace CCPad
 
             var dlg = new ContentDialog
             {
-                Title = "恢复上次会话？",
+                Title = Loc.T("recovery_title"),
                 Content = panel,
-                PrimaryButtonText = "恢复",
-                CloseButtonText = "全新开始",
+                PrimaryButtonText = Loc.T("recovery_restore"),
+                CloseButtonText = Loc.T("recovery_fresh"),
                 XamlRoot = xamlRoot
             };
 
@@ -201,6 +204,7 @@ namespace CCPad
             WorkspaceButton.Visibility = Visibility.Visible;
             UpdateTitle();
             RefreshWorkspaceFlyout();
+            ScheduleTopRightAdjust();
         }
 
         private void RefreshWorkspaceFlyout()
@@ -212,7 +216,7 @@ namespace CCPad
                 // In workspace mode — save to current file
                 var saveItem = new MenuFlyoutItem
                 {
-                    Text = "保存工作区",
+                    Text = Loc.T("ws_save"),
                     Icon = new FontIcon { Glyph = "\uE74E" }
                 };
                 saveItem.Click += (_, _) => SaveWorkspaceToCurrent();
@@ -222,7 +226,7 @@ namespace CCPad
             // Always available
             var saveAsItem = new MenuFlyoutItem
             {
-                Text = "保存工作区为...",
+                Text = Loc.T("ws_saveas"),
                 Icon = new FontIcon { Glyph = "\uE792" }
             };
             saveAsItem.Click += async (_, _) => await SaveWorkspaceAs();
@@ -230,7 +234,7 @@ namespace CCPad
 
             var openItem = new MenuFlyoutItem
             {
-                Text = "打开工作区...",
+                Text = Loc.T("ws_open"),
                 Icon = new FontIcon { Glyph = "\uE8E5" }
             };
             openItem.Click += async (_, _) => await OpenWorkspaceFromFile();
@@ -300,7 +304,7 @@ namespace CCPad
             WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
             picker.SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.Desktop;
             picker.SuggestedFileName = System.IO.Path.GetFileName(Environment.CurrentDirectory);
-            picker.FileTypeChoices.Add("CCPad 工作区", new List<string> { WorkspaceConfig.FileExtension });
+            picker.FileTypeChoices.Add(Loc.T("ws_filetype"), new List<string> { WorkspaceConfig.FileExtension });
 
             var file = await picker.PickSaveFileAsync();
             if (file == null) return;
@@ -374,6 +378,9 @@ namespace CCPad
 
         private void InitAboutMenu()
         {
+            // Rebuildable: cleared and repopulated on every language change.
+            AboutFlyout.Items.Clear();
+
             var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
             var versionStr = version != null ? $"{version.Major}.{version.Minor}.{version.Build}" : "dev";
 
@@ -387,7 +394,7 @@ namespace CCPad
 
             var updateItem = new MenuFlyoutItem
             {
-                Text = "检查更新",
+                Text = Loc.T("menu_check_update"),
                 Icon = new FontIcon { Glyph = "\uECC5" }
             };
             updateItem.Click += async (_, _) => await CheckForUpdateAsync(silent: false);
@@ -395,7 +402,7 @@ namespace CCPad
 
             _remoteMenuItem = new MenuFlyoutItem
             {
-                Text = "远程终端",
+                Text = Loc.T("menu_remote"),
                 Icon = new FontIcon { Glyph = "\uE774" }
             };
             _remoteMenuItem.Click += (_, _) => OnRemoteTerminalClick();
@@ -405,7 +412,7 @@ namespace CCPad
 
             var recoveryToggle = new ToggleMenuFlyoutItem
             {
-                Text = "异常退出时恢复会话",
+                Text = Loc.T("menu_recovery_toggle"),
                 Icon = new FontIcon { Glyph = "\uE777" },
                 IsChecked = AppConfig.Load().SessionRecoveryEnabled
             };
@@ -421,11 +428,45 @@ namespace CCPad
 
             var clearSessionItem = new MenuFlyoutItem
             {
-                Text = "清除会话恢复记录",
+                Text = Loc.T("menu_clear_recovery"),
                 Icon = new FontIcon { Glyph = "\uE74D" }
             };
             clearSessionItem.Click += (_, _) => SessionRecovery.ClearSnapshot();
             AboutFlyout.Items.Add(clearSessionItem);
+
+            var notifyToggle = new ToggleMenuFlyoutItem
+            {
+                Text = Loc.T("menu_notify_toggle"),
+                Icon = new FontIcon { Glyph = "" }, // bell / ringer
+                IsChecked = AppConfig.Load().NotifyToastEnabled
+            };
+            notifyToggle.Click += (s, _) =>
+            {
+                var prefs = AppConfig.Load();
+                prefs.NotifyToastEnabled = ((ToggleMenuFlyoutItem)s).IsChecked;
+                AppConfig.Save(prefs);
+            };
+            AboutFlyout.Items.Add(notifyToggle);
+
+            AboutFlyout.Items.Add(new MenuFlyoutSeparator());
+
+            var languageItem = new MenuFlyoutSubItem
+            {
+                Text = Loc.T("menu_language"),
+                Icon = new FontIcon { Glyph = "" } // LocaleLanguage globe
+            };
+            foreach (var lang in Loc.PickerOrder)
+            {
+                var code = lang;
+                var langItem = new ToggleMenuFlyoutItem
+                {
+                    Text = Loc.DisplayName(code),
+                    IsChecked = Loc.Lang == code
+                };
+                langItem.Click += (_, _) => Loc.SetLanguage(code);
+                languageItem.Items.Add(langItem);
+            }
+            AboutFlyout.Items.Add(languageItem);
 
             AboutFlyout.Items.Add(new MenuFlyoutSeparator());
 
@@ -439,6 +480,62 @@ namespace CCPad
                 await Windows.System.Launcher.LaunchUriAsync(new Uri("https://github.com/vv-l/CCPad"));
             };
             AboutFlyout.Items.Add(githubItem);
+        }
+
+        /// <summary>
+        /// Lay out the two top-right overlay buttons (Workspace + the per-panel
+        /// Projects button) by measured size instead of hard-coded margins, so long
+        /// localized labels (e.g. "Espacio de trabajo") don't overlap or clip. Posted
+        /// low-priority so it runs after labels/layout have settled.
+        /// </summary>
+        private void ScheduleTopRightAdjust()
+            => DispatcherQueue.TryEnqueue(
+                Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, AdjustTopRightLayout);
+
+        private void AdjustTopRightLayout()
+        {
+            try
+            {
+                bool wsVisible = WorkspaceButton.Visibility == Visibility.Visible;
+
+                WorkspaceButton.Measure(new Windows.Foundation.Size(
+                    double.PositiveInfinity, double.PositiveInfinity));
+                double wsWidth = wsVisible ? WorkspaceButton.DesiredSize.Width : 0;
+
+                double projWidth = _splitHost?.MaxProjectButtonWidth() ?? 64;
+                const double footerPad = 8, gap = 8;
+
+                // Park the workspace overlay just left of the project button.
+                WorkspaceButton.Margin = new Thickness(0, 7, projWidth + footerPad + gap, 0);
+
+                // Reserve matching blank space at the right of every tab strip.
+                _splitHost?.SetWorkspaceReserve(wsVisible ? wsWidth + gap : 0);
+            }
+            catch { }
+        }
+
+        /// <summary>Apply localized tooltips/labels to the static XAML chrome.</summary>
+        private void ApplyLocalizedChrome()
+        {
+            ToolTipService.SetToolTip(UpdateButton, Loc.T("tip_check_update"));
+            ToolTipService.SetToolTip(AboutButton, Loc.T("tip_about"));
+            ToolTipService.SetToolTip(WorkspaceButton, Loc.T("tip_workspace"));
+            WorkspaceLabel.Text = Loc.T("btn_workspace");
+        }
+
+        /// <summary>Live language switch: rebuild menus + chrome in the new language.</summary>
+        private void OnLanguageChanged()
+        {
+            try
+            {
+                InitAboutMenu();
+                UpdateRemoteMenuItem(_webServer?.IsRunning == true);
+                RefreshWorkspaceFlyout();
+                ApplyLocalizedChrome();
+                App.ReRegisterContextMenu();
+                ScheduleTopRightAdjust();
+            }
+            catch { }
         }
 
         // ── Update check ────────────────────────────────────────────────
@@ -460,9 +557,9 @@ namespace CCPad
                 {
                     var dlg = new ContentDialog
                     {
-                        Title = "检查更新",
-                        Content = $"当前已是最新版本 v{UpdateChecker.GetCurrentVersion()}",
-                        CloseButtonText = "确定",
+                        Title = Loc.T("menu_check_update"),
+                        Content = Loc.T("update_latest", UpdateChecker.GetCurrentVersion()),
+                        CloseButtonText = Loc.T("ok"),
                         XamlRoot = Content.XamlRoot
                     };
                     await dlg.ShowAsync();
@@ -483,10 +580,10 @@ namespace CCPad
             var hasAsset = info.AssetUrl != null;
             var dlg = new ContentDialog
             {
-                Title = "发现新版本",
-                Content = $"新版本 v{info.Version} 已发布，当前版本 v{UpdateChecker.GetCurrentVersion()}。",
-                PrimaryButtonText = hasAsset ? "下载并安装" : "前往下载页",
-                CloseButtonText = "稍后",
+                Title = Loc.T("update_found_title"),
+                Content = Loc.T("update_found_body", info.Version, UpdateChecker.GetCurrentVersion()),
+                PrimaryButtonText = hasAsset ? Loc.T("update_download_install") : Loc.T("update_goto_page"),
+                CloseButtonText = Loc.T("later"),
                 XamlRoot = Content.XamlRoot
             };
 
@@ -510,16 +607,16 @@ namespace CCPad
                 Width = 300,
                 Margin = new Thickness(0, 12, 0, 0)
             };
-            var statusText = new TextBlock { Text = $"正在下载 {info.AssetName}..." };
+            var statusText = new TextBlock { Text = Loc.T("update_downloading", info.AssetName) };
             var panel = new StackPanel();
             panel.Children.Add(statusText);
             panel.Children.Add(progressBar);
 
             var progressDlg = new ContentDialog
             {
-                Title = "下载更新",
+                Title = Loc.T("update_downloading_title"),
                 Content = panel,
-                CloseButtonText = "取消",
+                CloseButtonText = Loc.T("cancel"),
                 XamlRoot = Content.XamlRoot
             };
             progressDlg.CloseButtonClick += (_, _) => cts.Cancel();
@@ -557,10 +654,10 @@ namespace CCPad
             {
                 var errDlg = new ContentDialog
                 {
-                    Title = "下载失败",
-                    Content = "下载更新时出错，是否前往下载页面手动下载？",
-                    PrimaryButtonText = "前往下载页",
-                    CloseButtonText = "关闭",
+                    Title = Loc.T("update_failed_title"),
+                    Content = Loc.T("update_failed_body"),
+                    PrimaryButtonText = Loc.T("update_goto_page"),
+                    CloseButtonText = Loc.T("close"),
                     XamlRoot = Content.XamlRoot
                 };
                 if (await errDlg.ShowAsync() == ContentDialogResult.Primary)
@@ -592,7 +689,7 @@ namespace CCPad
             var addresses = WebTerminalServer.GetLanAddresses();
             if (addresses.Count == 0) addresses.Add("localhost");
 
-            var tokenCheck = new CheckBox { Content = "启用 Token 鉴权", IsChecked = false };
+            var tokenCheck = new CheckBox { Content = Loc.T("remote_token_enable"), IsChecked = false };
 
             var addressCombo = new ComboBox { Width = 300 };
             foreach (var addr in addresses) addressCombo.Items.Add(addr);
@@ -610,29 +707,29 @@ namespace CCPad
 
             var autoIncrementCheck = new CheckBox
             {
-                Content = "端口被占用时自动递增",
+                Content = Loc.T("remote_autoincrement"),
                 IsChecked = true
             };
 
             var panel = new StackPanel { Spacing = 8 };
             panel.Children.Add(new TextBlock
             {
-                Text = "启动后，同一局域网内的设备可通过浏览器访问本机终端。",
+                Text = Loc.T("remote_intro"),
                 TextWrapping = TextWrapping.Wrap
             });
-            panel.Children.Add(new TextBlock { Text = "监听地址", FontSize = 12, Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 150, 150, 150)) });
+            panel.Children.Add(new TextBlock { Text = Loc.T("remote_listen_addr"), FontSize = 12, Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 150, 150, 150)) });
             panel.Children.Add(addressCombo);
-            panel.Children.Add(new TextBlock { Text = "端口", FontSize = 12, Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 150, 150, 150)), Margin = new Thickness(0, 8, 0, 0) });
+            panel.Children.Add(new TextBlock { Text = Loc.T("remote_port"), FontSize = 12, Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 150, 150, 150)), Margin = new Thickness(0, 8, 0, 0) });
             panel.Children.Add(portBox);
             panel.Children.Add(autoIncrementCheck);
             panel.Children.Add(tokenCheck);
 
             var dlg = new ContentDialog
             {
-                Title = "启动远程终端",
+                Title = Loc.T("remote_start_title"),
                 Content = panel,
-                PrimaryButtonText = "启动",
-                CloseButtonText = "取消",
+                PrimaryButtonText = Loc.T("remote_start"),
+                CloseButtonText = Loc.T("cancel"),
                 XamlRoot = Content.XamlRoot
             };
 
@@ -652,9 +749,9 @@ namespace CCPad
                 {
                     var errDlg = new ContentDialog
                     {
-                        Title = "启动失败",
-                        Content = $"无法启动远程终端服务：{error}",
-                        CloseButtonText = "确定",
+                        Title = Loc.T("remote_start_failed_title"),
+                        Content = Loc.T("remote_start_failed_body", error),
+                        CloseButtonText = Loc.T("ok"),
                         XamlRoot = Content.XamlRoot
                     };
                     await errDlg.ShowAsync();
@@ -667,9 +764,9 @@ namespace CCPad
             {
                 var errDlg = new ContentDialog
                 {
-                    Title = "启动失败",
-                    Content = $"无法启动远程终端服务：{ex.Message}",
-                    CloseButtonText = "确定",
+                    Title = Loc.T("remote_start_failed_title"),
+                    Content = Loc.T("remote_start_failed_body", ex.Message),
+                    CloseButtonText = Loc.T("ok"),
                     XamlRoot = Content.XamlRoot
                 };
                 await errDlg.ShowAsync();
@@ -680,7 +777,7 @@ namespace CCPad
         {
             var url = _webServer!.GetAccessUrl();
             var panel = new StackPanel { Spacing = 8 };
-            panel.Children.Add(new TextBlock { Text = "远程终端已启动！", FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
+            panel.Children.Add(new TextBlock { Text = Loc.T("remote_started"), FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
 
             var urlBox = new TextBox
             {
@@ -695,7 +792,7 @@ namespace CCPad
             {
                 panel.Children.Add(new TextBlock
                 {
-                    Text = "Token 已启用，请勿将链接泄露给他人。",
+                    Text = Loc.T("remote_token_warn"),
                     FontSize = 12,
                     Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 150, 150, 150))
                 });
@@ -703,11 +800,11 @@ namespace CCPad
 
             var dlg = new ContentDialog
             {
-                Title = "远程终端",
+                Title = Loc.T("menu_remote"),
                 Content = panel,
-                PrimaryButtonText = "复制链接",
-                SecondaryButtonText = "在浏览器中打开",
-                CloseButtonText = "确定",
+                PrimaryButtonText = Loc.T("remote_copy_link"),
+                SecondaryButtonText = Loc.T("remote_open_browser"),
+                CloseButtonText = Loc.T("ok"),
                 XamlRoot = Content.XamlRoot
             };
 
@@ -730,7 +827,7 @@ namespace CCPad
             var panel = new StackPanel { Spacing = 8 };
             panel.Children.Add(new TextBlock
             {
-                Text = $"远程终端正在运行  |  连接客户端: {_webServer.ClientCount}",
+                Text = Loc.T("remote_running_status", _webServer.ClientCount),
                 FontWeight = Microsoft.UI.Text.FontWeights.SemiBold
             });
 
@@ -745,11 +842,11 @@ namespace CCPad
 
             var dlg = new ContentDialog
             {
-                Title = "远程终端",
+                Title = Loc.T("menu_remote"),
                 Content = panel,
-                PrimaryButtonText = "停止服务",
-                SecondaryButtonText = "在浏览器中打开",
-                CloseButtonText = "确定",
+                PrimaryButtonText = Loc.T("remote_stop"),
+                SecondaryButtonText = Loc.T("remote_open_browser"),
+                CloseButtonText = Loc.T("ok"),
                 XamlRoot = Content.XamlRoot
             };
 
@@ -769,13 +866,14 @@ namespace CCPad
         private void UpdateRemoteMenuItem(bool running)
         {
             if (_remoteMenuItem == null) return;
-            _remoteMenuItem.Text = running ? "远程终端 (运行中)" : "远程终端";
+            _remoteMenuItem.Text = running ? Loc.T("menu_remote_running") : Loc.T("menu_remote");
         }
 
         // ── Auto-save on close (only if in workspace mode) ───────────────
 
         private void OnWindowClosed(object sender, WindowEventArgs args)
         {
+            Loc.LanguageChanged -= OnLanguageChanged;
             if (_splitHost != null)
             {
                 try
@@ -792,6 +890,7 @@ namespace CCPad
                 _splitHost.DisposeAll();
             }
             _webServer?.Dispose();
+            Notify.ToastService.Unregister();
 
             // Clean exit — clear lock + snapshot so next launch starts fresh.
             try
@@ -816,6 +915,7 @@ namespace CCPad
             _autosaveTimer.Tick += (_, _) => WriteRecoverySnapshot();
 
             _splitHost.LayoutChanged += ScheduleAutosave;
+            _splitHost.LayoutChanged += ScheduleTopRightAdjust; // re-reserve for new split panels
 
             // Initial snapshot so a crash before any layout change still recovers.
             WriteRecoverySnapshot();

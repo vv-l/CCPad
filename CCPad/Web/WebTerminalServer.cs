@@ -63,7 +63,8 @@ namespace CCPad.Web
             {
                 if (!autoIncrement || attempts >= MaxPortRetries)
                 {
-                    return (false, port, $"端口 {port} 已被占用" + (autoIncrement ? $"，尝试了 {MaxPortRetries} 个端口均失败" : ""));
+                    return (false, port, Localization.Loc.T("port_in_use", port)
+                        + (autoIncrement ? Localization.Loc.T("port_retry_failed", MaxPortRetries) : ""));
                 }
                 actualPort++;
                 attempts++;

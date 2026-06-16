@@ -2,8 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using CCPad.Localization;
 using CCPad.Settings;
 using CCPad.Terminal;
+using CCPad.Web;
 using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -40,10 +42,49 @@ namespace CCPad
             InitializeComponent();
             _projects = projects;
             RefreshProjectFlyout();
+            ApplyLocalizedChrome();
 
             ApplyTabHeight(TabHeightManager.Height);
             TabHeightManager.Changed += OnSharedTabHeightChanged;
-            Unloaded += (_, _) => TabHeightManager.Changed -= OnSharedTabHeightChanged;
+            Loc.LanguageChanged += OnLanguageChanged;
+            Unloaded += (_, _) =>
+            {
+                TabHeightManager.Changed -= OnSharedTabHeightChanged;
+                Loc.LanguageChanged -= OnLanguageChanged;
+            };
+        }
+
+        private void OnLanguageChanged()
+        {
+            try
+            {
+                RefreshProjectFlyout();
+                ApplyLocalizedChrome();
+            }
+            catch { }
+        }
+
+        /// <summary>Localize the static tab-strip chrome (project button + resize handle).</summary>
+        private void ApplyLocalizedChrome()
+        {
+            ProjectLabel.Text = Loc.T("btn_project");
+            ToolTipService.SetToolTip(ProjectButton, Loc.T("tip_project"));
+            ToolTipService.SetToolTip(ResizeHandle, Loc.T("tip_resize_tabs"));
+        }
+
+        /// <summary>Blank space reserved at the right of the tab strip for the global
+        /// WorkspaceButton overlay. Driven by MainWindow so it tracks the button's
+        /// actual (language-dependent) width.</summary>
+        public void SetWorkspaceReserve(double width)
+        {
+            WorkspaceReserve.Width = width < 0 ? 0 : width;
+        }
+
+        /// <summary>Natural width of the project button (for laying out the overlay beside it).</summary>
+        public double ProjectButtonDesiredWidth()
+        {
+            ProjectButton.Measure(new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity));
+            return ProjectButton.DesiredSize.Width;
         }
 
         // ── Tab-strip height sync + resize handle ───────────────────────
@@ -153,34 +194,34 @@ namespace CCPad
         {
             _tabCounter++;
             string mode = ResolveCliMode(cliMode);
-            string cmd = CliMode.BuildCommand(mode);
 
-            TerminalPane pane;
-            if (_prewarmedPane != null)
+            bool prewarmed = _prewarmedPane != null;
+            TerminalPane pane = _prewarmedPane ?? new TerminalPane();
+            if (prewarmed)
             {
-                pane = _prewarmedPane;
                 _prewarmedPane = null;
                 PrewarmHost.Children.Remove(pane);
+            }
 
-                WirePane(pane);
-                var item = CreateTabItem(projectName, workingDir, pane, mode);
+            // Inject per-pane CLI notifications (no-op if the local listener
+            // can't start). Claude uses --settings hooks; Codex uses a -c notify
+            // override routed through CCPad.exe --notify. Needs pane.PaneId, so
+            // the command is built after the pane is acquired.
+            string extra = mode == CliMode.Codex
+                ? CliNotify.PrepareCodexNotify(pane.PaneId)
+                : CliNotify.PrepareClaudeHooks(pane.PaneId);
+            string cmd = CliMode.BuildCommand(mode, extra);
 
-                Tabs.TabItems.Add(item);
-                Tabs.SelectedItem = item;
+            WirePane(pane);
+            var item = CreateTabItem(projectName, workingDir, pane, mode);
 
+            Tabs.TabItems.Add(item);
+            Tabs.SelectedItem = item;
+
+            if (prewarmed)
                 pane.LaunchSession(cmd, workingDir, focusOnReady: true, cliMode: mode);
-            }
             else
-            {
-                pane = new TerminalPane();
-                WirePane(pane);
-                var item = CreateTabItem(projectName, workingDir, pane, mode);
-
-                Tabs.TabItems.Add(item);
-                Tabs.SelectedItem = item;
-
                 await pane.InitializeAsync(cmd, workingDir, focusOnReady: true, cliMode: mode);
-            }
 
             PrewarmNextPane();
             TabsChanged?.Invoke();
@@ -219,19 +260,41 @@ namespace CCPad
             // Tag non-default CLI tabs so mixed Claude/Codex panes are visually distinguishable.
             string header = cliMode == CliMode.Codex ? $"{baseHeader} · Codex" : baseHeader;
             pane.Label = header;
+
+            // Header = status light + label. The raw header string lives on
+            // pane.Label (used for persistence), so swapping Header to a panel is safe.
+            var dot = new Microsoft.UI.Xaml.Shapes.Ellipse
+            {
+                Width = 8,
+                Height = 8,
+                Margin = new Thickness(0, 0, 7, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+                Fill = StatusBrush(PaneStatus.Waiting)
+            };
+            var headerPanel = new StackPanel { Orientation = Orientation.Horizontal };
+            headerPanel.Children.Add(dot);
+            headerPanel.Children.Add(new TextBlock
+            {
+                Text = header,
+                VerticalAlignment = VerticalAlignment.Center
+            });
+
             var item = new TabViewItem
             {
-                Header = header,
+                Header = headerPanel,
                 Content = pane,
                 IsClosable = true,
                 Height = TabHeightManager.Height
             };
 
+            pane.StatusChanged += p => OnPaneStatusChanged(p, item, dot);
+            pane.RevealRequested += () => RevealTab(item);
+
             var ctx = new MenuFlyout();
 
             var splitRight = new MenuFlyoutItem
             {
-                Text = "向右分屏",
+                Text = Loc.T("tab_split_right"),
                 Icon = new FontIcon { Glyph = "\uEA61" },
                 KeyboardAcceleratorTextOverride = "Alt+Shift+="
             };
@@ -239,7 +302,7 @@ namespace CCPad
 
             var splitDown = new MenuFlyoutItem
             {
-                Text = "向下分屏",
+                Text = Loc.T("tab_split_down"),
                 Icon = new FontIcon { Glyph = "\uE745" },
                 KeyboardAcceleratorTextOverride = "Alt+Shift+-"
             };
@@ -247,7 +310,7 @@ namespace CCPad
 
             var closeTab = new MenuFlyoutItem
             {
-                Text = "关闭标签页",
+                Text = Loc.T("tab_close"),
                 Icon = new FontIcon { Glyph = "\uE711" },
                 KeyboardAcceleratorTextOverride = "Ctrl+W"
             };
@@ -255,7 +318,7 @@ namespace CCPad
 
             var closeOthers = new MenuFlyoutItem
             {
-                Text = "关闭其他标签页",
+                Text = Loc.T("tab_close_others"),
                 Icon = new FontIcon { Glyph = "\uE89B" },
                 KeyboardAcceleratorTextOverride = "Ctrl+Shift+W"
             };
@@ -263,14 +326,14 @@ namespace CCPad
 
             var closeLeft = new MenuFlyoutItem
             {
-                Text = "关闭左侧标签页",
+                Text = Loc.T("tab_close_left"),
                 Icon = new FontIcon { Glyph = "\uE746" }
             };
             closeLeft.Click += (_, _) => CloseTabsToSide(item, left: true);
 
             var closeRight = new MenuFlyoutItem
             {
-                Text = "关闭右侧标签页",
+                Text = Loc.T("tab_close_right"),
                 Icon = new FontIcon { Glyph = "\uEA61" }
             };
             closeRight.Click += (_, _) => CloseTabsToSide(item, left: false);
@@ -285,6 +348,42 @@ namespace CCPad
 
             item.ContextFlyout = ctx;
             return item;
+        }
+
+        // ── Tab status light ────────────────────────────────────────────
+
+        private static readonly SolidColorBrush WorkingBrush =
+            new(Windows.UI.Color.FromArgb(255, 63, 185, 80));   // green  #3FB950
+        private static readonly SolidColorBrush WaitingBrush =
+            new(Windows.UI.Color.FromArgb(255, 227, 179, 65));  // amber  #E3B341
+        private static readonly SolidColorBrush DisconnectedBrush =
+            new(Windows.UI.Color.FromArgb(255, 248, 81, 73));   // red    #F85149
+
+        private static SolidColorBrush StatusBrush(PaneStatus status) => status switch
+        {
+            PaneStatus.Waiting => WaitingBrush,
+            PaneStatus.Disconnected => DisconnectedBrush,
+            _ => WorkingBrush,
+        };
+
+        private void OnPaneStatusChanged(TerminalPane pane, TabViewItem item, Microsoft.UI.Xaml.Shapes.Ellipse dot)
+        {
+            dot.Fill = StatusBrush(pane.Status);
+
+            // Toast only when a tab needs you and you're not already looking at it.
+            if (pane.Status == PaneStatus.Waiting && !IsTabActivelyVisible(item))
+                Notify.ToastService.ShowWaiting(pane.PaneId, pane.Label);
+        }
+
+        private bool IsTabActivelyVisible(TabViewItem item)
+            => App.IsMainWindowForeground() && ReferenceEquals(Tabs.SelectedItem, item);
+
+        private void RevealTab(TabViewItem item)
+        {
+            App.ActivateMainWindow();
+            Tabs.SelectedItem = item;
+            if (item.Content is TerminalPane pane)
+                pane.FocusTerminal();
         }
 
         private void CloseCurrentTab()
@@ -393,7 +492,7 @@ namespace CCPad
             // ── Default CLI toggle ──
             var defaultItem = new ToggleMenuFlyoutItem
             {
-                Text = $"默认: {CliMode.DisplayName(currentDefault)}",
+                Text = Loc.T("proj_default", CliMode.DisplayName(currentDefault)),
                 Icon = new FontIcon { Glyph = "\uE713" }, // settings gear
                 IsChecked = currentDefault == CliMode.Codex
             };
@@ -410,7 +509,7 @@ namespace CCPad
             // ── Quick-launch new tab in each CLI ──
             var newClaude = new MenuFlyoutItem
             {
-                Text = "新建 Claude 标签",
+                Text = Loc.T("proj_new_claude"),
                 Icon = new FontIcon { Glyph = "\uE756" }
             };
             newClaude.Click += async (_, _) => await AddNewTab(null, _defaultWorkingDir, CliMode.Claude);
@@ -418,7 +517,7 @@ namespace CCPad
 
             var newCodex = new MenuFlyoutItem
             {
-                Text = "新建 Codex 标签",
+                Text = Loc.T("proj_new_codex"),
                 Icon = new FontIcon { Glyph = "\uE756" }
             };
             newCodex.Click += async (_, _) => await AddNewTab(null, _defaultWorkingDir, CliMode.Codex);
@@ -438,15 +537,15 @@ namespace CCPad
                 };
                 item.Click += async (_, _) => await AddNewTab(entry.Name, entry.Path);
 
-                var openClaude = new MenuFlyoutItem { Text = "用 Claude 打开", Icon = new FontIcon { Glyph = "\uE756" } };
+                var openClaude = new MenuFlyoutItem { Text = Loc.T("proj_open_claude"), Icon = new FontIcon { Glyph = "\uE756" } };
                 openClaude.Click += async (_, _) => await AddNewTab(entry.Name, entry.Path, CliMode.Claude);
 
-                var openCodex = new MenuFlyoutItem { Text = "用 Codex 打开", Icon = new FontIcon { Glyph = "\uE756" } };
+                var openCodex = new MenuFlyoutItem { Text = Loc.T("proj_open_codex"), Icon = new FontIcon { Glyph = "\uE756" } };
                 openCodex.Click += async (_, _) => await AddNewTab(entry.Name, entry.Path, CliMode.Codex);
 
                 var openInExplorer = new MenuFlyoutItem
                 {
-                    Text = "打开项目目录",
+                    Text = Loc.T("proj_open_dir"),
                     Icon = new FontIcon { Glyph = "\uE838" }
                 };
                 openInExplorer.Click += (_, _) =>
@@ -468,7 +567,7 @@ namespace CCPad
 
                 var removeItem = new MenuFlyoutItem
                 {
-                    Text = $"移除 {entry.Name}",
+                    Text = Loc.T("proj_remove", entry.Name),
                     Icon = new FontIcon { Glyph = "\uE74D" }
                 };
                 removeItem.Click += (_, _) =>
@@ -494,7 +593,7 @@ namespace CCPad
 
             var addItem = new MenuFlyoutItem
             {
-                Text = "添加项目...",
+                Text = Loc.T("proj_add"),
                 Icon = new FontIcon { Glyph = "\uE710" }
             };
             addItem.Click += async (_, _) =>
@@ -539,7 +638,7 @@ namespace CCPad
                 {
                     var pane = tvi.Content as TerminalPane;
                     var dir = pane?.WorkingDir ?? _defaultWorkingDir;
-                    var rawHeader = tvi.Header?.ToString() ?? "";
+                    var rawHeader = pane?.Label ?? "";
                     // Strip the " · Codex" suffix appended by CreateTabItem so restore
                     // doesn't double-append it.
                     const string codexSuffix = " · Codex";

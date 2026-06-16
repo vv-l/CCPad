@@ -25,13 +25,22 @@ namespace CCPad.Settings
 
         /// <summary>
         /// Resolve a CLI mode to the actual command line passed to CreateProcess.
-        /// Codex uses --yolo (auto-approve / sandbox bypass).
+        /// Codex uses --yolo (auto-approve / sandbox bypass). <paramref name="extraArgs"/>
+        /// is appended verbatim (already quoted by the caller) — used to inject
+        /// the per-pane "--settings &lt;hooks.json&gt;" for Claude notifications.
         /// </summary>
-        public static string BuildCommand(string mode) => Normalize(mode) switch
+        public static string BuildCommand(string mode, string extraArgs = "") => Normalize(mode) switch
         {
-            Codex => ResolveLaunch("codex", "--yolo"),
-            _ => ResolveLaunch("claude", ""),
+            Codex => ResolveLaunch("codex", JoinArgs("--yolo", extraArgs)),
+            _ => ResolveLaunch("claude", extraArgs),
         };
+
+        private static string JoinArgs(string a, string b)
+        {
+            if (string.IsNullOrEmpty(b)) return a;
+            if (string.IsNullOrEmpty(a)) return b;
+            return a + " " + b;
+        }
 
         /// <summary>
         /// Walk %PATH% + %PATHEXT% to locate the launcher. If it's a batch

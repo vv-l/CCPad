@@ -24,14 +24,13 @@
             <FontIcon Glyph="&#xECC5;" FontSize="14" Foreground="#4CC2FF"/>
         </Button>
 
-        <!-- About button — global, bottom-right -->
+        <!-- About button — global, bottom-right. Always visible (no transparent
+             override) so the settings/notification toggles are discoverable. -->
         <DropDownButton x:Name="AboutButton"
                         HorizontalAlignment="Right" VerticalAlignment="Bottom"
                         Margin="0,0,8,8"
                         Padding="6"
-                        ToolTipService.ToolTip="关于"
-                        Background="Transparent"
-                        BorderBrush="Transparent">
+                        ToolTipService.ToolTip="关于 / 设置">
             <FontIcon Glyph="&#xE946;" FontSize="14"/>
             <DropDownButton.Flyout>
                 <MenuFlyout x:Name="AboutFlyout" Placement="TopEdgeAlignedRight"/>
@@ -47,7 +46,7 @@
                         >
             <StackPanel Orientation="Horizontal" Spacing="4">
                 <FontIcon Glyph="&#xE8F1;" FontSize="14"/>
-                <TextBlock Text="工作区" VerticalAlignment="Center" FontSize="12"/>
+                <TextBlock x:Name="WorkspaceLabel" Text="工作区" VerticalAlignment="Center" FontSize="12"/>
             </StackPanel>
             <DropDownButton.Flyout>
                 <MenuFlyout x:Name="WorkspaceFlyout" Placement="BottomEdgeAlignedRight"/>

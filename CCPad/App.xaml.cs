@@ -1,5 +1,7 @@
 ﻿using System;
 using System.IO;
+using System.Runtime.InteropServices;
+using CCPad.Localization;
 using Microsoft.UI;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
@@ -15,6 +17,41 @@ namespace CCPad
         public Window? MainWnd => _window;
         public string? StartupWorkingDir { get; private set; }
         public string? StartupWorkspaceFile { get; private set; }
+
+        [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        /// <summary>True when CCPad's window is the foreground OS window.</summary>
+        public static bool IsMainWindowForeground()
+        {
+            try
+            {
+                if ((Current as App)?._window is not { } w) return false;
+                var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(w);
+                return GetForegroundWindow() == hwnd;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>Bring CCPad's window to the foreground (toast-click target).</summary>
+        public static void ActivateMainWindow()
+        {
+            try
+            {
+                if ((Current as App)?._window is not { } w) return;
+                w.DispatcherQueue.TryEnqueue(() =>
+                {
+                    try
+                    {
+                        w.Activate();
+                        var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(w);
+                        SetForegroundWindow(hwnd);
+                    }
+                    catch { }
+                });
+            }
+            catch { }
+        }
 
         public App()
         {
@@ -48,6 +85,23 @@ namespace CCPad
         protected override void OnLaunched(LaunchActivatedEventArgs args)
         {
             var cmdArgs = Environment.GetCommandLineArgs();
+
+            // Lightweight notify helper spawned by Codex (notify=[...] config):
+            //   CCPad.exe --notify <paneId> <port> [<json-payload-codex-appends>]
+            // Forward the "your turn" nudge to the already-running CCPad listener
+            // and exit before any window is created. The trailing JSON arg Codex
+            // appends is ignored.
+            if (cmdArgs.Length > 3 && cmdArgs[1] == "--notify")
+            {
+                try
+                {
+                    if (int.TryParse(cmdArgs[3], out int notifyPort))
+                        Web.CliNotify.SendLocal(notifyPort, cmdArgs[2], "waiting");
+                }
+                catch { }
+                Environment.Exit(0);
+                return;
+            }
 
             if (cmdArgs.Length > 1 && cmdArgs[1] == "--unregister")
             {
@@ -88,8 +142,15 @@ namespace CCPad
                 catch { }
             }
 
+            // Resolve UI language (saved pref or OS) before any UI is built.
+            Loc.Init();
+
             // 每次启动自动注册右键菜单（幂等操作）
             try { RegisterContextMenu(); } catch { }
+
+            // Register the toast notifier early so background "waiting" nudges
+            // and their click-to-reveal activation work. Best-effort (unpackaged).
+            Notify.ToastService.EnsureRegistered();
 
             _window = new MainWindow();
 
@@ -112,6 +173,12 @@ namespace CCPad
             _window.Activate();
         }
 
+        /// <summary>Re-write the shell context-menu labels (e.g. after a language switch).</summary>
+        public static void ReRegisterContextMenu()
+        {
+            try { RegisterContextMenu(); } catch { }
+        }
+
         private static void RegisterContextMenu()
         {
             string exePath = Path.Combine(AppContext.BaseDirectory, "CCPad.exe");
@@ -121,7 +188,7 @@ namespace CCPad
             // 文件夹背景右键（在文件夹内空白处右键）
             using var bgKey = Registry.CurrentUser.CreateSubKey(
                 @"Software\Classes\Directory\Background\shell\CCPad");
-            bgKey.SetValue("", "在 CC Pad 中打开");
+            bgKey.SetValue("", Loc.T("shell_open"));
             bgKey.SetValue("Icon", iconValue);
             using var bgCmd = Registry.CurrentUser.CreateSubKey(
                 @"Software\Classes\Directory\Background\shell\CCPad\command");
@@ -130,7 +197,7 @@ namespace CCPad
             // 文件夹右键（右键点击文件夹）
             using var dirKey = Registry.CurrentUser.CreateSubKey(
                 @"Software\Classes\Directory\shell\CCPad");
-            dirKey.SetValue("", "在 CC Pad 中打开");
+            dirKey.SetValue("", Loc.T("shell_open"));
             dirKey.SetValue("Icon", iconValue);
             using var dirCmd = Registry.CurrentUser.CreateSubKey(
                 @"Software\Classes\Directory\shell\CCPad\command");
@@ -142,8 +209,8 @@ namespace CCPad
             extKey.SetValue("", "CCPad.Workspace");
             using var typeKey = Registry.CurrentUser.CreateSubKey(
                 @"Software\Classes\CCPad.Workspace");
-            typeKey.SetValue("", "CCPad 工作区");
-            typeKey.SetValue("FriendlyTypeName", "CCPad 工作区");
+            typeKey.SetValue("", Loc.T("shell_workspace_type"));
+            typeKey.SetValue("FriendlyTypeName", Loc.T("shell_workspace_type"));
             using var typeIcon = Registry.CurrentUser.CreateSubKey(
                 @"Software\Classes\CCPad.Workspace\DefaultIcon");
             typeIcon.SetValue("", iconValue);

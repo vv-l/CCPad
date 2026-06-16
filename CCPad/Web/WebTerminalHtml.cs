@@ -161,11 +161,11 @@ namespace CCPad.Web
     <div id="sidebar">
       <div id="sidebar-header">
         <span>CC Pad Remote</span>
-        <button onclick="toggleSidebar()" title="折叠">✕</button>
+        <button onclick="toggleSidebar()" title="{{CCPad.Localization.Loc.T("web_collapse")}}">✕</button>
       </div>
       <div id="session-list"></div>
     </div>
-    <button id="toggle-btn" onclick="toggleSidebar()" title="展开侧边栏">☰</button>
+    <button id="toggle-btn" onclick="toggleSidebar()" title="{{CCPad.Localization.Loc.T("web_expand")}}">☰</button>
     <div id="terminal-wrap">
       <div id="terminal"></div>
       <div id="status-bar">
@@ -265,7 +265,7 @@ namespace CCPad.Web
 
     function renderSessionList() {
       if (sessions.length === 0) {
-        sessionListEl.innerHTML = '<div class="no-sessions">没有活跃的终端会话</div>';
+        sessionListEl.innerHTML = '<div class="no-sessions">{{CCPad.Localization.Loc.T("web_no_sessions")}}</div>';
         return;
       }
       sessionListEl.innerHTML = sessions.map(s => `

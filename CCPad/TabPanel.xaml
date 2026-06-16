@@ -21,15 +21,16 @@
                 <StackPanel Orientation="Horizontal" Padding="0,0,8,0"
                             HorizontalAlignment="Right">
                     <!-- Reserves space for the global WorkspaceButton overlay declared in MainWindow.xaml,
-                         so tabs don't extend underneath it. -->
-                    <Grid Width="110"/>
+                         so tabs don't extend underneath it. Width is set at runtime to match the
+                         button's actual size (it grows with long localized labels). 0 when no workspace. -->
+                    <Grid x:Name="WorkspaceReserve" Width="0"/>
                     <DropDownButton x:Name="ProjectButton"
                                     ToolTipService.ToolTip="从项目启动新标签页"
                                     Padding="8,4"
                                     Margin="4,0">
                         <StackPanel Orientation="Horizontal" Spacing="4">
                             <FontIcon Glyph="&#xE8B7;" FontSize="14"/>
-                            <TextBlock Text="项目" VerticalAlignment="Center" FontSize="12"/>
+                            <TextBlock x:Name="ProjectLabel" Text="项目" VerticalAlignment="Center" FontSize="12"/>
                         </StackPanel>
                         <DropDownButton.Flyout>
                             <MenuFlyout x:Name="ProjectFlyout" Placement="BottomEdgeAlignedRight"/>

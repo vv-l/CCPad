@@ -11,6 +11,9 @@ using CCPad.Web;
 
 namespace CCPad
 {
+    /// <summary>Tab status-light state. Working=green, Waiting=amber, Disconnected=red.</summary>
+    public enum PaneStatus { Working, Waiting, Disconnected }
+
     public sealed partial class TerminalPane : UserControl, IDisposable
     {
         private string _command = "claude";
@@ -19,6 +22,10 @@ namespace CCPad
         private bool _disposed;
         private bool _awaitingRestart;
         private bool _inShell;
+        // Plain "claude --resume <id>" command for the current dropped-to-cmd
+        // state, or null when there's nothing to resume (not in shell / Codex /
+        // no session file). Used by the numpad-up recovery hotkey.
+        private string? _resumeCommand;
         private bool _ready;
         private bool _sessionPending;
         private bool _focusOnFirstOutput;
@@ -50,6 +57,37 @@ namespace CCPad
         public event Action? ClosePaneRequested;
         public event Action? PaneFocused;
         public event Action<double, double>? ContextMenuRequested;
+
+        /// <summary>Raised (on the UI thread) when the tab status light should change.</summary>
+        public event Action<TerminalPane>? StatusChanged;
+        /// <summary>Raised (on the UI thread) when a toast asks to reveal this pane's tab.</summary>
+        public event Action? RevealRequested;
+
+        // Resting state is Waiting (amber): a freshly-launched CLI is sitting at
+        // its prompt waiting for you. Green means the AI is actively working.
+        private PaneStatus _status = PaneStatus.Waiting;
+        public PaneStatus Status => _status;
+
+        private void SetStatus(PaneStatus status)
+        {
+            if (_status == status) return;
+            _status = status;
+            DispatcherQueue.TryEnqueue(() => StatusChanged?.Invoke(this));
+        }
+
+        /// <summary>Map a hook callback (waiting/working) to a status change.</summary>
+        private void OnCliNotify(string evt)
+        {
+            switch (evt)
+            {
+                case "waiting": SetStatus(PaneStatus.Waiting); break;
+                case "working": SetStatus(PaneStatus.Working); break;
+            }
+        }
+
+        /// <summary>Bring this pane's tab to the foreground (toast-click target).</summary>
+        public void RequestReveal()
+            => DispatcherQueue.TryEnqueue(() => RevealRequested?.Invoke());
 
         public bool IsPrewarmed => _ready;
         public string Command => _command;
@@ -107,7 +145,8 @@ namespace CCPad
                 CoreWebView2HostResourceAccessKind.Allow);
 
             _readyTcs = new TaskCompletionSource();
-            WebView.CoreWebView2.NavigateToString(TerminalHtml);
+            WebView.CoreWebView2.NavigateToString(
+                TerminalHtml.Replace("Auto Confirm (自动回车)", Localization.Loc.T("autoconfirm_title")));
             await _readyTcs.Task;
         }
 
@@ -160,6 +199,8 @@ namespace CCPad
             _session = null;
             _awaitingRestart = false;
             _inShell = false;
+            _resumeCommand = null;
+            SendShellMode(false);
             try
             {
                 _session = ConPtySession.Start(_command, _cols, _rows, _workingDir);
@@ -175,6 +216,12 @@ namespace CCPad
                     Session = _session
                 });
                 TerminalSessionRegistry.NotifyChanged();
+
+                // Notification wiring: Claude posts hook callbacks to CliNotify
+                // (per-pane hook file is injected at launch via --settings).
+                CliNotify.Register(PaneId, OnCliNotify);
+                Notify.ToastService.RegisterPane(PaneId, this);
+                SetStatus(PaneStatus.Waiting);
             }
             catch (Exception ex)
             {
@@ -267,13 +314,18 @@ namespace CCPad
                 // latest session file on disk ourselves and print the exact
                 // resume command, so recovery works even when Claude died hard.
                 _inShell = true;
+                SetStatus(PaneStatus.Disconnected);
+                // BuildExitBanner() also sets _resumeCommand as a side effect.
                 SendOutput(Encoding.UTF8.GetBytes(BuildExitBanner()));
+                SendShellMode(_resumeCommand != null);
                 _session?.SpawnProcess(ShellCommand, _workingDir);
             }
             else
             {
                 // The fallback shell exited too — offer to relaunch the CLI.
                 _inShell = false;
+                _resumeCommand = null;
+                SendShellMode(false);
                 _awaitingRestart = true;
                 TerminalSessionRegistry.Unregister(PaneId);
                 TerminalSessionRegistry.NotifyChanged();
@@ -292,21 +344,33 @@ namespace CCPad
         {
             const string head = "\r\n\x1b[90m[CLI exited — dropped to cmd. Type 'exit' to relaunch.]\x1b[0m\r\n";
 
-            // Codex has its own resume flow ("codex resume"); don't fake a claude command.
+            // Codex has its own resume flow ("codex resume"); don't fake a claude
+            // command. Leave _resumeCommand null so the numpad-up hotkey is inert.
+            _resumeCommand = null;
             if (string.Equals(CliMode, Settings.CliMode.Codex, StringComparison.OrdinalIgnoreCase))
                 return head;
+
+            // Re-attach the per-pane notification hooks (incl. SessionStart) so the
+            // resumed Claude — a child of the fallback cmd, invisible to our process
+            // tracking — drives the status light again. The banner display stays
+            // clean; only the typed/↑-recalled command carries the --settings arg.
+            string settings = CliNotify.ClaudeSettingsArg(PaneId);
+            string claude = settings.Length > 0 ? "claude " + settings : "claude";
 
             var id = FindLatestClaudeSessionId();
             if (id == null)
             {
                 // No session file found — still point the user at --continue.
+                _resumeCommand = claude + " --continue";
                 return head +
-                    "\x1b[36mResume the last conversation:\x1b[0m \x1b[33mclaude --continue\x1b[0m\r\n";
+                    "\x1b[36mResume the last conversation:\x1b[0m \x1b[33mclaude --continue\x1b[0m" +
+                    "  \x1b[90m(or press ↑)\x1b[0m\r\n";
             }
 
+            _resumeCommand = claude + " --resume " + id;
             return head +
                 "\x1b[36mResume this conversation:\x1b[0m \x1b[33mclaude --resume " + id + "\x1b[0m" +
-                "  \x1b[90m(or: claude --continue)\x1b[0m\r\n";
+                "  \x1b[90m(or: claude --continue, or press ↑)\x1b[0m\r\n";
         }
 
         /// <summary>
@@ -363,6 +427,16 @@ namespace CCPad
             DispatcherQueue.TryEnqueue(() => WebView.CoreWebView2?.PostWebMessageAsString(json));
         }
 
+        // Tell the xterm front-end whether we're in the dropped-to-cmd recovery
+        // state, so it knows to map numpad-↑ to a resume request (and to leave
+        // the key alone otherwise).
+        private void SendShellMode(bool resumeAvailable)
+        {
+            if (_disposed) return;
+            string json = $"{{\"type\":\"shellMode\",\"resume\":{(resumeAvailable ? "true" : "false")}}}";
+            DispatcherQueue.TryEnqueue(() => WebView.CoreWebView2?.PostWebMessageAsString(json));
+        }
+
         private void OnWebMessage(CoreWebView2 sender, CoreWebView2WebMessageReceivedEventArgs args)
         {
             if (_disposed) return;
@@ -388,7 +462,16 @@ namespace CCPad
                         if (_awaitingRestart && data == "\r")
                             StartSession();
                         else
+                        {
+                            // Only a real submit (Enter) means you handed the AI
+                            // work → clear the amber light optimistically; the next
+                            // hook re-asserts truth. Plain keystrokes, arrow keys,
+                            // mouse events, and focus-report sequences (ESC[I, sent
+                            // by xterm on tab switch) must NOT turn it green.
+                            if (_status == PaneStatus.Waiting && data.Contains('\r'))
+                                SetStatus(PaneStatus.Working);
                             _session?.WriteInput(data);
+                        }
                         break;
 
                     case "resize":
@@ -438,6 +521,20 @@ namespace CCPad
                         }
                         break;
 
+                    case "resumeHotkey":
+                        // ↑ pressed while dropped to cmd: type the resume command at
+                        // the prompt WITHOUT Enter, so you can eyeball it and run it
+                        // yourself. One-shot — drop the offer right after so a second
+                        // ↑ can't append a duplicate, and the relaunched CLI gets ↑
+                        // back to it normally.
+                        if (_inShell && _resumeCommand != null)
+                        {
+                            _session?.WriteInput(_resumeCommand);
+                            _resumeCommand = null;
+                            SendShellMode(false);
+                        }
+                        break;
+
                     case "autoConfirm":
                         _autoConfirm = doc.RootElement.GetProperty("enabled").GetBoolean();
                         _recentOutput = "";
@@ -472,6 +569,9 @@ namespace CCPad
             _loadedTcs?.TrySetCanceled();
             _readyTcs?.TrySetCanceled();
             _autoConfirmTimer?.Dispose();
+            CliNotify.Unregister(PaneId);
+            CliNotify.CleanupHooks(PaneId);
+            Notify.ToastService.UnregisterPane(PaneId);
             TerminalSessionRegistry.Unregister(PaneId);
             TerminalSessionRegistry.NotifyChanged();
             if (_session != null)
@@ -582,8 +682,20 @@ namespace CCPad
                   term.focus();
                 });
 
+                // True only while the CLI has dropped to cmd and a resume command
+                // is available; set by the 'shellMode' message from the host.
+                let shellResumeAvailable = false;
+
                 term.attachCustomKeyEventHandler(e => {
                   if (e.type !== 'keydown') return true;
+                  // ↑ (regular arrow or numpad-8 NumLock-off, both report
+                  // key === 'ArrowUp') in the dropped-to-cmd state → resume the
+                  // conversation. One-shot: the host disables this right after, so
+                  // once the CLI relaunches ↑ goes back to it normally.
+                  if (shellResumeAvailable && e.key === 'ArrowUp') {
+                    window.chrome.webview.postMessage(JSON.stringify({ type: 'resumeHotkey' }));
+                    return false;
+                  }
                   if (e.ctrlKey && !e.shiftKey && e.key === 'c') {
                     const sel = term.getSelection();
                     if (sel) {
@@ -663,6 +775,8 @@ namespace CCPad
                     const bytes = new Uint8Array(bin.length);
                     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
                     term.write(bytes);
+                  } else if (msg.type === 'shellMode') {
+                    shellResumeAvailable = !!msg.resume;
                   }
                 });
 

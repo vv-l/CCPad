@@ -14,6 +14,12 @@ namespace CCPad.Settings
 
         /// <summary>Chrome-style crash recovery: prompt to restore on next launch.</summary>
         public bool SessionRecoveryEnabled { get; set; } = true;
+
+        /// <summary>Pop a Windows toast when a background tab's CLI is waiting for input.</summary>
+        public bool NotifyToastEnabled { get; set; } = true;
+
+        /// <summary>UI language: "zh-Hans" / "en" / "zh-Hant". Empty = follow OS on first run.</summary>
+        public string Language { get; set; } = "";
     }
 
     [JsonSerializable(typeof(AppPrefs))]

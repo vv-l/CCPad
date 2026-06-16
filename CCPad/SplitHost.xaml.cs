@@ -112,6 +112,18 @@ namespace CCPad
 
         public void FocusActive() => _activePane.Panel.FocusCurrentTab();
 
+        /// <summary>Apply the same right-edge reserve to every panel's tab strip.</summary>
+        public void SetWorkspaceReserve(double width)
+            => ForEachPanel(_root, p => p.SetWorkspaceReserve(width));
+
+        /// <summary>Widest project button across all panels (they share one localized label).</summary>
+        public double MaxProjectButtonWidth()
+        {
+            double max = 0;
+            ForEachPanel(_root, p => max = Math.Max(max, p.ProjectButtonDesiredWidth()));
+            return max;
+        }
+
         // ── TabPanel factory ────────────────────────────────────────────
 
         private TabPanel CreateTabPanel()

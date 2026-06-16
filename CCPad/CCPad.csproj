@@ -21,9 +21,9 @@
     <Company>CCPad.dev</Company>
     <Authors>CC Pad</Authors>
     <Copyright>Copyright © 2026 CC Pad</Copyright>
-    <Version>1.0.6</Version>
-    <FileVersion>1.0.6.0</FileVersion>
-    <InformationalVersion>1.0.6</InformationalVersion>
+    <Version>1.1.0</Version>
+    <FileVersion>1.1.0.0</FileVersion>
+    <InformationalVersion>1.1.0</InformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>

@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <em>⚡ 这是 <a href="https://github.com/nuomiaa/CCPad">nuomiaa/CCPad</a> 的社区 fork —— 增加了 Codex CLI 支持、Chrome 式会话恢复、不死终端。基于 GPL-3.0 许可,原始版权归上游作者所有。详见<a href="#衍生版改动">衍生版改动</a>。</em>
+  <em>⚡ 这是 <a href="https://github.com/nuomiaa/CCPad">nuomiaa/CCPad</a> 的社区 fork —— 增加了 Codex CLI 支持、每标签状态指示灯与后台"该你了"通知、9 种语言可切换界面、Chrome 式会话恢复、不死终端。基于 GPL-3.0 许可,原始版权归上游作者所有。详见<a href="#衍生版改动">衍生版改动</a>。</em>
 </p>
 
 ---
@@ -31,12 +31,26 @@
 - **右键菜单集成** — 在资源管理器中右键任意文件夹即可在 CC Pad 中打开。
 - **文件关联** — 双击 `.ccpad-workspace` 文件直接打开。
 - **双 CLI(Claude + Codex)** *(fork)* — 同一窗口并排开 Claude 和 Codex 标签;可设默认 CLI,固定项目可用任一 CLI 打开。
+- **标签状态指示灯** *(fork)* — 每个标签上有一个彩色小圆点,一眼可知会话状态:**绿色** = AI 正在工作,**琥珀色** = 正在等你输入,**红色** = CLI 已退出。Claude(通过官方 hooks)和 Codex(通过其 `notify` 配置)都支持,不用来回切标签就知道哪个会话在等你。
+- **后台"该你了"通知** *(fork)* — 当后台标签里的会话开始等待你输入时,CC Pad 会弹出 Windows 通知;点击即可直接跳到那个标签。可在"关于"菜单中开关。
+- **多语言界面** *(fork)* — 界面语言可即时切换(无需重启):**English、简体中文、繁體中文、Deutsch、日本語、Français、한국어、Español、Italiano**。首次运行跟随 Windows 显示语言。覆盖应用界面、资源管理器右键菜单文案以及远程网页。
+- **一键恢复对话** *(fork)* — Claude 退出后,在提示符按 **↑** 即可预填精确的 `claude --resume <id>` 命令(确认后再回车),对话恢复后标签的红灯会变回琥珀色。
 - **会话恢复** *(fork)* — Chrome 式崩溃恢复(默认开启):异常退出后恢复标签和工作目录。
 - **不死终端** *(fork)* — CLI 退出后终端不再变死,自动落到同目录的 shell(保留滚动历史);按回车可重新启动 CLI。
 
 ## 截图
 
-![CC Pad — 多个 Claude Code 会话在分屏面板中并行运行](CCPad/Assets/Screenshot1.png)
+Claude Code 与 OpenAI Codex 在分屏中并排运行 —— 注意每个标签上的彩色状态指示灯:
+
+![CC Pad — Claude 与 Codex 会话在分屏中并排运行](CCPad/Assets/Screenshot1.png)
+
+从「项目」菜单可用任一 CLI 打开固定的项目:
+
+![CC Pad — 项目菜单中的「用 Claude 打开 / 用 Codex 打开」](CCPad/Assets/Screenshot2.png)
+
+「关于」菜单 —— 会话恢复、后台「该你了」通知,以及语言切换:
+
+![CC Pad — 关于菜单:会话恢复、通知与语言切换](CCPad/Assets/Screenshot3.png)
 
 ## 安装
 
@@ -134,7 +148,7 @@ CCPad/
 ├── App.xaml.cs              # 入口，启动逻辑，右键菜单注册
 ├── MainWindow.xaml.cs       # 窗口管理，工作区模式，更新 UI
 ├── SplitHost.xaml.cs        # 二叉分屏树布局引擎
-├── TabPanel.xaml.cs         # 标签页生命周期，项目菜单
+├── TabPanel.xaml.cs         # 标签页生命周期，项目菜单，状态指示灯
 ├── TerminalPane.xaml.cs     # WebView2 + xterm.js 宿主，会话注册
 ├── UpdateChecker.cs         # GitHub 发布检查器，自动更新
 ├── Terminal/
@@ -144,15 +158,20 @@ CCPad/
 │   ├── WebTerminalServer.cs # ASP.NET Core Kestrel HTTP/WebSocket 服务器
 │   ├── WebTerminalSession.cs# 远程镜像 WebSocket 处理器
 │   ├── TerminalSessionRegistry.cs # 会话追踪 + 输出环形缓冲区
+│   ├── CliNotify.cs         # 接收 Claude/Codex 回合信号的本地回环端点   [fork]
 │   └── WebTerminalHtml.cs   # 内嵌网页 UI（含 xterm.js）
+├── Notify/
+│   └── ToastService.cs      # 后台"该你了"Windows 通知                  [fork]
+├── Localization/
+│   └── Loc.cs               # 9 语言字符串表 + 即时切换                 [fork]
 ├── Controls/
 │   └── GridSplitter.cs      # 可拖拽分屏比例控件
 ├── Settings/
 │   ├── WorkspaceConfig.cs   # .ccpad-workspace 文件读写
 │   ├── ProjectConfig.cs     # 项目列表持久化
-│   ├── AppConfig.cs         # 应用偏好(默认 CLI、恢复开关)  [fork]
-│   ├── CliMode.cs           # Claude/Codex 解析 + cmd /c 包裹 [fork]
-│   └── SessionRecovery.cs   # 崩溃恢复快照                    [fork]
+│   ├── AppConfig.cs         # 应用偏好(默认 CLI、语言、开关)  [fork]
+│   ├── CliMode.cs           # Claude/Codex 解析 + cmd /c 包裹  [fork]
+│   └── SessionRecovery.cs   # 崩溃恢复快照                     [fork]
 └── Assets/
     └── xterm/               # xterm.js 终端模拟器
 ```
@@ -169,6 +188,16 @@ CCPad/
 ## 衍生版改动
 
 本项目是 [nuomiaa/CCPad](https://github.com/nuomiaa/CCPad) 的社区 fork(基于上游 **v1.0.2**)。本 fork 的改动:
+
+### v1.1.0
+
+- **标签状态指示灯** — 每个标签带一个彩色圆点反映会话状态:绿色(AI 工作中)、琥珀色(等你输入)、红色(CLI 已退出)。由 Claude 官方 hooks 和 Codex 的 `notify` 配置通过一个本地回环端点(`Web/CliNotify.cs`)驱动,是事件触发而非抓屏识别。
+- **后台"该你了"通知** — 当后台会话切换到"等待输入"时,CC Pad 弹出 Windows 通知(`Notify/ToastService.cs`);点击通知会聚焦到对应来源标签。可在"关于"菜单开关,状态存入应用偏好。
+- **一键恢复对话** — Claude 退出后,在提示符按 ↑ 即可预填解析好的 `claude --resume <id>` 命令供确认后提交;对话恢复后标签灯变回琥珀色。
+- **9 语言可切换界面** — English、简体中文、繁體中文、Deutsch、日本語、Français、한국어、Español、Italiano,通过自定义字符串表(`Localization/Loc.cs`)和 `LanguageChanged` 事件即时切换、无需重启。首次运行跟随 Windows 显示语言;选择覆盖应用界面、资源管理器右键菜单文案和远程网页,并存入应用偏好。
+- **右上角自适应布局** — 工作区/项目按钮以及标签栏预留区现在根据测量出的文案宽度自适应,不再用固定边距,使较长的本地化文案(如 "Espacio de trabajo"、"Projekte")不再溢出或被裁剪。版本号升到 1.1.0。
+
+### v1.0.x
 
 - **双 CLI(Claude + Codex)** — 同窗口混开 Claude/Codex 标签;按 PATH/PATHEXT 解析真实可执行文件,`.cmd`/`.bat` 用 `cmd /c` 包裹(修复 `codex.cmd` 的 "CreateProcess failed: 2");默认 CLI 偏好和每个标签的 CLI 类型在重启后保留。
 - **会话恢复** — Chrome 式崩溃恢复(默认开启);状态存于 `%LOCALAPPDATA%\CCPad\sessions\`;恢复标签和工作目录。

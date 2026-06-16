@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <em>⚡ A community fork of <a href="https://github.com/nuomiaa/CCPad">nuomiaa/CCPad</a> — adds Codex CLI support, Chrome-style session recovery, and a resilient terminal. Licensed under GPL-3.0; original copyright © the upstream authors. See <a href="#fork-changes">Fork Changes</a>.</em>
+  <em>⚡ A community fork of <a href="https://github.com/nuomiaa/CCPad">nuomiaa/CCPad</a> — adds Codex CLI support, per-tab status lights with background "your turn" notifications, a 9-language switchable UI, Chrome-style session recovery, and a resilient terminal. Licensed under GPL-3.0; original copyright © the upstream authors. See <a href="#fork-changes">Fork Changes</a>.</em>
 </p>
 
 ---
@@ -31,12 +31,26 @@
 - **Context Menu Integration** — Right-click any folder in Explorer to open it in CC Pad.
 - **File Association** — Double-click `.ccpad-workspace` files to open them directly.
 - **Dual-CLI (Claude + Codex)** *(fork)* — Run Claude and Codex tabs side by side in one window. Pick a default CLI; open any pinned project with either CLI.
+- **Tab Status Lights** *(fork)* — Each tab shows a colored dot at a glance: **green** = the AI is working, **amber** = it's waiting for your input, **red** = the CLI has exited. Works for both Claude (via official hooks) and Codex (via its `notify` config), so you always know which session needs you without switching tabs.
+- **Background "Your Turn" Notifications** *(fork)* — When a session in a background tab starts waiting for you, CC Pad pops a Windows toast; click it to jump straight to that tab. Toggle it from the About menu.
+- **Multi-Language UI** *(fork)* — Switch the interface language live (no restart) between **English, 简体中文, 繁體中文, Deutsch, 日本語, Français, 한국어, Español, Italiano**. First run follows your Windows display language. Covers the app UI, the Explorer right-click labels, and the remote web page.
+- **One-Key Conversation Resume** *(fork)* — After Claude exits, press **↑** at the prompt to pre-fill the exact `claude --resume <id>` command (reviewed before you hit Enter), and the tab's red dot flips back to amber once the conversation is restored.
 - **Session Recovery** *(fork)* — Chrome-style crash recovery (on by default): after an unexpected exit, restore your tabs and working directories.
 - **Resilient Terminal** *(fork)* — When the CLI exits, the terminal drops into a shell in the same directory (scrollback preserved) instead of dying; press Enter to relaunch the CLI.
 
 ## Screenshots
 
-![CC Pad — multiple Claude Code sessions in split panes](CCPad/Assets/Screenshot1.png)
+Claude Code and OpenAI Codex running side by side in split panes — note the colored status dot on each tab:
+
+![CC Pad — Claude and Codex sessions side by side in split panes](CCPad/Assets/Screenshot1.png)
+
+Open any pinned project with either CLI from the Projects menu:
+
+![CC Pad — Projects menu with "Open with Claude / Open with Codex"](CCPad/Assets/Screenshot2.png)
+
+The About menu — session recovery, background "your turn" notifications, and the language switcher:
+
+![CC Pad — About menu showing recovery, notifications, and the language switcher](CCPad/Assets/Screenshot3.png)
 
 ## Installation
 
@@ -134,7 +148,7 @@ CCPad/
 ├── App.xaml.cs              # Entry point, startup, context menu registration
 ├── MainWindow.xaml.cs       # Window management, workspace mode, update UI
 ├── SplitHost.xaml.cs        # Binary split-tree layout engine
-├── TabPanel.xaml.cs         # Tab lifecycle, project menu
+├── TabPanel.xaml.cs         # Tab lifecycle, project menu, status lights
 ├── TerminalPane.xaml.cs     # WebView2 + xterm.js host, session registration
 ├── UpdateChecker.cs         # GitHub release checker, auto-update
 ├── Terminal/
@@ -144,15 +158,20 @@ CCPad/
 │   ├── WebTerminalServer.cs # ASP.NET Core Kestrel HTTP/WebSocket server
 │   ├── WebTerminalSession.cs# WebSocket handler for remote mirroring
 │   ├── TerminalSessionRegistry.cs # Session tracking + output ring buffer
+│   ├── CliNotify.cs         # Loopback endpoint for Claude/Codex turn signals [fork]
 │   └── WebTerminalHtml.cs   # Embedded web UI with xterm.js
+├── Notify/
+│   └── ToastService.cs      # Background "your turn" Windows toasts        [fork]
+├── Localization/
+│   └── Loc.cs               # 9-language string table + live switching     [fork]
 ├── Controls/
 │   └── GridSplitter.cs      # Draggable split ratio control
 ├── Settings/
 │   ├── WorkspaceConfig.cs   # .ccpad-workspace file I/O
 │   ├── ProjectConfig.cs     # Project list persistence
-│   ├── AppConfig.cs         # App prefs (default CLI, recovery toggle)  [fork]
-│   ├── CliMode.cs           # Claude/Codex resolution + cmd /c wrapping [fork]
-│   └── SessionRecovery.cs   # Crash-recovery snapshots                  [fork]
+│   ├── AppConfig.cs         # App prefs (default CLI, language, toggles)  [fork]
+│   ├── CliMode.cs           # Claude/Codex resolution + cmd /c wrapping   [fork]
+│   └── SessionRecovery.cs   # Crash-recovery snapshots                    [fork]
 └── Assets/
     └── xterm/               # xterm.js terminal emulator
 ```
@@ -169,6 +188,16 @@ CCPad/
 ## Fork Changes
 
 This is a community fork of [nuomiaa/CCPad](https://github.com/nuomiaa/CCPad) (based on upstream **v1.0.2**). Changes made in this fork:
+
+### v1.1.0
+
+- **Tab status lights** — each tab carries a colored dot reflecting its session state: green (AI working), amber (waiting for your input), red (CLI exited). Driven by Claude's official hooks and Codex's `notify` config via a small loopback endpoint (`Web/CliNotify.cs`), so the signal is event-based rather than screen-scraped.
+- **Background "your turn" notifications** — when a backgrounded session transitions to "waiting for input", CC Pad raises a Windows toast (`Notify/ToastService.cs`); activating it focuses the originating tab. Toggleable from the About menu and persisted in app prefs.
+- **One-key conversation resume** — after Claude exits, pressing ↑ at the prompt pre-fills the resolved `claude --resume <id>` command for review before submission; the tab light returns to amber once the conversation resumes.
+- **9-language switchable UI** — English, 简体中文, 繁體中文, Deutsch, 日本語, Français, 한국어, Español, Italiano, switched live without restart through a custom string table (`Localization/Loc.cs`) and a `LanguageChanged` event. First run follows the Windows display language; the selection covers the app chrome, the Explorer context-menu labels, and the remote web page, and is persisted in app prefs.
+- **Adaptive top-right layout** — the Workspace/Projects buttons and the tab-strip reserve now size themselves from measured label widths instead of fixed margins, so long localized labels (e.g. "Espacio de trabajo", "Projekte") no longer overflow or clip. Version bumped to 1.1.0.
+
+### v1.0.x
 
 - **Dual-CLI (Claude + Codex)** — mixed Claude/Codex tabs in one window; PATH/PATHEXT executable resolution with `cmd /c` wrapping for `.cmd`/`.bat` (fixes `codex.cmd` "CreateProcess failed: 2"); default-CLI preference and per-tab CLI persisted across restarts.
 - **Session recovery** — Chrome-style crash recovery (default on); state under `%LOCALAPPDATA%\CCPad\sessions\`; restores tabs and working directories.

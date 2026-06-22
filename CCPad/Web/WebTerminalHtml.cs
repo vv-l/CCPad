@@ -200,9 +200,9 @@ namespace CCPad.Web
     let reconnectTimer = null, pongTimer = null;
 
     const term = new Terminal({
-      fontFamily: "'Cascadia Code', 'Cascadia Mono', Consolas, monospace",
+      fontFamily: "'Cascadia Code Light', 'Cascadia Code', 'Cascadia Mono', Consolas, monospace",
       fontSize: 14, lineHeight: 1.2,
-      theme: { background: '#0c0c0c' },
+      theme: { background: '#0c0c0c', foreground: '#c8c8c8', white: '#c8c8c8', brightWhite: '#c8c8c8' },
       cursorBlink: true, allowProposedApi: true
     });
     const fit = new FitAddon.FitAddon();

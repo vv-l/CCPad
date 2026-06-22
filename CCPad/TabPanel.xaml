@@ -15,8 +15,20 @@
             AddTabButtonClick="OnAddTab"
             TabCloseRequested="OnTabClose"
             SelectionChanged="OnTabSelectionChanged"
+            Background="#000000"
             HorizontalAlignment="Stretch"
             VerticalAlignment="Stretch">
+            <TabView.Resources>
+                <!-- 把标签栏整体改成黑色 -->
+                <SolidColorBrush x:Key="TabViewBackground" Color="#000000"/>
+                <SolidColorBrush x:Key="TabViewItemHeaderBackground" Color="#000000"/>
+                <SolidColorBrush x:Key="TabViewItemHeaderBackgroundSelected" Color="#2A2A2A"/>
+                <SolidColorBrush x:Key="TabViewItemHeaderBackgroundPointerOver" Color="#1A1A1A"/>
+                <SolidColorBrush x:Key="TabViewItemHeaderBackgroundPressed" Color="#2A2A2A"/>
+                <SolidColorBrush x:Key="TabViewItemHeaderForeground" Color="#CCCCCC"/>
+                <SolidColorBrush x:Key="TabViewItemHeaderForegroundSelected" Color="#FFFFFF"/>
+                <SolidColorBrush x:Key="TabViewItemHeaderForegroundPointerOver" Color="#FFFFFF"/>
+            </TabView.Resources>
             <TabView.TabStripFooter>
                 <StackPanel Orientation="Horizontal" Padding="0,0,8,0"
                             HorizontalAlignment="Right">

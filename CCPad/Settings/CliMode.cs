@@ -32,7 +32,7 @@ namespace CCPad.Settings
         public static string BuildCommand(string mode, string extraArgs = "") => Normalize(mode) switch
         {
             Codex => ResolveLaunch("codex", JoinArgs("--yolo", extraArgs)),
-            _ => ResolveLaunch("claude", extraArgs),
+            _ => ResolveLaunch("claude", JoinArgs("--permission-mode bypassPermissions", extraArgs)),
         };
 
         private static string JoinArgs(string a, string b)

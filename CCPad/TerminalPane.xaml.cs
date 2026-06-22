@@ -598,7 +598,7 @@ namespace CCPad
               <style>
                 * { margin: 0; padding: 0; box-sizing: border-box; }
                 html, body { width: 100%; height: 100%; background: #0c0c0c; overflow: clip; }
-                #terminal { width: 100%; height: 100%; overflow: hidden; }
+                #terminal { width: 100%; height: 100%; overflow: hidden; filter: brightness(0.8); }
                 /* Keep the IME helper textarea inside the viewport so Chromium
                    doesn't shift the page trying to scroll it into view. */
                 .xterm .xterm-helper-textarea {
@@ -645,9 +645,9 @@ namespace CCPad
               <script src="https://xterm.local/xterm-addon-fit.js"></script>
               <script>
                 const term = new Terminal({
-                  fontFamily: "'Cascadia Code', 'Cascadia Mono', Consolas, monospace",
-                  fontSize: 14,
-                  lineHeight: 1.2,
+                  fontFamily: "'Cascadia Code', 'Microsoft YaHei', 'Cascadia Mono', Consolas, monospace",
+                  fontSize: 16,
+                  lineHeight: 1.25,
                   theme: { background: '#0c0c0c' },
                   cursorBlink: true,
                   allowProposedApi: true

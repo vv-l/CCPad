@@ -76,6 +76,7 @@ namespace CCPad.Web
       flex: 1;
       overflow: hidden;
       height: 0; /* Important: allows flex to control height */
+      filter: brightness(0.8); /* 统一压暗所有文字（含 Claude 的真彩色白），减轻刺眼 */
     }
 
     /* Status bar — fixed height at bottom */
@@ -200,8 +201,8 @@ namespace CCPad.Web
     let reconnectTimer = null, pongTimer = null;
 
     const term = new Terminal({
-      fontFamily: "'Cascadia Code', 'Cascadia Mono', Consolas, monospace",
-      fontSize: 14, lineHeight: 1.2,
+      fontFamily: "'Cascadia Code', 'Microsoft YaHei', 'Cascadia Mono', Consolas, monospace",
+      fontSize: 16, lineHeight: 1.25,
       theme: { background: '#0c0c0c' },
       cursorBlink: true, allowProposedApi: true
     });

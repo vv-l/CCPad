@@ -3,18 +3,22 @@
     x:Class="CCPad.App"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:local="using:CCPad"
-    RequestedTheme="Dark">
+    xmlns:local="using:CCPad">
     <Application.Resources>
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
                 <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
                 <!-- Other merged dictionaries here -->
             </ResourceDictionary.MergedDictionaries>
-            <!-- 标签栏黑底白字：必须放进 ThemeDictionaries 才能盖过 XamlControlsResources。
-                 应用已设为 Dark 主题，因此 "Default" 字典生效；"Light" 一并写上以防回退。 -->
+
+            <!-- Theme-aware brushes. "Default" = dark (the all-black skin contributed
+                 in PR #1); "Light" = original look (transparent window so Mica shows,
+                 and the framework's default TabView colours via fall-through). The
+                 active dictionary follows the root element's RequestedTheme, which
+                 ThemeManager drives from the user's About-menu choice. -->
             <ResourceDictionary.ThemeDictionaries>
                 <ResourceDictionary x:Key="Default">
+                    <SolidColorBrush x:Key="WindowBackgroundBrush" Color="#000000"/>
                     <SolidColorBrush x:Key="TabViewBackground" Color="#000000"/>
                     <SolidColorBrush x:Key="TabViewItemHeaderBackground" Color="#000000"/>
                     <SolidColorBrush x:Key="TabViewItemHeaderBackgroundSelected" Color="#2A2A2A"/>
@@ -26,15 +30,7 @@
                     <SolidColorBrush x:Key="TabViewItemHeaderForegroundPressed" Color="#FFFFFF"/>
                 </ResourceDictionary>
                 <ResourceDictionary x:Key="Light">
-                    <SolidColorBrush x:Key="TabViewBackground" Color="#000000"/>
-                    <SolidColorBrush x:Key="TabViewItemHeaderBackground" Color="#000000"/>
-                    <SolidColorBrush x:Key="TabViewItemHeaderBackgroundSelected" Color="#2A2A2A"/>
-                    <SolidColorBrush x:Key="TabViewItemHeaderBackgroundPointerOver" Color="#1A1A1A"/>
-                    <SolidColorBrush x:Key="TabViewItemHeaderBackgroundPressed" Color="#2A2A2A"/>
-                    <SolidColorBrush x:Key="TabViewItemHeaderForeground" Color="#FFFFFF"/>
-                    <SolidColorBrush x:Key="TabViewItemHeaderForegroundSelected" Color="#FFFFFF"/>
-                    <SolidColorBrush x:Key="TabViewItemHeaderForegroundPointerOver" Color="#FFFFFF"/>
-                    <SolidColorBrush x:Key="TabViewItemHeaderForegroundPressed" Color="#FFFFFF"/>
+                    <SolidColorBrush x:Key="WindowBackgroundBrush" Color="Transparent"/>
                 </ResourceDictionary>
             </ResourceDictionary.ThemeDictionaries>
         </ResourceDictionary>

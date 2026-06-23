@@ -145,6 +145,9 @@ namespace CCPad
             // Resolve UI language (saved pref or OS) before any UI is built.
             Loc.Init();
 
+            // Resolve the saved theme preference before the first window is built.
+            Settings.ThemeManager.Init();
+
             // 每次启动自动注册右键菜单（幂等操作）
             try { RegisterContextMenu(); } catch { }
 

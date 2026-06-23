@@ -20,6 +20,13 @@ namespace CCPad.Settings
 
         /// <summary>UI language: "zh-Hans" / "en" / "zh-Hant". Empty = follow OS on first run.</summary>
         public string Language { get; set; } = "";
+
+        /// <summary>App theme: "dark" (default — the all-black skin) / "light" (original look) / "system".</summary>
+        public string Theme { get; set; } = "dark";
+
+        /// <summary>Launch Claude with --permission-mode bypassPermissions (auto-approve, skip
+        /// permission prompts). Default on; users can turn it off in the About menu.</summary>
+        public bool BypassPermissions { get; set; } = true;
     }
 
     [JsonSerializable(typeof(AppPrefs))]

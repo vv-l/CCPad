@@ -37,7 +37,31 @@ namespace CCPad
             InitAboutMenu();
             ApplyLocalizedChrome();
             Loc.LanguageChanged += OnLanguageChanged;
+            RootContainer.ActualThemeChanged += OnActualThemeChanged;
+            ThemeManager.PrefChanged += OnThemePrefChanged;
             SessionRecovery.MarkRunning();
+        }
+
+        // ── Theme ────────────────────────────────────────────────────────
+        // Chrome (window background + tab strip) switches via XAML
+        // ThemeDictionaries keyed off RootContainer.RequestedTheme; terminals
+        // listen to ThemeManager.EffectiveChanged separately.
+
+        private void ApplyThemePref()
+        {
+            RootContainer.RequestedTheme = ThemeManager.ToElementTheme(ThemeManager.Pref);
+            // RequestedTheme.Default ("system") resolves to the OS theme; read the
+            // resolved value back so terminals dim/undim to match.
+            ThemeManager.SetEffective(RootContainer.ActualTheme == ElementTheme.Dark);
+        }
+
+        private void OnActualThemeChanged(FrameworkElement sender, object args)
+            => ThemeManager.SetEffective(sender.ActualTheme == ElementTheme.Dark);
+
+        private void OnThemePrefChanged()
+        {
+            ApplyThemePref();
+            InitAboutMenu(); // refresh the theme radio checks
         }
 
         private bool _initialized;
@@ -47,6 +71,8 @@ namespace CCPad
             if (_initialized) return;
             _initialized = true;
             RootGrid.Loaded -= OnRootLoaded;
+
+            ApplyThemePref();
 
             var app = Application.Current as App;
             var projects = ProjectConfig.Load();
@@ -447,6 +473,43 @@ namespace CCPad
                 AppConfig.Save(prefs);
             };
             AboutFlyout.Items.Add(notifyToggle);
+
+            var themeItem = new MenuFlyoutSubItem
+            {
+                Text = Loc.T("menu_theme"),
+                Icon = new FontIcon { Glyph = "" } // brightness / theme
+            };
+            foreach (var (value, locKey) in new[]
+                     {
+                         (ThemeManager.Dark, "theme_dark"),
+                         (ThemeManager.Light, "theme_light"),
+                         (ThemeManager.System, "theme_system"),
+                     })
+            {
+                var choice = value;
+                var themeChoice = new ToggleMenuFlyoutItem
+                {
+                    Text = Loc.T(locKey),
+                    IsChecked = ThemeManager.Pref == choice
+                };
+                themeChoice.Click += (_, _) => ThemeManager.SetPref(choice);
+                themeItem.Items.Add(themeChoice);
+            }
+            AboutFlyout.Items.Add(themeItem);
+
+            var bypassToggle = new ToggleMenuFlyoutItem
+            {
+                Text = Loc.T("menu_bypass_toggle"),
+                Icon = new FontIcon { Glyph = "" }, // warning
+                IsChecked = AppConfig.Load().BypassPermissions
+            };
+            bypassToggle.Click += (s, _) =>
+            {
+                var prefs = AppConfig.Load();
+                prefs.BypassPermissions = ((ToggleMenuFlyoutItem)s).IsChecked;
+                AppConfig.Save(prefs);
+            };
+            AboutFlyout.Items.Add(bypassToggle);
 
             AboutFlyout.Items.Add(new MenuFlyoutSeparator());
 
@@ -874,6 +937,7 @@ namespace CCPad
         private void OnWindowClosed(object sender, WindowEventArgs args)
         {
             Loc.LanguageChanged -= OnLanguageChanged;
+            ThemeManager.PrefChanged -= OnThemePrefChanged;
             if (_splitHost != null)
             {
                 try

@@ -172,6 +172,11 @@ namespace CCPad.Localization
             ["menu_clear_recovery"] = new[] { "清除会话恢复记录", "Clear session-recovery snapshot", "清除工作階段還原記錄", "Sitzungswiederherstellungs-Snapshot löschen", "セッション復元データを消去", "Effacer l'instantané de récupération de session", "세션 복원 스냅샷 지우기", "Borrar la instantánea de recuperación de sesión", "Cancella lo snapshot di ripristino sessione" },
             ["menu_notify_toggle"] = new[] { "后台等待时弹通知", "Notify when a background tab is waiting", "背景等待時彈出通知", "Benachrichtigen, wenn ein Hintergrund-Tab wartet", "バックグラウンドのタブが待機中に通知", "Notifier quand un onglet en arrière-plan attend", "백그라운드 탭이 대기 중일 때 알림", "Notificar cuando una pestaña en segundo plano está esperando", "Notifica quando una scheda in background è in attesa" },
             ["menu_language"] = new[] { "语言 / Language", "Language / 语言", "語言 / Language", "Sprache / Language", "言語 / Language", "Langue / Language", "언어 / Language", "Idioma / Language", "Lingua / Language" },
+            ["menu_theme"] = new[] { "主题", "Theme", "主題", "Design", "テーマ", "Thème", "테마", "Tema", "Tema" },
+            ["theme_dark"] = new[] { "深色", "Dark", "深色", "Dunkel", "ダーク", "Sombre", "어두운 테마", "Oscuro", "Scuro" },
+            ["theme_light"] = new[] { "浅色", "Light", "淺色", "Hell", "ライト", "Clair", "밝은 테마", "Claro", "Chiaro" },
+            ["theme_system"] = new[] { "跟随系统", "Follow system", "跟隨系統", "System folgen", "システムに従う", "Suivre le système", "시스템 설정 따르기", "Seguir el sistema", "Segui il sistema" },
+            ["menu_bypass_toggle"] = new[] { "跳过权限确认（危险）", "Skip permission prompts (risky)", "略過權限確認（危險）", "Berechtigungsabfragen überspringen (riskant)", "権限確認をスキップ（危険）", "Ignorer les confirmations d'autorisation (risqué)", "권한 확인 건너뛰기 (위험)", "Omitir confirmaciones de permiso (arriesgado)", "Salta le conferme di autorizzazione (rischioso)" },
 
             // ── Update ──
             ["update_latest"] = new[] { "当前已是最新版本 v{0}", "You're on the latest version (v{0})", "目前已是最新版本 v{0}", "Sie verwenden die neueste Version (v{0})", "最新バージョン (v{0}) を使用しています", "Vous utilisez la dernière version (v{0})", "최신 버전(v{0})을 사용 중입니다", "Estás en la última versión (v{0})", "Stai usando l'ultima versione (v{0})" },

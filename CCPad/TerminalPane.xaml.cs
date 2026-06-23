@@ -100,6 +100,17 @@ namespace CCPad
         {
             InitializeComponent();
             WebView.DefaultBackgroundColor = Windows.UI.Color.FromArgb(255, 12, 12, 12);
+            Settings.ThemeManager.EffectiveChanged += OnThemeEffectiveChanged;
+        }
+
+        // Dark-only terminal styling (CJK font / bigger size / dimmed text) is applied
+        // in the xterm front-end; push the resolved theme to it whenever it changes.
+        // (The initial state is baked into the HTML via __INITIAL_DARK__.)
+        private void OnThemeEffectiveChanged(bool dark)
+        {
+            if (_disposed) return;
+            string json = $"{{\"type\":\"theme\",\"dark\":{(dark ? "true" : "false")}}}";
+            DispatcherQueue.TryEnqueue(() => WebView.CoreWebView2?.PostWebMessageAsString(json));
         }
 
         /// <summary>
@@ -146,7 +157,8 @@ namespace CCPad
 
             _readyTcs = new TaskCompletionSource();
             WebView.CoreWebView2.NavigateToString(
-                TerminalHtml.Replace("Auto Confirm (自动回车)", Localization.Loc.T("autoconfirm_title")));
+                TerminalHtml.Replace("Auto Confirm (自动回车)", Localization.Loc.T("autoconfirm_title"))
+                            .Replace("__INITIAL_DARK__", Settings.ThemeManager.IsDark ? "true" : "false"));
             await _readyTcs.Task;
         }
 
@@ -566,6 +578,7 @@ namespace CCPad
         {
             if (_disposed) return;
             _disposed = true;
+            Settings.ThemeManager.EffectiveChanged -= OnThemeEffectiveChanged;
             _loadedTcs?.TrySetCanceled();
             _readyTcs?.TrySetCanceled();
             _autoConfirmTimer?.Dispose();
@@ -598,7 +611,7 @@ namespace CCPad
               <style>
                 * { margin: 0; padding: 0; box-sizing: border-box; }
                 html, body { width: 100%; height: 100%; background: #0c0c0c; overflow: clip; }
-                #terminal { width: 100%; height: 100%; overflow: hidden; filter: brightness(0.8); }
+                #terminal { width: 100%; height: 100%; overflow: hidden; }
                 /* Keep the IME helper textarea inside the viewport so Chromium
                    doesn't shift the page trying to scroll it into view. */
                 .xterm .xterm-helper-textarea {
@@ -657,6 +670,20 @@ namespace CCPad
                 term.loadAddon(fit);
                 term.open(document.getElementById('terminal'));
                 fit.fit();
+
+                /* ── Theme: CJK font + bigger size + dimmed text are dark-only ──
+                   The chrome theme is driven from C# (ThemeManager); this re-styles
+                   the xterm front-end to match, live, via the 'theme' web-message. */
+                const FONT_DARK = "'Cascadia Code', 'Microsoft YaHei', 'Cascadia Mono', Consolas, monospace";
+                const FONT_LIGHT = "'Cascadia Code', 'Cascadia Mono', Consolas, monospace";
+                function applyCcTheme(dark) {
+                  term.options.fontFamily = dark ? FONT_DARK : FONT_LIGHT;
+                  term.options.fontSize = dark ? 16 : 14;
+                  term.options.lineHeight = dark ? 1.25 : 1.2;
+                  document.getElementById('terminal').style.filter = dark ? 'brightness(0.8)' : '';
+                  fit.fit();
+                }
+                applyCcTheme(__INITIAL_DARK__);
 
                 /* ── Ctrl+wheel font-size zoom (replaces WebView2 native page zoom) ── */
                 const FONT_MIN = 8, FONT_MAX = 40, FONT_DEFAULT = 14;
@@ -777,6 +804,8 @@ namespace CCPad
                     term.write(bytes);
                   } else if (msg.type === 'shellMode') {
                     shellResumeAvailable = !!msg.resume;
+                  } else if (msg.type === 'theme') {
+                    applyCcTheme(!!msg.dark);
                   }
                 });
 

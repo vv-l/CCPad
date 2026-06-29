@@ -42,16 +42,15 @@ namespace CCPad
             SessionRecovery.MarkRunning();
         }
 
-        // ── Theme ────────────────────────────────────────────────────────
-        // Chrome (window background + tab strip) switches via XAML
-        // ThemeDictionaries keyed off RootContainer.RequestedTheme; terminals
-        // listen to ThemeManager.EffectiveChanged separately.
+        // ── Theme ───────────────────────────────────────────────────────────
+        // Chrome (window + tab strip) switches via XAML ThemeDictionaries keyed off
+        // RootContainer.RequestedTheme; terminals listen to ThemeManager separately.
 
         private void ApplyThemePref()
         {
             RootContainer.RequestedTheme = ThemeManager.ToElementTheme(ThemeManager.Pref);
-            // RequestedTheme.Default ("system") resolves to the OS theme; read the
-            // resolved value back so terminals dim/undim to match.
+            // ActualTheme resolves synchronously on a loaded element, so panes built
+            // right after this read the correct effective (dark/light) value.
             ThemeManager.SetEffective(RootContainer.ActualTheme == ElementTheme.Dark);
         }
 
@@ -72,6 +71,8 @@ namespace CCPad
             _initialized = true;
             RootGrid.Loaded -= OnRootLoaded;
 
+            // Apply the saved theme before any terminal panes are built below, so
+            // their initial xterm styling matches the effective dark/light value.
             ApplyThemePref();
 
             var app = Application.Current as App;
@@ -216,7 +217,70 @@ namespace CCPad
         private void OnActivated(object sender, WindowActivatedEventArgs e)
         {
             if (e.WindowActivationState != WindowActivationState.Deactivated)
+            {
                 _splitHost?.FocusActive();
+                RefreshStageButton();
+            }
+        }
+
+        // ── Bottom-right toggles (Auto / Staging) ────────────────────────
+
+        /// <summary>Toggle command-staging mode on the currently-active terminal.</summary>
+        private void OnStageButtonClick(object sender, RoutedEventArgs e)
+        {
+            // ToggleButton has already flipped IsChecked; IsChecked is the intent.
+            _splitHost?.ActiveTerminal?.SetStaging(StageButton.IsChecked == true);
+        }
+
+        /// <summary>Toggle auto-confirm (自动回车) on the currently-active terminal.</summary>
+        private void OnAutoButtonClick(object sender, RoutedEventArgs e)
+        {
+            _splitHost?.ActiveTerminal?.SetAutoConfirm(AutoButton.IsChecked == true);
+        }
+
+        /// <summary>Sync the toggle visuals to the active terminal (called on focus / pane switch).</summary>
+        private void RefreshStageButton()
+        {
+            // Set IsChecked programmatically — only Click (not Checked/Unchecked)
+            // runs the toggle logic, so this won't feed back into the pane.
+            var t = _splitHost?.ActiveTerminal;
+            StageButton.IsChecked = t?.StagingOn == true;
+            AutoButton.IsChecked = t?.AutoConfirmOn == true;
+        }
+
+        // ── File manager panel (right-docked) ────────────────────────────
+
+        private string? _filePanelRootedDir;
+
+        /// <summary>Toggle the right-docked local file browser.</summary>
+        private void OnFilesButtonClick(object sender, RoutedEventArgs e)
+        {
+            if (FilesButton.IsChecked == true)
+            {
+                FilePanelCol.Width = new GridLength(320);
+                FilePanel.Visibility = Visibility.Visible;
+                var wd = _splitHost?.ActiveTerminal?.WorkingDir;
+                _filePanelRootedDir = wd;
+                FilePanel.SetRoot(wd);
+            }
+            else
+            {
+                FilePanel.Visibility = Visibility.Collapsed;
+                FilePanelCol.Width = new GridLength(0);
+            }
+        }
+
+        /// <summary>On tab/pane switch, re-root the browser to the active project dir —
+        /// only when that dir actually changed, so manual navigation isn't reset every
+        /// time focus returns to a terminal in the same project.</summary>
+        private void RefreshFilePanelRoot()
+        {
+            if (FilePanel.Visibility != Visibility.Visible) return;
+            var wd = _splitHost?.ActiveTerminal?.WorkingDir;
+            if (string.IsNullOrWhiteSpace(wd)) return;
+            if (string.Equals(wd, _filePanelRootedDir, StringComparison.OrdinalIgnoreCase)) return;
+            _filePanelRootedDir = wd;
+            FilePanel.SetRoot(wd);
         }
 
         // ── Workspace mode ───────────────────────────────────────────────
@@ -474,33 +538,36 @@ namespace CCPad
             };
             AboutFlyout.Items.Add(notifyToggle);
 
+            // Theme picker (dark = the all-black skin, light = original look, or follow OS)
             var themeItem = new MenuFlyoutSubItem
             {
                 Text = Loc.T("menu_theme"),
-                Icon = new FontIcon { Glyph = "" } // brightness / theme
+                Icon = new FontIcon { Glyph = "" } // Personalize
             };
-            foreach (var (value, locKey) in new[]
+            foreach (var (code, key) in new[]
                      {
                          (ThemeManager.Dark, "theme_dark"),
                          (ThemeManager.Light, "theme_light"),
                          (ThemeManager.System, "theme_system"),
                      })
             {
-                var choice = value;
+                var c = code;
                 var themeChoice = new ToggleMenuFlyoutItem
                 {
-                    Text = Loc.T(locKey),
-                    IsChecked = ThemeManager.Pref == choice
+                    Text = Loc.T(key),
+                    IsChecked = ThemeManager.Pref == c
                 };
-                themeChoice.Click += (_, _) => ThemeManager.SetPref(choice);
+                themeChoice.Click += (_, _) => ThemeManager.SetPref(c);
                 themeItem.Items.Add(themeChoice);
             }
             AboutFlyout.Items.Add(themeItem);
 
+            // Skip-permission-prompts toggle (default on — see CliMode.BuildCommand).
+            // Affects newly launched tabs; existing sessions keep their launch mode.
             var bypassToggle = new ToggleMenuFlyoutItem
             {
                 Text = Loc.T("menu_bypass_toggle"),
-                Icon = new FontIcon { Glyph = "" }, // warning
+                Icon = new FontIcon { Glyph = "" }, // unlock
                 IsChecked = AppConfig.Load().BypassPermissions
             };
             bypassToggle.Click += (s, _) =>
@@ -980,6 +1047,9 @@ namespace CCPad
 
             _splitHost.LayoutChanged += ScheduleAutosave;
             _splitHost.LayoutChanged += ScheduleTopRightAdjust; // re-reserve for new split panels
+            _splitHost.ActivePaneChanged += RefreshStageButton; // keep the staging toggle in sync
+            _splitHost.StagingChanged += RefreshStageButton;    // Alt+` hotkey re-syncs the button
+            _splitHost.ActivePaneChanged += RefreshFilePanelRoot; // follow active project dir
 
             // Initial snapshot so a crash before any layout change still recovers.
             WriteRecoverySnapshot();

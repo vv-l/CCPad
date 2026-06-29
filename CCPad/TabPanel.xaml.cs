@@ -179,6 +179,9 @@ namespace CCPad
                 pane.FocusTerminal();
         }
 
+        /// <summary>The TerminalPane shown in the currently-selected tab, or null.</summary>
+        public TerminalPane? CurrentPane => (Tabs.SelectedItem as TabViewItem)?.Content as TerminalPane;
+
         public void RefitAllTerminals()
         {
             foreach (var tab in Tabs.TabItems)
@@ -247,10 +250,13 @@ namespace CCPad
                     NavigateRequested?.Invoke(this, direction.Value);
             };
             pane.ClosePaneRequested += () => CloseRequested?.Invoke(this);
+            pane.StagingChanged += () => StagingChanged?.Invoke();
             pane.PaneFocused += () => Focused?.Invoke(this);
         }
 
         public event Action<TabPanel, Direction>? NavigateRequested;
+        /// <summary>Bubbled up when a pane toggles staging via the Alt+` hotkey.</summary>
+        public event Action? StagingChanged;
 
         private TabViewItem CreateTabItem(string? projectName, string? workingDir, TerminalPane pane, string cliMode)
         {

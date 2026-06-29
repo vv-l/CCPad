@@ -37,6 +37,9 @@
 - **One-Key Conversation Resume** *(fork)* — After Claude exits, press **↑** at the prompt to pre-fill the exact `claude --resume <id>` command (reviewed before you hit Enter), and the tab's red dot flips back to amber once the conversation is restored.
 - **Session Recovery** *(fork)* — Chrome-style crash recovery (on by default): after an unexpected exit, restore your tabs and working directories.
 - **Resilient Terminal** *(fork)* — When the CLI exits, the terminal drops into a shell in the same directory (scrollback preserved) instead of dying; press Enter to relaunch the CLI.
+- **File Manager** *(fork)* — A right-docked panel to browse the active session's project directory, toggled from the bottom-right toolbar.
+- **Command Staging** *(fork)* — Queue your next prompts while the AI is busy; CC Pad auto-sends them one at a time as soon as the session goes idle. Toggle it with the 寄存 button or ``Alt+` `` in a pane; `Alt+V` in the staging box saves a clipboard image to a PNG and queues its path (Claude attaches images by path).
+- **Switchable Theme** *(fork)* — Dark (the default all-black skin), Light (translucent Mica), or System (follows Windows) — switched live from the About menu.
 
 ## Screenshots
 
@@ -164,6 +167,8 @@ CCPad/
 │   └── ToastService.cs      # Background "your turn" Windows toasts        [fork]
 ├── Localization/
 │   └── Loc.cs               # 9-language string table + live switching     [fork]
+├── Files/
+│   └── FileManagerPanel.xaml.cs # Right-docked project file browser        [fork]
 ├── Controls/
 │   └── GridSplitter.cs      # Draggable split ratio control
 ├── Settings/
@@ -171,6 +176,8 @@ CCPad/
 │   ├── ProjectConfig.cs     # Project list persistence
 │   ├── AppConfig.cs         # App prefs (default CLI, language, toggles)  [fork]
 │   ├── CliMode.cs           # Claude/Codex resolution + cmd /c wrapping   [fork]
+│   ├── AppPaths.cs          # Data-root resolver (CCPAD_DATA_DIR override) [fork]
+│   ├── ThemeManager.cs      # Dark/Light/System theme state + events      [fork]
 │   └── SessionRecovery.cs   # Crash-recovery snapshots                    [fork]
 └── Assets/
     └── xterm/               # xterm.js terminal emulator
@@ -188,6 +195,15 @@ CCPad/
 ## Fork Changes
 
 This is a community fork of [nuomiaa/CCPad](https://github.com/nuomiaa/CCPad) (based on upstream **v1.0.2**). Changes made in this fork:
+
+### v1.4.0
+
+- **File manager panel** — a right-docked file browser for the active session's project directory, toggled by the new **文件** button in the bottom-right cluster (`Files/FileManagerPanel.xaml`).
+- **Command staging mode** — queue your next prompts while the AI is still working; CC Pad auto-sends them one at a time as soon as the session goes idle. Toggle it with the **寄存** button or ``Alt+` `` inside a pane. ``Alt+V`` in the staging box reads a clipboard image, saves it as a PNG under the temp folder, and queues its path (Claude Code attaches images referenced by path), since the staging input can't see the CLI's own clipboard read.
+- **Smarter status lights** — the amber "your turn" light now self-corrects against stale hook signals: a hook can flip a pane to *waiting* mid-turn, so CC Pad only keeps it amber once output has gone quiet (a still-working CLI redraws its spinner continuously, which holds the light green). A fatal API-error banner (e.g. `API Error: 529 Overloaded`, 402 billing, 403 auth) now forces a **red** light and holds it across the turn-ending hook, even though the CLI stays alive at its prompt, until you retry.
+- **Switchable theme (Dark / Light / System)** — the all-black skin is now a choice in the About menu; Light restores the translucent Mica look and System follows Windows. The chrome switches through XAML `ThemeDictionaries` (`App.xaml`) while the terminal panes re-style their xterm front-end live via `Settings/ThemeManager.cs`.
+- **Isolated data directory** — set the `CCPAD_DATA_DIR` environment variable to give a second instance (a dev/demo build launched alongside the real install) a fully separate profile — prefs, projects, crash-recovery snapshot, lock files, hooks and logs — so it never cross-contaminates production session state. All data-root paths now flow through `Settings/AppPaths.cs`.
+- **Bottom-right toolbar redesign** — a uniform **文件 / 回车 / 寄存 / 关于** button cluster (auto-confirm is now a first-class toggle button rather than a hidden switch). Version bumped to 1.4.0.
 
 ### v1.1.0
 

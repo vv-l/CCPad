@@ -5,16 +5,25 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:local="using:CCPad"
     mc:Ignorable="d"
     Title="CC Pad">
 
     <Grid x:Name="RootContainer" Background="{ThemeResource WindowBackgroundBrush}">
-        <Grid x:Name="RootGrid"/>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"/>
+            <!-- Right-docked file manager. Width 0 / collapsed when closed. -->
+            <ColumnDefinition x:Name="FilePanelCol" Width="0"/>
+        </Grid.ColumnDefinitions>
 
-        <!-- Update button — global, bottom-right, left of About -->
-        <Button x:Name="UpdateButton"
+        <Grid x:Name="RootGrid" Grid.Column="0"/>
+
+        <local:FileManagerPanel x:Name="FilePanel" Grid.Column="1" Visibility="Collapsed"/>
+
+        <!-- Update button — global, bottom-right, left of the toggle cluster -->
+        <Button x:Name="UpdateButton" Grid.Column="0"
                 HorizontalAlignment="Right" VerticalAlignment="Bottom"
-                Margin="0,0,58,9"
+                Margin="0,0,322,9"
                 Padding="6"
                 ToolTipService.ToolTip="检查更新"
                 Background="Transparent"
@@ -24,21 +33,66 @@
             <FontIcon Glyph="&#xECC5;" FontSize="14" Foreground="#4CC2FF"/>
         </Button>
 
-        <!-- About button — global, bottom-right. Always visible (no transparent
-             override) so the settings/notification toggles are discoverable. -->
-        <DropDownButton x:Name="AboutButton"
-                        HorizontalAlignment="Right" VerticalAlignment="Bottom"
-                        Margin="0,0,8,8"
-                        Padding="6"
-                        ToolTipService.ToolTip="关于 / 设置">
-            <FontIcon Glyph="&#xE946;" FontSize="14"/>
-            <DropDownButton.Flyout>
-                <MenuFlyout x:Name="AboutFlyout" Placement="TopEdgeAlignedRight"/>
-            </DropDownButton.Flyout>
-        </DropDownButton>
+        <!-- Bottom-right control cluster: [回车] [寄存] [关于]. Three uniform
+             buttons — same control footprint (plain Button shape, no chevron),
+             equal width/height, identical icon+label layout, tight spacing. -->
+        <StackPanel x:Name="BottomRightCluster" Grid.Column="0"
+                    Orientation="Horizontal" Spacing="4"
+                    HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                    Margin="0,0,8,8">
+            <ToggleButton x:Name="FilesButton"
+                          Width="74" Height="28" MinHeight="28" MinWidth="0"
+                          Padding="0" HorizontalContentAlignment="Center"
+                          VerticalContentAlignment="Center"
+                          ToolTipService.ToolTip="文件管理器：浏览当前项目目录"
+                          Click="OnFilesButtonClick">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <FontIcon Glyph="&#xE8B7;" FontSize="14"/>
+                    <TextBlock Text="文件" FontSize="14" VerticalAlignment="Center"/>
+                </StackPanel>
+            </ToggleButton>
+
+            <ToggleButton x:Name="AutoButton"
+                          Width="74" Height="28" MinHeight="28" MinWidth="0"
+                          Padding="0" HorizontalContentAlignment="Center"
+                          VerticalContentAlignment="Center"
+                          ToolTipService.ToolTip="自动回车：AI 弹出确认提示时自动替你按回车"
+                          Click="OnAutoButtonClick">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <FontIcon Glyph="&#xE8FB;" FontSize="14"/>
+                    <TextBlock Text="回车" FontSize="14" VerticalAlignment="Center"/>
+                </StackPanel>
+            </ToggleButton>
+
+            <ToggleButton x:Name="StageButton"
+                          Width="74" Height="28" MinHeight="28" MinWidth="0"
+                          Padding="0" HorizontalContentAlignment="Center"
+                          VerticalContentAlignment="Center"
+                          ToolTipService.ToolTip="命令寄存模式：输入先排队，会话空闲时自动逐条发送"
+                          Click="OnStageButtonClick">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <FontIcon Glyph="&#xE8FD;" FontSize="14"/>
+                    <TextBlock Text="寄存" FontSize="14" VerticalAlignment="Center"/>
+                </StackPanel>
+            </ToggleButton>
+
+            <Button x:Name="AboutButton"
+                    Width="74" Height="28" MinHeight="28" MinWidth="0"
+                    Padding="0" HorizontalContentAlignment="Center"
+                    VerticalContentAlignment="Center"
+                    ToolTipService.ToolTip="关于 / 设置">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <FontIcon Glyph="&#xE946;" FontSize="14"/>
+                    <TextBlock Text="关于" FontSize="14" VerticalAlignment="Center"/>
+                </StackPanel>
+                <Button.Flyout>
+                    <MenuFlyout x:Name="AboutFlyout" Placement="TopEdgeAlignedRight"/>
+                </Button.Flyout>
+            </Button>
+        </StackPanel>
 
         <!-- Workspace button — global, top-right, above all split panels -->
-        <DropDownButton x:Name="WorkspaceButton"
+        <DropDownButton x:Name="WorkspaceButton" Grid.Column="0"
                         HorizontalAlignment="Right" VerticalAlignment="Top"
                         Margin="0,7,100,0"
                         Padding="8,4"

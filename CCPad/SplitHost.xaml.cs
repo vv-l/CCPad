@@ -33,6 +33,16 @@ namespace CCPad
 
         public PaneNode ActivePane => _activePane;
 
+        /// <summary>The TerminalPane in the currently-active tab panel, if any.</summary>
+        public TerminalPane? ActiveTerminal => _activePane?.Panel?.CurrentPane;
+
+        /// <summary>Raised when the active pane changes (so chrome like the staging toggle can refresh).</summary>
+        public event Action? ActivePaneChanged;
+
+        /// <summary>Raised when any pane toggles staging via the Alt+` hotkey, so the
+        /// host toolbar button can re-sync.</summary>
+        public event Action? StagingChanged;
+
         // ── Initialization ──────────────────────────────────────────────
 
         public async Task InitializeFirstTab(string? projectName = null, string? workingDir = null)
@@ -138,6 +148,7 @@ namespace CCPad
             };
             panel.NavigateRequested += (src, dir) => NavigateFocus(dir);
             panel.TabsChanged += () => LayoutChanged?.Invoke();
+            panel.StagingChanged += () => StagingChanged?.Invoke();
             return panel;
         }
 
@@ -210,6 +221,7 @@ namespace CCPad
         private void SetActivePane(PaneNode node)
         {
             _activePane = node;
+            ActivePaneChanged?.Invoke();
         }
 
         private static void ForEachPanel(SplitNode node, Action<TabPanel> action)

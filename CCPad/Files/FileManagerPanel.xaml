@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="CCPad.FileManagerPanel"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:CCPad"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <Border BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+            BorderThickness="1,0,0,0"
+            Background="{ThemeResource LayerFillColorDefaultBrush}">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+
+            <!-- Toolbar: up / refresh / editable path -->
+            <Grid Grid.Row="0" Padding="6,6,6,2" ColumnSpacing="4">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <Button x:Name="UpButton" Grid.Column="0" Padding="6,4"
+                        ToolTipService.ToolTip="返回上一层" Click="OnUpClick">
+                    <FontIcon Glyph="&#xE74A;" FontSize="14"/>
+                </Button>
+                <Button x:Name="RefreshButton" Grid.Column="1" Padding="6,4"
+                        ToolTipService.ToolTip="刷新" Click="OnRefreshClick">
+                    <FontIcon Glyph="&#xE72C;" FontSize="14"/>
+                </Button>
+                <TextBox x:Name="PathBox" Grid.Column="2" VerticalAlignment="Center"
+                         FontSize="12" IsSpellCheckEnabled="False"
+                         ToolTipService.ToolTip="当前路径，回车跳转"
+                         KeyDown="OnPathKeyDown"/>
+            </Grid>
+
+            <!-- Search filter (current directory) -->
+            <TextBox x:Name="SearchBox" Grid.Row="1" Margin="6,2,6,4"
+                     FontSize="12" PlaceholderText="检索当前目录…"
+                     IsSpellCheckEnabled="False"
+                     TextChanged="OnSearchChanged"/>
+
+            <!-- Entry list -->
+            <ListView x:Name="EntryList" Grid.Row="2"
+                      SelectionMode="Single"
+                      DoubleTapped="OnItemDoubleTapped"
+                      RightTapped="OnItemRightTapped"
+                      KeyDown="OnListKeyDown">
+                <ListView.ItemContainerStyle>
+                    <Style TargetType="ListViewItem">
+                        <Setter Property="MinHeight" Value="0"/>
+                        <Setter Property="Padding" Value="8,3"/>
+                    </Style>
+                </ListView.ItemContainerStyle>
+                <ListView.ItemTemplate>
+                    <DataTemplate x:DataType="local:FileEntry">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <FontIcon Glyph="{x:Bind Glyph}" FontSize="15" Foreground="{x:Bind IconBrush}"/>
+                            <TextBlock Text="{x:Bind Name}" FontSize="13"
+                                       VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+                        </StackPanel>
+                    </DataTemplate>
+                </ListView.ItemTemplate>
+            </ListView>
+        </Grid>
+    </Border>
+</UserControl>

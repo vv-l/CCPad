@@ -15,9 +15,7 @@ namespace CCPad.Settings
     /// </summary>
     public static class SessionRecovery
     {
-        private static readonly string Dir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "CCPad", "sessions");
+        private static readonly string Dir = AppPaths.Sub("sessions");
 
         private static readonly string SnapshotFile = Path.Combine(Dir, "last-session.json");
         private static string LockFile => Path.Combine(Dir, $"running-{Environment.ProcessId}.lock");

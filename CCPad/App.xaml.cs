@@ -72,9 +72,7 @@ namespace CCPad
         {
             try
             {
-                var dir = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    "CCPad", "logs");
+                var dir = CCPad.Settings.AppPaths.Sub("logs");
                 Directory.CreateDirectory(dir);
                 var file = Path.Combine(dir, "startup-error.log");
                 File.AppendAllText(file, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {context}\n{ex}\n\n");

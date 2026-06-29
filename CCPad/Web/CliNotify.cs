@@ -39,9 +39,7 @@ namespace CCPad.Web
         // callers marshal to the dispatcher themselves.
         private static readonly ConcurrentDictionary<string, Action<string>> _handlers = new();
 
-        private static readonly string HookDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "CCPad", "hooks");
+        private static readonly string HookDir = CCPad.Settings.AppPaths.Sub("hooks");
 
         /// <summary>
         /// Ensure the listener is up. Idempotent and safe to call from any thread.

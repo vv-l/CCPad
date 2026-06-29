@@ -17,9 +17,7 @@ namespace CCPad.Settings
 
     public static class ProjectConfig
     {
-        private static readonly string ConfigDir = System.IO.Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "CCPad");
+        private static readonly string ConfigDir = AppPaths.Root;
 
         private static readonly string ConfigFile = System.IO.Path.Combine(ConfigDir, "projects.json");
 

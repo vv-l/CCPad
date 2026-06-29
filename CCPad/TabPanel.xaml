@@ -17,9 +17,6 @@
             SelectionChanged="OnTabSelectionChanged"
             HorizontalAlignment="Stretch"
             VerticalAlignment="Stretch">
-            <!-- Tab-strip colours come from the app-level ThemeDictionaries (App.xaml):
-                 black in Dark, framework default in Light. No inline brushes here, or
-                 they'd pin the strip black in both themes. -->
             <TabView.TabStripFooter>
                 <StackPanel Orientation="Horizontal" Padding="0,0,8,0"
                             HorizontalAlignment="Right">

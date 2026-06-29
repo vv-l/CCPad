@@ -35,9 +35,7 @@ namespace CCPad.Settings
 
     public static class AppConfig
     {
-        private static readonly string ConfigDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "CCPad");
+        private static readonly string ConfigDir = AppPaths.Root;
         private static readonly string ConfigFile = Path.Combine(ConfigDir, "prefs.json");
 
         private static AppPrefs? _cached;

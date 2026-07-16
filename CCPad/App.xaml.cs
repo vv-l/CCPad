@@ -80,6 +80,19 @@ namespace CCPad
             catch { }
         }
 
+        /// <summary>Lightweight diagnostics line (perf timings etc.) — logs\diag.log.</summary>
+        public static void LogDiag(string message)
+        {
+            try
+            {
+                var dir = CCPad.Settings.AppPaths.Sub("logs");
+                Directory.CreateDirectory(dir);
+                var file = Path.Combine(dir, "diag.log");
+                File.AppendAllText(file, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] {message}\n");
+            }
+            catch { }
+        }
+
         /// <summary>
         /// Claude Code hooks pipe a JSON payload (session_id, transcript_path, cwd…)
         /// to the hook command's stdin. Extract the session_id so the owning pane can

@@ -207,7 +207,7 @@ namespace CCPad
             string extra = mode == CliMode.Codex
                 ? CliNotify.PrepareCodexNotify(pane.PaneId)
                 : CliNotify.PrepareClaudeHooks(pane.PaneId);
-            string cmd = BuildLaunchCommand(mode, extra, resumeSessionId, pane, out bool resumed);
+            var (cmd, resumed) = await BuildLaunchCommandAsync(mode, extra, resumeSessionId, pane);
 
             var item = CreateTabItem(projectName, workingDir, pane, mode, tag);
 
@@ -233,34 +233,35 @@ namespace CCPad
         /// still-existing session ID was provided. Fresh Claude tabs get a UUID of our
         /// own via --session-id, so the snapshot always knows the conversation to
         /// resume; Codex assigns its own ID which is harvested at snapshot time.
-        /// <paramref name="resumed"/> reports whether the command actually resumes —
-        /// callers surface a notice when a requested resume silently fell back to a
-        /// fresh session (the saved conversation file no longer exists).
+        /// The returned <c>Resumed</c> flag reports whether the command actually
+        /// resumes — callers surface a notice when a requested resume silently fell
+        /// back to a fresh session (the saved conversation file no longer exists).
+        /// The session-exists checks walk the CLI's session directories on disk, so
+        /// they run on the thread pool to keep the UI thread free.
         /// </summary>
-        private static string BuildLaunchCommand(string mode, string extra, string? resumeSessionId, TerminalPane pane, out bool resumed)
+        private static async Task<(string Cmd, bool Resumed)> BuildLaunchCommandAsync(string mode, string extra, string? resumeSessionId, TerminalPane pane)
         {
-            resumed = false;
             if (mode == CliMode.Codex)
             {
-                if (resumeSessionId != null && CliSessions.CodexSessionExists(resumeSessionId))
+                if (resumeSessionId != null &&
+                    await Task.Run(() => CliSessions.CodexSessionExists(resumeSessionId)))
                 {
                     pane.SessionId = resumeSessionId;
-                    resumed = true;
-                    return CliMode.BuildResumeCommand(mode, resumeSessionId, extra);
+                    return (CliMode.BuildResumeCommand(mode, resumeSessionId, extra), true);
                 }
-                return CliMode.BuildCommand(mode, extra);
+                return (CliMode.BuildCommand(mode, extra), false);
             }
 
-            if (resumeSessionId != null && CliSessions.ClaudeSessionExists(resumeSessionId))
+            if (resumeSessionId != null &&
+                await Task.Run(() => CliSessions.ClaudeSessionExists(resumeSessionId)))
             {
                 pane.SessionId = resumeSessionId;
-                resumed = true;
-                return CliMode.BuildResumeCommand(mode, resumeSessionId, extra);
+                return (CliMode.BuildResumeCommand(mode, resumeSessionId, extra), true);
             }
 
             var sessionId = Guid.NewGuid().ToString();
             pane.SessionId = sessionId;
-            return CliMode.BuildCommand(mode, $"--session-id {sessionId}" + (extra.Length > 0 ? " " + extra : ""));
+            return (CliMode.BuildCommand(mode, $"--session-id {sessionId}" + (extra.Length > 0 ? " " + extra : "")), false);
         }
 
         /// <summary>Subscribe every pane→panel event, remembering each handler so
@@ -899,6 +900,8 @@ namespace CCPad
             var shot = ctx.FrozenShot;
             ctx.Busy = true;
             if (ctx.FrozenHint != null) ctx.FrozenHint.Text = Loc.T("frozen_restoring");
+            TerminalPane? acquired = null;
+            var watch = System.Diagnostics.Stopwatch.StartNew();
             try
             {
                 string mode = string.IsNullOrEmpty(state.CliMode) ? ResolveCliMode(null) : state.CliMode;
@@ -906,22 +909,55 @@ namespace CCPad
                 string? session = string.IsNullOrEmpty(state.SessionId) ? null : state.SessionId;
 
                 var (pane, prewarmed) = await AcquirePaneAsync();
+                acquired = pane;
+                long tAcquire = watch.ElapsedMilliseconds;
                 string extra = mode == CliMode.Codex
                     ? CliNotify.PrepareCodexNotify(pane.PaneId)
                     : CliNotify.PrepareClaudeHooks(pane.PaneId);
-                string cmd = BuildLaunchCommand(mode, extra, session, pane, out bool resumed);
-
-                ctx.Mode = mode;
-                AttachPane(item, ctx, pane);
-                item.Content = pane;
-                ctx.Dot.Fill = StatusBrush(PaneStatus.Waiting);
+                var (cmd, resumed) = await BuildLaunchCommandAsync(mode, extra, session, pane);
+                long tCmd = watch.ElapsedMilliseconds;
 
                 // Don't steal focus when thawing a background tab (batch unfreeze).
                 bool focus = ReferenceEquals(Tabs.SelectedItem, item);
-                if (prewarmed)
+
+                if (prewarmed && pane.IsReady)
+                {
+                    // Warm renderer: the page is already live, swap in immediately.
+                    ctx.Mode = mode;
+                    AttachPane(item, ctx, pane);
+                    item.Content = pane;
+                    ctx.Dot.Fill = StatusBrush(PaneStatus.Waiting);
                     pane.LaunchSession(cmd, dir, focusOnReady: focus, cliMode: mode);
+                }
                 else
-                    await pane.InitializeAsync(cmd, dir, focusOnReady: focus, cliMode: mode);
+                {
+                    // Cold renderer: boot the page invisibly inside PrewarmHost so
+                    // the frozen placeholder (screenshot + 正在恢复) stays on screen
+                    // until the terminal is genuinely ready — never a white pane.
+                    // The CLI starts in parallel inside InitializeAsync.
+                    PrewarmHost.Children.Add(pane);
+                    try
+                    {
+                        await pane.InitializeAsync(cmd, dir, focusOnReady: false, cliMode: mode);
+                    }
+                    finally
+                    {
+                        PrewarmHost.Children.Remove(pane);
+                    }
+                    if (!pane.IsReady)
+                        throw new InvalidOperationException("终端页面未能就绪（冷启动失败）。");
+
+                    ctx.Mode = mode;
+                    AttachPane(item, ctx, pane);
+                    item.Content = pane;
+                    ctx.Dot.Fill = StatusBrush(PaneStatus.Waiting);
+                    pane.Refit();
+                    if (focus)
+                        pane.FocusTerminal();
+                }
+                App.LogDiag($"thaw pane={pane.PaneId} warm={prewarmed && pane.IsReady} " +
+                            $"acquire={tAcquire}ms cmd={tCmd - tAcquire}ms init={watch.ElapsedMilliseconds - tCmd}ms " +
+                            $"total={watch.ElapsedMilliseconds}ms mode={mode} resumed={resumed}");
 
                 // The frozen conversation is gone from disk — a thaw must not
                 // LOOK like a successful resume.
@@ -934,15 +970,14 @@ namespace CCPad
             catch (Exception ex)
             {
                 App.LogStartupError("UnfreezeTab", ex);
-                // If the failure hit after AttachPane the tab is showing a dead,
-                // never-initialized pane and the frozen state has been cleared —
-                // rebuild the placeholder so the tab stays frozen and retryable
-                // instead of stranding a white unclickable pane.
-                if (item.Content is TerminalPane dead)
-                {
+                App.LogDiag($"thaw FAILED after {watch.ElapsedMilliseconds}ms: {ex.Message}");
+                // Rebuild the placeholder so the tab stays frozen and retryable
+                // instead of stranding a white unclickable pane. The acquired pane
+                // may or may not have been attached yet — dispose it either way
+                // (this also kills any CLI it already spawned).
+                if (item.Content is TerminalPane)
                     DetachPaneHooks(ctx);
-                    dead.Dispose();
-                }
+                acquired?.Dispose();
                 ctx.Pane = null;
                 ctx.FrozenState = state;
                 ctx.FrozenShot = shot;

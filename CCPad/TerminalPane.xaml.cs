@@ -30,6 +30,9 @@ namespace CCPad
         // no session file). Used by the numpad-up recovery hotkey.
         private string? _resumeCommand;
         private bool _ready;
+        /// <summary>True once the xterm page has reported in — the pane can be
+        /// shown without flashing an uninitialized (white) WebView2.</summary>
+        public bool IsReady => _ready;
         private bool _coreWired;   // one-time CoreWebView2 event/settings wiring done
         private bool _sessionPending;
         // CLI output that arrived before xterm reported ready (the session is now

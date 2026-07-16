@@ -7,7 +7,9 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-    <Grid>
+    <!-- Fixed dark backdrop: an uninitialized WebView2 renders as a hole showing
+         the theme background, which in light theme reads as a dead white pane. -->
+    <Grid Background="#0C0C0C">
         <WebView2 x:Name="WebView"
                   HorizontalAlignment="Stretch"
                   VerticalAlignment="Stretch" />

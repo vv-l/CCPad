@@ -19,11 +19,11 @@
         <Grid x:Name="ErrorOverlay" Visibility="Collapsed" Background="#0C0C0C">
             <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center"
                         Spacing="10" MaxWidth="460">
-                <TextBlock Text="终端页面异常" Foreground="#E05555" FontSize="15"
+                <TextBlock x:Name="ErrorTitle" Text="终端页面异常" Foreground="#E05555" FontSize="15"
                            HorizontalAlignment="Center"/>
                 <TextBlock x:Name="ErrorDetail" Foreground="#999999" FontSize="12"
                            TextWrapping="Wrap" TextAlignment="Center"/>
-                <Button Content="重试" HorizontalAlignment="Center" Click="OnRetryClick"/>
+                <Button x:Name="RetryButton" Content="重试" HorizontalAlignment="Center" Click="OnRetryClick"/>
             </StackPanel>
         </Grid>
     </Grid>

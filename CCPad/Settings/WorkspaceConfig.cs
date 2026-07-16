@@ -62,6 +62,14 @@ namespace CCPad.Settings
         /// entry pending auto-restore; unlike it, restoring goes through the
         /// crash-loop guard. Cleared once any launch consumes the pending set.</summary>
         public bool Crashed { get; set; }
+
+        // Optional metadata used by .ccpad-template files. Ordinary workspaces
+        // and recovery snapshots leave these unset and remain fully compatible.
+        public string TemplateId { get; set; } = "";
+        public string TemplateName { get; set; } = "";
+        public int TemplateOrder { get; set; }
+        public DateTime? TemplateCreatedAt { get; set; }
+        public DateTime? TemplateUpdatedAt { get; set; }
     }
 
     [JsonSerializable(typeof(WorkspaceEntry))]
@@ -75,6 +83,14 @@ namespace CCPad.Settings
     public static class WorkspaceConfig
     {
         public const string FileExtension = ".ccpad-workspace";
+        public const string TemplateExtension = ".ccpad-template";
+
+        public static bool IsWorkspaceOrTemplateFile(string path)
+            => path.EndsWith(FileExtension, StringComparison.OrdinalIgnoreCase)
+               || path.EndsWith(TemplateExtension, StringComparison.OrdinalIgnoreCase);
+
+        public static bool IsTemplateFile(string path)
+            => path.EndsWith(TemplateExtension, StringComparison.OrdinalIgnoreCase);
 
         // ── File-based workspace ──────────────────────────────────────
 
@@ -97,6 +113,28 @@ namespace CCPad.Settings
                 return true;
             }
             catch { return false; }
+        }
+
+        /// <summary>
+        /// Turn a freshly-created window snapshot into a reusable frozen template.
+        /// Layout, names, directories, tags and conversation IDs are preserved, but
+        /// every tab starts as a lightweight placeholder when the template is opened.
+        /// </summary>
+        public static void MarkAllTabsFrozen(WorkspaceEntry entry)
+        {
+            entry.RestoreOnLaunch = false;
+            entry.Crashed = false;
+            MarkNodeFrozen(entry.Layout);
+        }
+
+        private static void MarkNodeFrozen(LayoutNode? node)
+        {
+            if (node == null) return;
+            if (node.Tabs != null)
+                foreach (var tab in node.Tabs)
+                    tab.Frozen = true;
+            MarkNodeFrozen(node.First);
+            MarkNodeFrozen(node.Second);
         }
 
     }

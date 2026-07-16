@@ -213,7 +213,7 @@ namespace CCPad
                 var content = Windows.ApplicationModel.DataTransfer.Clipboard.GetContent();
                 if (!content.Contains(Windows.ApplicationModel.DataTransfer.StandardDataFormats.Bitmap))
                 {
-                    error = "剪贴板里没有图片";
+                    error = Localization.Loc.T("clip_no_image");
                 }
                 else
                 {
@@ -244,7 +244,7 @@ namespace CCPad
             }
             catch (Exception ex)
             {
-                error = "读取剪贴板图片失败";
+                error = Localization.Loc.T("clip_read_failed");
                 System.Diagnostics.Debug.WriteLine("StageImagePaste failed: " + ex);
             }
 
@@ -412,20 +412,40 @@ namespace CCPad
         /// Can be called while the pane sits in a hidden container. Safe to call
         /// again after a failure (retry button) — core wiring happens only once.
         /// </summary>
-        public async Task PrewarmAsync()
+        public async Task PrewarmAsync(TimeSpan? loadedTimeout = null)
         {
             if (!WebView.IsLoaded)
             {
-                _loadedTcs = new TaskCompletionSource();
+                var loadedTcs = _loadedTcs = new TaskCompletionSource(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
                 RoutedEventHandler? loaded = null;
                 loaded = (_, _) =>
                 {
                     if (loaded != null)
                         WebView.Loaded -= loaded;
-                    _loadedTcs?.TrySetResult();
+                    loadedTcs.TrySetResult();
                 };
                 WebView.Loaded += loaded;
-                await _loadedTcs.Task;
+                // Every caller parents the pane before initializing it (either in
+                // a selected tab or in PrewarmHost).  Loaded can nevertheless be
+                // lost when WinUI is simultaneously removing/re-parenting another
+                // WebView2.  This was the one remaining unbounded await in thaw:
+                // the placeholder stayed on "restoring" until CCPad restarted.
+                // Keep a default deadline even when the caller does not supply one.
+                var lt = loadedTimeout ?? TimeSpan.FromSeconds(5);
+                try
+                {
+                    if (await Task.WhenAny(loadedTcs.Task, Task.Delay(lt)) != loadedTcs.Task)
+                        throw new InvalidOperationException(Localization.Loc.T("pane_err_loaded"));
+                    await loadedTcs.Task;
+                }
+                finally
+                {
+                    // A timed-out pane is normally disposed by the caller.  Do not
+                    // leave a handler holding it alive if WinUI reports Loaded later.
+                    if (loaded != null)
+                        WebView.Loaded -= loaded;
+                }
             }
             if (_disposed) throw new ObjectDisposedException(nameof(TerminalPane));
 
@@ -434,7 +454,7 @@ namespace CCPad
             // permanent white pane that not even the ready timeout can catch.
             var ensure = WebView.EnsureCoreWebView2Async().AsTask();
             if (await Task.WhenAny(ensure, Task.Delay(15000)) != ensure)
-                throw new InvalidOperationException("WebView2 初始化超时（15 秒）。");
+                throw new InvalidOperationException(Localization.Loc.T("pane_err_wv_init", 15));
             await ensure;
             if (_disposed) throw new ObjectDisposedException(nameof(TerminalPane));
 
@@ -475,10 +495,37 @@ namespace CCPad
             _ready = false;
             _readyTcs = new TaskCompletionSource();
             WebView.CoreWebView2!.NavigateToString(
-                TerminalHtml
-                    .Replace("Auto Confirm (自动回车)", Localization.Loc.T("autoconfirm_title"))
+                LocalizeHtml(TerminalHtml)
                     .Replace("__INITIAL_DARK__", CCPad.Settings.ThemeManager.IsDark ? "true" : "false")
                     .Replace("__INITIAL_LASTCMD__", CCPad.Settings.LastCmdBarManager.IsOn ? "true" : "false"));
+        }
+
+        /// <summary>Swap the page's built-in zh-Hans UI text for the current language.
+        /// TerminalHtml is authored in zh-Hans; each literal below is unique in the
+        /// page source. Replacements that land inside JS single-quoted strings must
+        /// not contain an apostrophe (the en/zh-Hant columns are written to comply).</summary>
+        private static string LocalizeHtml(string html)
+        {
+            static string T(string key) => Localization.Loc.T(key);
+            return html
+                .Replace("Auto Confirm (自动回车)", T("autoconfirm_title"))
+                .Replace("点击复制全文 · Alt+L 关闭", T("lastcmd_title"))
+                .Replace("▸ 上一条", T("lastcmd_lbl"))
+                .Replace("已复制 ✓", T("lastcmd_copied"))
+                .Replace("等待中 · 进入等待自动发送", T("stage_status_waiting"))
+                .Replace("工作中 · 等它空闲", T("stage_status_working"))
+                .Replace("已断开 · 暂停发送", T("stage_status_disc"))
+                .Replace("＋ 批量导入", T("stage_bulk_toggle"))
+                .Replace("条待发", T("stage_queued"))
+                .Replace("队列为空 —— 在下面输入,回车逐条寄存", T("stage_empty"))
+                .Replace("输入命令,回车寄存(Shift+Enter 换行)", T("stage_input_ph"))
+                .Replace("批量导入:每行一条命令,空行忽略。粘贴一整段后点导入。", T("stage_bulk_ph"))
+                .Replace("导入队列", T("stage_bulk_import"))
+                .Replace(">取消<", ">" + T("cancel") + "<")
+                .Replace("寄存模式:输入排进队列,会话空闲时自动逐条发出。点✎或双击可编辑(编辑中暂停发送),Alt+V 贴图,Alt+` 退出寄存。", T("stage_hint"))
+                .Replace("编辑这条(双击文字也可)", T("js_edit_tip"))
+                .Replace("删除这条", T("js_del_tip"))
+                .Replace("没有图片", T("js_no_image"));
         }
 
         /// <summary>Await xterm's "ready" callback, bounded — an unbounded wait is
@@ -488,7 +535,7 @@ namespace CCPad
             var readyTask = _readyTcs!.Task;
             var winner = await Task.WhenAny(readyTask, Task.Delay(ReadyTimeoutMs));
             if (winner != readyTask)
-                throw new TimeoutException($"终端页面在 {ReadyTimeoutMs / 1000} 秒内未就绪。");
+                throw new TimeoutException(Localization.Loc.T("pane_err_ready", ReadyTimeoutMs / 1000));
             await readyTask;
         }
 
@@ -517,6 +564,7 @@ namespace CCPad
             DispatcherQueue.TryEnqueue(async () =>
             {
                 if (_disposed) return;
+                App.LogDiag($"webview2 ProcessFailed pane={PaneId} kind={args.ProcessFailedKind}");
                 switch (args.ProcessFailedKind)
                 {
                     case CoreWebView2ProcessFailedKind.RenderProcessExited:
@@ -529,18 +577,19 @@ namespace CCPad
                             NavigatePage();
                             await WaitForReadyAsync();
                             OnPageRecovered();
+                            App.LogDiag($"webview2 auto-recovered pane={PaneId}");
                         }
                         catch
                         {
                             if (!_disposed)
-                                ShowErrorOverlay($"渲染进程崩溃（{args.ProcessFailedKind}），自动恢复失败。会话进程仍在运行，点击重试重新加载页面。");
+                                ShowErrorOverlay(Localization.Loc.T("pane_err_render", args.ProcessFailedKind));
                         }
                         break;
 
                     default:
                         // Browser-process-level failure — reload alone can't fix it;
                         // let the retry button drive a full re-init attempt.
-                        ShowErrorOverlay($"WebView2 进程异常（{args.ProcessFailedKind}）。会话进程仍在运行，点击重试重新初始化。");
+                        ShowErrorOverlay(Localization.Loc.T("pane_err_process", args.ProcessFailedKind));
                         break;
                 }
             });
@@ -554,7 +603,7 @@ namespace CCPad
             if (_session != null)
             {
                 SendOutput(Encoding.UTF8.GetBytes(
-                    "\r\n\x1b[33m[终端页面已自动恢复；之前的滚动内容丢失，会话仍在运行]\x1b[0m\r\n"));
+                    "\r\n\x1b[33m" + Localization.Loc.T("pane_recovered") + "\x1b[0m\r\n"));
                 // Wiggle the pty size so full-screen CLIs repaint into the blank page.
                 _session.Resize(Math.Max(2, _cols - 1), _rows);
                 _session.Resize(_cols, _rows);
@@ -569,6 +618,8 @@ namespace CCPad
             DispatcherQueue.TryEnqueue(() =>
             {
                 if (_disposed) return;
+                ErrorTitle.Text = Localization.Loc.T("pane_error_title");
+                RetryButton.Content = Localization.Loc.T("retry");
                 ErrorDetail.Text = message;
                 ErrorOverlay.Visibility = Visibility.Visible;
             });
@@ -586,7 +637,7 @@ namespace CCPad
             catch (Exception ex)
             {
                 if (!_disposed)
-                    ShowErrorOverlay("重试失败：" + ex.Message);
+                    ShowErrorOverlay(Localization.Loc.T("pane_retry_failed", ex.Message));
             }
         }
 
@@ -631,7 +682,7 @@ namespace CCPad
             catch (Exception ex)
             {
                 if (_disposed) return;
-                ShowErrorOverlay("终端初始化失败：" + ex.Message);
+                ShowErrorOverlay(Localization.Loc.T("pane_init_failed", ex.Message));
             }
         }
 
@@ -1281,6 +1332,27 @@ namespace CCPad
         {
             if (_disposed || !_ready || WebView.CoreWebView2 == null) return;
             try { await WebView.CoreWebView2.ExecuteScriptAsync("fit.fit()"); } catch { }
+        }
+
+        /// <summary>
+        /// Force the native WebView2 surface to recompose after the pane was
+        /// re-homed to a different parent (warm-pane handoff, cross-panel tab
+        /// drag). A reparented WebView2 can keep painting its default background
+        /// — white — until the next visibility/size change, even though the page
+        /// inside is alive and answering pings; Refit alone is JS-side and can't
+        /// touch the native composition.
+        /// </summary>
+        public void NudgeRepaint(bool focusAfter = false)
+        {
+            if (_disposed) return;
+            WebView.Visibility = Visibility.Collapsed;
+            DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+            {
+                if (_disposed) return;
+                WebView.Visibility = Visibility.Visible;
+                Refit();
+                if (focusAfter) FocusTerminal();
+            });
         }
 
         public void Dispose()

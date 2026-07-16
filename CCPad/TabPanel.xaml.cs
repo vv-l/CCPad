@@ -23,6 +23,7 @@ namespace CCPad
         private List<TabState>? _pendingRestoreTabs;
         private int _pendingRestoreActiveIndex;
         private int _prewarmVersion;
+        private bool _allowFrozenPrewarm = true;
         private bool _disposed;
 
         public string? DefaultWorkingDir => _defaultWorkingDir;
@@ -175,18 +176,20 @@ namespace CCPad
 
         public void FocusCurrentTab()
         {
-            if (Tabs.SelectedItem is TabViewItem item && item.Content is TerminalPane pane)
+            if (Tabs.SelectedItem is TabViewItem item && CtxOf(item)?.Pane is TerminalPane pane)
                 pane.FocusTerminal();
         }
 
         /// <summary>The TerminalPane shown in the currently-selected tab, or null.</summary>
-        public TerminalPane? CurrentPane => (Tabs.SelectedItem as TabViewItem)?.Content as TerminalPane;
+        public TerminalPane? CurrentPane => Tabs.SelectedItem is TabViewItem item
+            ? CtxOf(item)?.Pane
+            : null;
 
         public void RefitAllTerminals()
         {
             foreach (var tab in Tabs.TabItems)
             {
-                if (tab is TabViewItem tvi && tvi.Content is TerminalPane pane)
+                if (tab is TabViewItem tvi && CtxOf(tvi)?.Pane is TerminalPane pane)
                     pane.Refit();
             }
         }
@@ -215,9 +218,18 @@ namespace CCPad
             Tabs.SelectedItem = item;
 
             if (prewarmed)
+            {
                 pane.LaunchSession(cmd, workingDir, focusOnReady: true, cliMode: mode);
+                // May be a pane re-homed from another panel (shared warm pool) —
+                // force a recompose so it can't sit on its default background.
+                DispatcherQueue.TryEnqueue(
+                    Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+                    () => pane.NudgeRepaint());
+            }
             else
+            {
                 await pane.InitializeAsync(cmd, workingDir, focusOnReady: true, cliMode: mode);
+            }
 
             // A restore that asked for a conversation which no longer exists must
             // not LOOK like a successful resume.
@@ -425,13 +437,19 @@ namespace CCPad
         }
 
         // ── Per-tab context ─────────────────────────────────────────────
-        // One TabCtx lives on every TabViewItem.Tag. Content is the live
-        // TerminalPane while running, or the frozen placeholder while frozen;
-        // the ctx tracks which, and owns the header widgets that must survive
-        // the pane being swapped out (status dot, tag badge, menu items).
+        // One TabCtx lives on every TabViewItem.Tag. TabViewItem.Content remains
+        // ContentHost for the whole tab lifetime; its child is the live pane or
+        // frozen placeholder. The ctx tracks which, and owns the header widgets
+        // that survive visual swaps (status dot, tag badge, menu items).
 
         private sealed class TabCtx
         {
+            public Grid ContentHost { get; } = new()
+            {
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                VerticalAlignment = VerticalAlignment.Stretch,
+                Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 12, 12, 12))
+            };
             public TerminalPane? Pane;          // null while frozen
             public TabState? FrozenState;       // null while live
             public Microsoft.UI.Xaml.Media.ImageSource? FrozenShot; // last screenshot, survives moves/thaw failures
@@ -461,13 +479,15 @@ namespace CCPad
                 ?? $"Terminal {_tabCounter}";
             var (item, tabCtx) = BuildTabItem(baseHeader, cliMode, tag);
             AttachPane(item, tabCtx, pane);
-            item.Content = pane;
+            SetTabVisual(tabCtx, pane);
             return item;
         }
 
         /// <summary>Chrome shared by live and frozen tabs: header (status dot +
         /// title + tag badge), context menu, and the TabCtx stored on item.Tag.
-        /// The caller sets Content (a pane via AttachPane, or a frozen placeholder).</summary>
+        /// The TabViewItem.Content is a stable Grid for the lifetime of the tab.
+        /// Callers replace only that Grid's child; swapping Content itself can leave
+        /// WinUI's selected-content presenter displaying the old visual indefinitely.</summary>
         private (TabViewItem Item, TabCtx Ctx) BuildTabItem(string baseHeader, string cliMode, string? tag)
         {
             var tabCtx = new TabCtx { HeaderBase = baseHeader, Mode = cliMode };
@@ -521,7 +541,8 @@ namespace CCPad
                 Header = headerPanel,
                 IsClosable = true,
                 Height = TabHeightManager.Height,
-                Tag = tabCtx
+                Tag = tabCtx,
+                Content = tabCtx.ContentHost
             };
 
             var ctx = new MenuFlyout();
@@ -617,6 +638,20 @@ namespace CCPad
 
             item.ContextFlyout = ctx;
             return (item, tabCtx);
+        }
+
+        /// <summary>
+        /// Replace the visual inside the tab's permanent host.  Keeping the
+        /// TabViewItem.Content identity stable avoids a WinUI TabView cache bug:
+        /// the model and CLI had thawed successfully, but the selected presenter
+        /// continued showing the old "restoring" placeholder until app restart.
+        /// </summary>
+        private static void SetTabVisual(TabCtx ctx, UIElement visual)
+        {
+            ctx.ContentHost.Children.Clear();
+            ctx.ContentHost.Children.Add(visual);
+            ctx.ContentHost.InvalidateMeasure();
+            ctx.ContentHost.InvalidateArrange();
         }
 
         /// <summary>Bind a live pane to a tab: label/tag mirror the ctx, and the
@@ -728,7 +763,7 @@ namespace CCPad
         {
             App.ActivateMainWindow();
             Tabs.SelectedItem = item;
-            if (item.Content is TerminalPane pane)
+            if (CtxOf(item)?.Pane is TerminalPane pane)
                 pane.FocusTerminal();
         }
 
@@ -743,7 +778,7 @@ namespace CCPad
             var toClose = Tabs.TabItems.Cast<TabViewItem>().Where(t => t != keep).ToList();
             foreach (var t in toClose)
             {
-                if (t.Content is TerminalPane pane)
+                if (CtxOf(t)?.Pane is TerminalPane pane)
                     pane.Dispose();
                 Tabs.TabItems.Remove(t);
             }
@@ -756,7 +791,7 @@ namespace CCPad
                 .Where((t, i) => left ? i < idx : i > idx).ToList();
             foreach (var t in toClose)
             {
-                if (t.Content is TerminalPane pane)
+                if (CtxOf(t)?.Pane is TerminalPane pane)
                     pane.Dispose();
                 Tabs.TabItems.Remove(t);
             }
@@ -770,7 +805,7 @@ namespace CCPad
                 CloseRequested?.Invoke(this);
                 return;
             }
-            if (item.Content is TerminalPane pane)
+            if (CtxOf(item)?.Pane is TerminalPane pane)
                 pane.Dispose();
             Tabs.TabItems.Remove(item);
             TabsChanged?.Invoke();
@@ -784,7 +819,7 @@ namespace CCPad
         private async void OnTabSelectionChanged(object sender, SelectionChangedEventArgs e)
         {
             TabsChanged?.Invoke();
-            if (Tabs.SelectedItem is TabViewItem item && item.Content is TerminalPane pane)
+            if (Tabs.SelectedItem is TabViewItem item && CtxOf(item)?.Pane is TerminalPane pane)
             {
                 // 等待 TabView 完成所有指针事件处理（PointerReleased）后再聚焦终端
                 await Task.Delay(50);
@@ -857,7 +892,7 @@ namespace CCPad
                 DetachPaneHooks(ctx);
                 ctx.FrozenState = state;
                 ctx.FrozenShot = shot;
-                item.Content = BuildFrozenPlaceholder(item, ctx, state, shot);
+                SetTabVisual(ctx, BuildFrozenPlaceholder(item, ctx, state, shot));
                 ctx.Dot.Fill = FrozenBrush;
                 pane.Dispose();
 
@@ -925,9 +960,15 @@ namespace CCPad
                     // Warm renderer: the page is already live, swap in immediately.
                     ctx.Mode = mode;
                     AttachPane(item, ctx, pane);
-                    item.Content = pane;
+                    SetTabVisual(ctx, pane);
                     ctx.Dot.Fill = StatusBrush(PaneStatus.Waiting);
                     pane.LaunchSession(cmd, dir, focusOnReady: focus, cliMode: mode);
+                    // The warm pane may have been re-homed from another panel's
+                    // PrewarmHost — recompose after the layout pass or it can
+                    // sit on its default background despite being alive.
+                    DispatcherQueue.TryEnqueue(
+                        Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+                        () => pane.NudgeRepaint());
                 }
                 else
                 {
@@ -945,15 +986,17 @@ namespace CCPad
                         PrewarmHost.Children.Remove(pane);
                     }
                     if (!pane.IsReady)
-                        throw new InvalidOperationException("终端页面未能就绪（冷启动失败）。");
+                        throw new InvalidOperationException(Loc.T("pane_err_cold"));
 
                     ctx.Mode = mode;
                     AttachPane(item, ctx, pane);
-                    item.Content = pane;
+                    SetTabVisual(ctx, pane);
                     ctx.Dot.Fill = StatusBrush(PaneStatus.Waiting);
-                    pane.Refit();
-                    if (focus)
-                        pane.FocusTerminal();
+                    // Booted hidden in PrewarmHost, now re-homed into the tab —
+                    // recompose after the layout pass.
+                    DispatcherQueue.TryEnqueue(
+                        Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+                        () => pane.NudgeRepaint(focusAfter: focus));
                 }
                 App.LogDiag($"thaw pane={pane.PaneId} warm={prewarmed && pane.IsReady} " +
                             $"acquire={tAcquire}ms cmd={tCmd - tAcquire}ms init={watch.ElapsedMilliseconds - tCmd}ms " +
@@ -975,13 +1018,13 @@ namespace CCPad
                 // instead of stranding a white unclickable pane. The acquired pane
                 // may or may not have been attached yet — dispose it either way
                 // (this also kills any CLI it already spawned).
-                if (item.Content is TerminalPane)
+                if (ctx.Pane != null)
                     DetachPaneHooks(ctx);
                 acquired?.Dispose();
                 ctx.Pane = null;
                 ctx.FrozenState = state;
                 ctx.FrozenShot = shot;
-                item.Content = BuildFrozenPlaceholder(item, ctx, state, shot);
+                SetTabVisual(ctx, BuildFrozenPlaceholder(item, ctx, state, shot));
                 ctx.Dot.Fill = FrozenBrush;
                 if (ctx.FrozenHint != null)
                     ctx.FrozenHint.Text = Loc.T("frozen_thaw_failed");
@@ -1078,7 +1121,7 @@ namespace CCPad
                 Tag = ctx.TagValue,
                 Frozen = true
             };
-            item.Content = BuildFrozenPlaceholder(item, ctx, ctx.FrozenState, null);
+            SetTabVisual(ctx, BuildFrozenPlaceholder(item, ctx, ctx.FrozenState, null));
             ctx.Dot.Fill = FrozenBrush;
             Tabs.TabItems.Add(item);
         }
@@ -1125,6 +1168,7 @@ namespace CCPad
 
         private bool ClaimFrozenPrewarm()
         {
+            if (!_allowFrozenPrewarm) return false;
             if (s_frozenPrewarmHolder != null && s_frozenPrewarmHolder != this)
                 return false;
             s_frozenPrewarmHolder = this;
@@ -1146,6 +1190,18 @@ namespace CCPad
             foreach (var child in PrewarmHost.Children.OfType<TerminalPane>().ToList())
                 child.Dispose();
             PrewarmHost.Children.Clear();
+        }
+
+        /// <summary>
+        /// Frozen-template windows should remain genuinely lightweight while all
+        /// tabs are frozen. Skip even the single app-wide warm WebView2 and pay
+        /// the cold-start cost only after the user chooses a tab to thaw.
+        /// </summary>
+        internal void DisableFrozenPrewarm()
+        {
+            _allowFrozenPrewarm = false;
+            ReleaseFrozenPrewarm();
+            DropPrewarm();
         }
 
         // ── Cross-panel tab drag ────────────────────────────────────────
@@ -1229,7 +1285,7 @@ namespace CCPad
             }
 
             DetachPaneHooks(ctx);
-            item.Content = null;
+            ctx.ContentHost.Children.Clear();
             source.Tabs.TabItems.Remove(item);
 
             _tabCounter++;
@@ -1237,14 +1293,14 @@ namespace CCPad
             if (pane != null)
             {
                 AttachPane(newItem, newCtx, pane);
-                newItem.Content = pane;
+                SetTabVisual(newCtx, pane);
                 newCtx.Dot.Fill = StatusBrush(pane.Status);
             }
             else if (frozen != null)
             {
                 newCtx.FrozenState = frozen;
                 newCtx.FrozenShot = shot;
-                newItem.Content = BuildFrozenPlaceholder(newItem, newCtx, frozen, shot);
+                SetTabVisual(newCtx, BuildFrozenPlaceholder(newItem, newCtx, frozen, shot));
                 newCtx.Dot.Fill = FrozenBrush;
             }
 
@@ -1273,17 +1329,14 @@ namespace CCPad
                 }
             }
 
-            // WebView2 keeps stale viewport metrics across a re-parent — refit
-            // after the layout pass settles (same trick as SplitHost.Rebuild).
+            // A re-parented WebView2 keeps stale viewport metrics AND can keep
+            // painting its default background until a visibility change —
+            // recompose after the layout pass settles.
             if (pane != null)
             {
                 DispatcherQueue.TryEnqueue(
                     Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
-                    () =>
-                    {
-                        pane.Refit();
-                        pane.FocusTerminal();
-                    });
+                    () => pane.NudgeRepaint(focusAfter: true));
             }
 
             source.TabsChanged?.Invoke();
@@ -1524,7 +1577,7 @@ namespace CCPad
                     continue;
                 }
 
-                var pane = tvi.Content as TerminalPane;
+                var pane = ctx?.Pane;
                 var dir = pane?.WorkingDir ?? _defaultWorkingDir;
                 var rawHeader = ctx?.HeaderBase ?? pane?.Label ?? "";
                 // Strip the " · Codex" suffix (present on pane.Label fallback) so
@@ -1663,7 +1716,7 @@ namespace CCPad
             PrewarmHost.Children.Clear();
             foreach (var tabItem in Tabs.TabItems)
             {
-                if (tabItem is TabViewItem tvi && tvi.Content is TerminalPane pane)
+                if (tabItem is TabViewItem tvi && CtxOf(tvi)?.Pane is TerminalPane pane)
                     pane.Dispose();
             }
         }

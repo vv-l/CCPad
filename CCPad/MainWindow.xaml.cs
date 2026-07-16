@@ -17,6 +17,8 @@ namespace CCPad
     {
         private SplitHost? _splitHost;
         private string? _currentWorkspaceFile;
+        private string? _openedTemplateFile;
+        private string? _openedTemplateName;
 
         private ReleaseInfo? _releaseInfo;
         private WebTerminalServer? _webServer;
@@ -48,6 +50,7 @@ namespace CCPad
             Closed += OnWindowClosed;
             InitAboutMenu();
             InitFreezeMenu();
+            WorkspaceFlyout.Opening += (_, _) => RefreshWorkspaceFlyout();
             ApplyLocalizedChrome();
             Loc.LanguageChanged += OnLanguageChanged;
             RootContainer.ActualThemeChanged += OnActualThemeChanged;
@@ -103,12 +106,23 @@ namespace CCPad
                     var ws = WorkspaceConfig.LoadFromFile(workspaceFile);
                     if (ws?.Layout != null)
                     {
+                        bool frozenTemplate = WorkspaceConfig.IsTemplateFile(workspaceFile);
+                        if (frozenTemplate)
+                            WorkspaceConfig.MarkAllTabsFrozen(ws);
                         _splitHost = SplitHost.RestoreFromLayout(ws.Layout, projects);
+                        if (frozenTemplate)
+                            _splitHost.DisableFrozenPrewarm();
                         RootGrid.Children.Add(_splitHost);
                         RestoreWindowSize(ws);
                         await _splitHost.InitializeTerminals();
 
-                        _currentWorkspaceFile = workspaceFile;
+                        _currentWorkspaceFile = frozenTemplate ? null : workspaceFile;
+                        _openedTemplateFile = frozenTemplate ? workspaceFile : null;
+                        _openedTemplateName = frozenTemplate
+                            ? (string.IsNullOrWhiteSpace(ws.TemplateName)
+                                ? System.IO.Path.GetFileNameWithoutExtension(workspaceFile)
+                                : ws.TemplateName)
+                            : null;
                         EnterWorkspaceMode();
                         Activated += OnActivated;
                         AttachAutosave();
@@ -170,6 +184,8 @@ namespace CCPad
                 try { RootGrid.Children.Clear(); } catch { }
                 _splitHost = null;
                 _currentWorkspaceFile = null;
+                _openedTemplateFile = null;
+                _openedTemplateName = null;
             }
 
             // Normal launch — fresh terminal, no workspace.
@@ -373,6 +389,22 @@ namespace CCPad
             saveAsItem.Click += async (_, _) => await SaveWorkspaceAs();
             WorkspaceFlyout.Items.Add(saveAsItem);
 
+            var saveTemplateItem = new MenuFlyoutItem
+            {
+                Text = Loc.T("template_save_new"),
+                Icon = new FontIcon { Glyph = "\uE74E" }
+            };
+            saveTemplateItem.Click += (_, _) => SaveNewFrozenTemplate();
+            WorkspaceFlyout.Items.Add(saveTemplateItem);
+
+            var templateLibrary = new MenuFlyoutSubItem
+            {
+                Text = Loc.T("template_library"),
+                Icon = new FontIcon { Glyph = "\uE8F1" }
+            };
+            PopulateFrozenTemplateMenu(templateLibrary);
+            WorkspaceFlyout.Items.Add(templateLibrary);
+
             var openItem = new MenuFlyoutItem
             {
                 Text = Loc.T("ws_open"),
@@ -382,12 +414,13 @@ namespace CCPad
             WorkspaceFlyout.Items.Add(openItem);
 
             // Current file info
-            if (_currentWorkspaceFile != null)
+            var displayedFile = _currentWorkspaceFile ?? _openedTemplateFile;
+            if (displayedFile != null)
             {
                 WorkspaceFlyout.Items.Add(new MenuFlyoutSeparator());
                 var infoItem = new MenuFlyoutItem
                 {
-                    Text = System.IO.Path.GetFileName(_currentWorkspaceFile),
+                    Text = _openedTemplateName ?? System.IO.Path.GetFileName(displayedFile),
                     Icon = new FontIcon { Glyph = "\uE8F1" },
                     IsEnabled = false
                 };
@@ -430,6 +463,8 @@ namespace CCPad
             }
 
             _currentWorkspaceFile = file.Path;
+            _openedTemplateFile = null;
+            _openedTemplateName = null;
             EnterWorkspaceMode();
         }
 
@@ -460,8 +495,246 @@ namespace CCPad
             if (WorkspaceConfig.SaveToFile(file.Path, snapshot))
             {
                 _currentWorkspaceFile = file.Path;
+                _openedTemplateFile = null;
+                _openedTemplateName = null;
                 EnterWorkspaceMode();
             }
+        }
+
+        private void SaveNewFrozenTemplate()
+        {
+            if (_splitHost == null) return;
+            var snapshot = CreateSnapshot();
+            FrozenTemplateStore.SaveNew(snapshot, Loc.T("template_default_prefix"));
+            RefreshWorkspaceFlyout();
+        }
+
+        private void PopulateFrozenTemplateMenu(MenuFlyoutSubItem menu)
+        {
+            var templates = FrozenTemplateStore.List();
+            if (templates.Count == 0)
+            {
+                menu.Items.Add(new MenuFlyoutItem
+                {
+                    Text = Loc.T("template_none"),
+                    IsEnabled = false
+                });
+            }
+
+            foreach (var template in templates)
+            {
+                var captured = template;
+                var itemMenu = new MenuFlyoutSubItem { Text = template.Name };
+
+                var openNew = new MenuFlyoutItem { Text = Loc.T("template_open_new") };
+                openNew.Click += (_, _) => LaunchFrozenTemplate(captured.Path);
+                itemMenu.Items.Add(openNew);
+
+                var restoreHere = new MenuFlyoutItem { Text = Loc.T("template_restore_current") };
+                restoreHere.Click += async (_, _) => await RestoreFrozenTemplateHere(captured);
+                itemMenu.Items.Add(restoreHere);
+                itemMenu.Items.Add(new MenuFlyoutSeparator());
+
+                var overwrite = new MenuFlyoutItem { Text = Loc.T("template_overwrite") };
+                overwrite.Click += async (_, _) => await OverwriteFrozenTemplate(captured);
+                itemMenu.Items.Add(overwrite);
+
+                var rename = new MenuFlyoutItem { Text = Loc.T("template_rename") };
+                rename.Click += async (_, _) => await RenameFrozenTemplate(captured);
+                itemMenu.Items.Add(rename);
+
+                var export = new MenuFlyoutItem { Text = Loc.T("template_export") };
+                export.Click += async (_, _) => await ExportFrozenTemplate(captured);
+                itemMenu.Items.Add(export);
+
+                var delete = new MenuFlyoutItem { Text = Loc.T("template_delete") };
+                delete.Click += async (_, _) => await DeleteFrozenTemplate(captured);
+                itemMenu.Items.Add(delete);
+
+                menu.Items.Add(itemMenu);
+            }
+
+            menu.Items.Add(new MenuFlyoutSeparator());
+            var import = new MenuFlyoutItem { Text = Loc.T("template_import") };
+            import.Click += async (_, _) => await ImportFrozenTemplate();
+            menu.Items.Add(import);
+        }
+
+        private void LaunchFrozenTemplate(string path)
+        {
+            try
+            {
+                var exe = System.IO.Path.Combine(AppContext.BaseDirectory, "CCPad.exe");
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = exe,
+                    UseShellExecute = true,
+                    WorkingDirectory = AppContext.BaseDirectory,
+                    ArgumentList = { path }
+                });
+            }
+            catch (Exception ex)
+            {
+                App.LogStartupError("OpenFrozenTemplateInNewProcess", ex);
+            }
+        }
+
+        private async System.Threading.Tasks.Task RestoreFrozenTemplateHere(FrozenTemplateStore.Item template)
+        {
+            if (template.Entry.Layout == null) return;
+            if (!await ConfirmTemplateAction(
+                    Loc.T("template_restore_title"),
+                    Loc.T("template_restore_body"),
+                    Loc.T("recovery_restore")))
+                return;
+
+            try
+            {
+                if (_splitHost != null)
+                {
+                    try
+                    {
+                        var current = CreateSnapshot();
+                        if (current.Layout != null)
+                            SessionRecovery.ArchiveClosed(current);
+                    }
+                    catch { }
+                    _splitHost.DisposeAll();
+                    RootGrid.Children.Remove(_splitHost);
+                }
+
+                _splitHost = SplitHost.RestoreFromLayout(template.Entry.Layout, ProjectConfig.Load());
+                _splitHost.DisableFrozenPrewarm();
+                RootGrid.Children.Add(_splitHost);
+                RestoreWindowSize(template.Entry);
+                await _splitHost.InitializeTerminals();
+
+                _currentWorkspaceFile = null;
+                _openedTemplateFile = template.Path;
+                _openedTemplateName = template.Name;
+                if (_autosaveSubscribed)
+                {
+                    SubscribeSplitHostEvents();
+                    WriteRecoverySnapshot();
+                }
+                EnterWorkspaceMode();
+            }
+            catch (Exception ex)
+            {
+                App.LogStartupError("RestoreFrozenTemplateHere", ex);
+            }
+        }
+
+        private async System.Threading.Tasks.Task OverwriteFrozenTemplate(FrozenTemplateStore.Item template)
+        {
+            if (_splitHost == null) return;
+            if (!await ConfirmTemplateAction(
+                    Loc.T("template_overwrite_title"),
+                    Loc.T("template_overwrite_body", template.Name),
+                    Loc.T("template_overwrite")))
+                return;
+            FrozenTemplateStore.Overwrite(template, CreateSnapshot());
+            RefreshWorkspaceFlyout();
+        }
+
+        private async System.Threading.Tasks.Task RenameFrozenTemplate(FrozenTemplateStore.Item template)
+        {
+            if (Content?.XamlRoot == null) return;
+            var input = new TextBox
+            {
+                Text = template.Name,
+                MinWidth = 320
+            };
+            input.Loaded += (_, _) =>
+            {
+                input.Focus(FocusState.Programmatic);
+                input.SelectAll();
+            };
+            var dialog = new ContentDialog
+            {
+                Title = Loc.T("template_rename"),
+                Content = input,
+                PrimaryButtonText = Loc.T("template_rename"),
+                CloseButtonText = Loc.T("cancel"),
+                DefaultButton = ContentDialogButton.Primary,
+                XamlRoot = Content.XamlRoot
+            };
+            try
+            {
+                if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+                {
+                    FrozenTemplateStore.Rename(template, input.Text);
+                    RefreshWorkspaceFlyout();
+                }
+            }
+            catch (Exception ex) { App.LogStartupError("RenameFrozenTemplate", ex); }
+        }
+
+        private async System.Threading.Tasks.Task ExportFrozenTemplate(FrozenTemplateStore.Item template)
+        {
+            var picker = new Windows.Storage.Pickers.FileSavePicker();
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+            picker.SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.Desktop;
+            picker.SuggestedFileName = template.Name;
+            picker.FileTypeChoices.Add(
+                Loc.T("template_filetype"),
+                new List<string> { WorkspaceConfig.TemplateExtension });
+            var file = await picker.PickSaveFileAsync();
+            if (file != null)
+                FrozenTemplateStore.Export(template, file.Path);
+        }
+
+        private async System.Threading.Tasks.Task ImportFrozenTemplate()
+        {
+            var picker = new Windows.Storage.Pickers.FileOpenPicker();
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+            picker.SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.Desktop;
+            picker.FileTypeFilter.Add(WorkspaceConfig.TemplateExtension);
+            var file = await picker.PickSingleFileAsync();
+            if (file == null) return;
+            FrozenTemplateStore.Import(
+                file.Path,
+                System.IO.Path.GetFileNameWithoutExtension(file.Path));
+            RefreshWorkspaceFlyout();
+        }
+
+        private async System.Threading.Tasks.Task DeleteFrozenTemplate(FrozenTemplateStore.Item template)
+        {
+            if (!await ConfirmTemplateAction(
+                    Loc.T("template_delete_title"),
+                    Loc.T("template_delete_body", template.Name),
+                    Loc.T("template_delete")))
+                return;
+            if (FrozenTemplateStore.Delete(template) &&
+                string.Equals(_openedTemplateFile, template.Path, StringComparison.OrdinalIgnoreCase))
+            {
+                _openedTemplateFile = null;
+                _openedTemplateName = null;
+                UpdateTitle();
+            }
+            RefreshWorkspaceFlyout();
+        }
+
+        private async System.Threading.Tasks.Task<bool> ConfirmTemplateAction(
+            string title, string body, string primaryText)
+        {
+            if (Content?.XamlRoot == null) return false;
+            try
+            {
+                var dialog = new ContentDialog
+                {
+                    Title = title,
+                    Content = new TextBlock { Text = body, TextWrapping = TextWrapping.Wrap },
+                    PrimaryButtonText = primaryText,
+                    CloseButtonText = Loc.T("cancel"),
+                    DefaultButton = ContentDialogButton.Primary,
+                    XamlRoot = Content.XamlRoot
+                };
+                return await dialog.ShowAsync() == ContentDialogResult.Primary;
+            }
+            catch { return false; }
         }
 
         // ── Helpers ──────────────────────────────────────────────────────
@@ -514,6 +787,12 @@ namespace CCPad
             {
                 var name = System.IO.Path.GetFileNameWithoutExtension(_currentWorkspaceFile);
                 Title = $"{name} — CC Pad";
+            }
+            else if (_openedTemplateFile != null)
+            {
+                var name = _openedTemplateName
+                    ?? System.IO.Path.GetFileNameWithoutExtension(_openedTemplateFile);
+                Title = $"{name} — CC Pad ({Loc.T("template_filetype")})";
             }
             else
             {
@@ -864,10 +1143,19 @@ namespace CCPad
         {
             ToolTipService.SetToolTip(UpdateButton, Loc.T("tip_check_update"));
             ToolTipService.SetToolTip(AboutButton, Loc.T("tip_about"));
+            AboutButtonLabel.Text = Loc.T("btn_about");
             ToolTipService.SetToolTip(FreezeButton, Loc.T("tip_freeze"));
             FreezeButtonLabel.Text = Loc.T("btn_freeze");
             ToolTipService.SetToolTip(WorkspaceButton, Loc.T("tip_workspace"));
             WorkspaceLabel.Text = Loc.T("btn_workspace");
+            ToolTipService.SetToolTip(LastCmdButton, Loc.T("tip_lastcmd"));
+            LastCmdButtonLabel.Text = Loc.T("btn_lastcmd");
+            ToolTipService.SetToolTip(FilesButton, Loc.T("tip_files"));
+            FilesButtonLabel.Text = Loc.T("btn_files");
+            ToolTipService.SetToolTip(AutoButton, Loc.T("tip_auto"));
+            AutoButtonLabel.Text = Loc.T("btn_auto");
+            ToolTipService.SetToolTip(StageButton, Loc.T("tip_stage"));
+            StageButtonLabel.Text = Loc.T("btn_stage");
         }
 
         /// <summary>Live language switch: rebuild menus + chrome in the new language.</summary>
@@ -1554,32 +1842,60 @@ namespace CCPad
         {
             try
             {
-                var (load, availGb) = ResourceGuard.MemorySnapshot();
-                if (load <= 0) return; // probe failed — stay quiet
+                var snapshot = ResourceGuard.CaptureSnapshot();
+                if (!snapshot.IsValid) return; // both probes failed — stay quiet
+
+                bool physicalLaunchPressure =
+                    snapshot.PhysicalLoadPercent >= ResourceGuard.WarnPhysicalLoadAtLaunch;
+                bool physicalRuntimePressure =
+                    snapshot.PhysicalLoadPercent >= ResourceGuard.WarnPhysicalLoadRuntime;
+                bool commitLaunchPressure = snapshot.CommitLoadPercent > 0 &&
+                    (snapshot.CommitLoadPercent >= ResourceGuard.WarnCommitLoadAtLaunch ||
+                     snapshot.CommitAvailableGb < ResourceGuard.WarnCommitAvailableGb);
+                bool commitRuntimePressure = snapshot.CommitLoadPercent > 0 &&
+                    (snapshot.CommitLoadPercent >= ResourceGuard.WarnCommitLoadRuntime ||
+                     snapshot.CommitAvailableGb < ResourceGuard.WarnCommitAvailableGb);
 
                 if (atLaunch)
                 {
                     int instances = ResourceGuard.CountInstances();
-                    if (instances >= ResourceGuard.WarnInstanceCount || load >= ResourceGuard.WarnLoadAtLaunch)
+                    if (instances >= ResourceGuard.WarnInstanceCount ||
+                        physicalLaunchPressure || commitLaunchPressure)
                     {
                         ResourceInfoBar.Title = Loc.T("mem_warn_title");
-                        ResourceInfoBar.Message = Loc.T("mem_warn_launch", instances, load, availGb.ToString("0.0"));
+                        ResourceInfoBar.Message = Loc.T(
+                            "mem_warn_launch_v2",
+                            instances,
+                            snapshot.PhysicalLoadPercent,
+                            snapshot.PhysicalAvailableGb.ToString("0.0"),
+                            snapshot.CommitLoadPercent.ToString("0.0"),
+                            snapshot.CommitAvailableGb.ToString("0.0"));
                         ResourceInfoBar.IsOpen = true;
+                        if (physicalRuntimePressure || commitRuntimePressure)
+                            _resourceWarningArmed = false;
                     }
                     return;
                 }
 
-                if (load >= ResourceGuard.WarnLoadRuntime)
+                if (physicalRuntimePressure || commitRuntimePressure)
                 {
                     // One warning per pressure episode: re-arm only after the
                     // load has clearly come back down.
                     if (!_resourceWarningArmed) return;
                     _resourceWarningArmed = false;
                     ResourceInfoBar.Title = Loc.T("mem_warn_title");
-                    ResourceInfoBar.Message = Loc.T("mem_warn_runtime", load, availGb.ToString("0.0"));
+                    ResourceInfoBar.Message = Loc.T(
+                        "mem_warn_runtime_v2",
+                        snapshot.PhysicalLoadPercent,
+                        snapshot.PhysicalAvailableGb.ToString("0.0"),
+                        snapshot.CommitLoadPercent.ToString("0.0"),
+                        snapshot.CommitAvailableGb.ToString("0.0"));
                     ResourceInfoBar.IsOpen = true;
                 }
-                else if (load < ResourceGuard.RearmBelowLoad)
+                else if (snapshot.PhysicalLoadPercent < ResourceGuard.RearmBelowLoad &&
+                         (snapshot.CommitLoadPercent <= 0 ||
+                          (snapshot.CommitLoadPercent < ResourceGuard.RearmBelowLoad &&
+                           snapshot.CommitAvailableGb >= ResourceGuard.RearmCommitAvailableGb)))
                 {
                     _resourceWarningArmed = true;
                 }

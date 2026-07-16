@@ -129,6 +129,10 @@ namespace CCPad
         public void SetWorkspaceReserve(double width)
             => ForEachPanel(_root, p => p.SetWorkspaceReserve(width));
 
+        /// <summary>Keep an all-frozen template at zero WebView2/CLI panes.</summary>
+        public void DisableFrozenPrewarm()
+            => ForEachPanel(_root, p => p.DisableFrozenPrewarm());
+
         /// <summary>Widest project button across all panels (they share one localized label).</summary>
         public double MaxProjectButtonWidth()
         {

@@ -48,7 +48,7 @@
                           Click="OnLastCmdButtonClick">
                 <StackPanel Orientation="Horizontal" Spacing="6">
                     <FontIcon Glyph="&#xE81C;" FontSize="14"/>
-                    <TextBlock Text="上条" FontSize="14" VerticalAlignment="Center"/>
+                    <TextBlock x:Name="LastCmdButtonLabel" Text="上条" FontSize="14" VerticalAlignment="Center"/>
                 </StackPanel>
             </ToggleButton>
 
@@ -60,7 +60,7 @@
                           Click="OnFilesButtonClick">
                 <StackPanel Orientation="Horizontal" Spacing="6">
                     <FontIcon Glyph="&#xE8B7;" FontSize="14"/>
-                    <TextBlock Text="文件" FontSize="14" VerticalAlignment="Center"/>
+                    <TextBlock x:Name="FilesButtonLabel" Text="文件" FontSize="14" VerticalAlignment="Center"/>
                 </StackPanel>
             </ToggleButton>
 
@@ -72,7 +72,7 @@
                           Click="OnAutoButtonClick">
                 <StackPanel Orientation="Horizontal" Spacing="6">
                     <FontIcon Glyph="&#xE8FB;" FontSize="14"/>
-                    <TextBlock Text="回车" FontSize="14" VerticalAlignment="Center"/>
+                    <TextBlock x:Name="AutoButtonLabel" Text="回车" FontSize="14" VerticalAlignment="Center"/>
                 </StackPanel>
             </ToggleButton>
 
@@ -84,7 +84,7 @@
                           Click="OnStageButtonClick">
                 <StackPanel Orientation="Horizontal" Spacing="6">
                     <FontIcon Glyph="&#xE8FD;" FontSize="14"/>
-                    <TextBlock Text="寄存" FontSize="14" VerticalAlignment="Center"/>
+                    <TextBlock x:Name="StageButtonLabel" Text="寄存" FontSize="14" VerticalAlignment="Center"/>
                 </StackPanel>
             </ToggleButton>
 
@@ -109,7 +109,7 @@
                     ToolTipService.ToolTip="关于 / 设置">
                 <StackPanel Orientation="Horizontal" Spacing="6">
                     <FontIcon Glyph="&#xE946;" FontSize="14"/>
-                    <TextBlock Text="关于" FontSize="14" VerticalAlignment="Center"/>
+                    <TextBlock x:Name="AboutButtonLabel" Text="关于" FontSize="14" VerticalAlignment="Center"/>
                 </StackPanel>
                 <Button.Flyout>
                     <MenuFlyout x:Name="AboutFlyout" Placement="TopEdgeAlignedRight"/>

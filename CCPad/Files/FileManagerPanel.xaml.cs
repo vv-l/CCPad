@@ -45,6 +45,18 @@ namespace CCPad
         {
             InitializeComponent();
             EntryList.ItemsSource = _items;
+            ApplyLoc();
+            Localization.Loc.LanguageChanged += ApplyLoc;
+            Unloaded += (_, _) => Localization.Loc.LanguageChanged -= ApplyLoc;
+        }
+
+        /// <summary>Localized chrome (tooltips/placeholder); rebuilt on language switch.</summary>
+        private void ApplyLoc()
+        {
+            ToolTipService.SetToolTip(UpButton, Localization.Loc.T("fm_up"));
+            ToolTipService.SetToolTip(RefreshButton, Localization.Loc.T("fm_refresh"));
+            ToolTipService.SetToolTip(PathBox, Localization.Loc.T("fm_path_tip"));
+            SearchBox.PlaceholderText = Localization.Loc.T("fm_search_ph");
         }
 
         /// <summary>Point the browser at a project directory (falls back to the user
@@ -145,7 +157,7 @@ namespace CCPad
         private void OpenFile(string path)
         {
             try { Process.Start(new ProcessStartInfo { FileName = path, UseShellExecute = true }); }
-            catch (Exception ex) { _ = ShowError("打开失败", ex.Message); }
+            catch (Exception ex) { _ = ShowError(Localization.Loc.T("fm_open_failed"), ex.Message); }
         }
 
         // ── Context menu ─────────────────────────────────────────────────────
@@ -157,11 +169,11 @@ namespace CCPad
             EntryList.SelectedItem = entry;
 
             var mf = new MenuFlyout();
-            mf.Items.Add(MenuItem("Open", () => Activate(entry)));
-            mf.Items.Add(MenuItem("Delete", async () => await DeleteAsync(entry)));
-            mf.Items.Add(MenuItem("Rename", async () => await RenameAsync(entry)));
+            mf.Items.Add(MenuItem(Localization.Loc.T("fm_open"), () => Activate(entry)));
+            mf.Items.Add(MenuItem(Localization.Loc.T("template_delete"), async () => await DeleteAsync(entry)));
+            mf.Items.Add(MenuItem(Localization.Loc.T("template_rename"), async () => await RenameAsync(entry)));
             mf.Items.Add(new MenuFlyoutSeparator());
-            mf.Items.Add(MenuItem("Copy file path", () => CopyPath(entry)));
+            mf.Items.Add(MenuItem(Localization.Loc.T("fm_copy_path"), () => CopyPath(entry)));
             mf.ShowAt(EntryList, new FlyoutShowOptions { Position = e.GetPosition(EntryList) });
             e.Handled = true;
         }
@@ -188,10 +200,10 @@ namespace CCPad
         {
             var dlg = new ContentDialog
             {
-                Title = "删除到回收站",
-                Content = $"将 \"{entry.Name}\" 移到回收站？",
-                PrimaryButtonText = "删除",
-                CloseButtonText = "取消",
+                Title = Localization.Loc.T("fm_delete_title"),
+                Content = Localization.Loc.T("fm_delete_body", entry.Name),
+                PrimaryButtonText = Localization.Loc.T("template_delete"),
+                CloseButtonText = Localization.Loc.T("cancel"),
                 DefaultButton = ContentDialogButton.Close,
                 XamlRoot = XamlRoot
             };
@@ -210,7 +222,7 @@ namespace CCPad
                         Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
                 LoadEntries();
             }
-            catch (Exception ex) { await ShowError("删除失败", ex.Message); }
+            catch (Exception ex) { await ShowError(Localization.Loc.T("fm_delete_failed"), ex.Message); }
         }
 
         private async Task RenameAsync(FileEntry entry)
@@ -219,10 +231,10 @@ namespace CCPad
             input.Loaded += (_, _) => { input.Focus(FocusState.Programmatic); input.SelectAll(); };
             var dlg = new ContentDialog
             {
-                Title = "重命名",
+                Title = Localization.Loc.T("template_rename"),
                 Content = input,
-                PrimaryButtonText = "确定",
-                CloseButtonText = "取消",
+                PrimaryButtonText = Localization.Loc.T("ok"),
+                CloseButtonText = Localization.Loc.T("cancel"),
                 DefaultButton = ContentDialogButton.Primary,
                 XamlRoot = XamlRoot
             };
@@ -237,7 +249,7 @@ namespace CCPad
                 else File.Move(entry.FullPath, dest);
                 LoadEntries();
             }
-            catch (Exception ex) { await ShowError("重命名失败", ex.Message); }
+            catch (Exception ex) { await ShowError(Localization.Loc.T("fm_rename_failed"), ex.Message); }
         }
 
         private async Task ShowError(string title, string msg)
@@ -248,7 +260,7 @@ namespace CCPad
                 {
                     Title = title,
                     Content = msg,
-                    CloseButtonText = "好",
+                    CloseButtonText = Localization.Loc.T("ok"),
                     XamlRoot = XamlRoot
                 };
                 await dlg.ShowAsync();

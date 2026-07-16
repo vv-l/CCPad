@@ -55,6 +55,11 @@ namespace CCPad
 
         public App()
         {
+            // Every WebView2 in this process paints WHITE (its default
+            // background) whenever the page inside isn't composing — during
+            // init, after a renderer death, after a re-parent. Terminals are
+            // dark; make the failure color dark too, before any core is created.
+            Environment.SetEnvironmentVariable("WEBVIEW2_DEFAULT_BACKGROUND_COLOR", "FF0C0C0C");
             InitializeComponent();
             UnhandledException += OnUnhandledException;
         }
@@ -160,10 +165,9 @@ namespace CCPad
             if (cmdArgs.Length > 1)
             {
                 var arg = cmdArgs[1];
-                if (arg.EndsWith(Settings.WorkspaceConfig.FileExtension, StringComparison.OrdinalIgnoreCase)
-                    && File.Exists(arg))
+                if (Settings.WorkspaceConfig.IsWorkspaceOrTemplateFile(arg) && File.Exists(arg))
                 {
-                    // Open a .ccpad-workspace file
+                    // Open a .ccpad-workspace or frozen .ccpad-template file.
                     StartupWorkspaceFile = arg;
                 }
                 else if (Directory.Exists(arg))
@@ -267,6 +271,22 @@ namespace CCPad
             using var typeCmd = Registry.CurrentUser.CreateSubKey(
                 @"Software\Classes\CCPad.Workspace\shell\open\command");
             typeCmd.SetValue("", $"\"{exePath}\" \"%1\"");
+
+            // Frozen-template files always launch a separate CCPad process. The
+            // file itself contains only frozen tabs, so no CLI starts until clicked.
+            using var templateExtKey = Registry.CurrentUser.CreateSubKey(
+                @"Software\Classes\.ccpad-template");
+            templateExtKey.SetValue("", "CCPad.FrozenTemplate");
+            using var templateTypeKey = Registry.CurrentUser.CreateSubKey(
+                @"Software\Classes\CCPad.FrozenTemplate");
+            templateTypeKey.SetValue("", Loc.T("shell_template_type"));
+            templateTypeKey.SetValue("FriendlyTypeName", Loc.T("shell_template_type"));
+            using var templateIcon = Registry.CurrentUser.CreateSubKey(
+                @"Software\Classes\CCPad.FrozenTemplate\DefaultIcon");
+            templateIcon.SetValue("", iconValue);
+            using var templateCmd = Registry.CurrentUser.CreateSubKey(
+                @"Software\Classes\CCPad.FrozenTemplate\shell\open\command");
+            templateCmd.SetValue("", $"\"{exePath}\" \"%1\"");
         }
 
         private static void UnregisterContextMenu()
@@ -279,6 +299,10 @@ namespace CCPad
                 @"Software\Classes\.ccpad-workspace", false);
             Registry.CurrentUser.DeleteSubKeyTree(
                 @"Software\Classes\CCPad.Workspace", false);
+            Registry.CurrentUser.DeleteSubKeyTree(
+                @"Software\Classes\.ccpad-template", false);
+            Registry.CurrentUser.DeleteSubKeyTree(
+                @"Software\Classes\CCPad.FrozenTemplate", false);
         }
     }
 }

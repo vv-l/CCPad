@@ -37,6 +37,23 @@ namespace CCPad.Settings
                     extraArgs)),
         };
 
+        /// <summary>
+        /// Command line that resumes an existing conversation. Claude keeps the same
+        /// session ID across resumes (no --fork-session), so the stored ID stays valid
+        /// over repeated close/reopen cycles. Codex resume is a subcommand and doesn't
+        /// accept --yolo, so the long-form bypass flag is used instead.
+        /// </summary>
+        public static string BuildResumeCommand(string mode, string sessionId, string extraArgs = "") => Normalize(mode) switch
+        {
+            Codex => ResolveLaunch("codex", JoinArgs(
+                    $"resume {sessionId} --dangerously-bypass-approvals-and-sandbox",
+                    extraArgs)),
+            _ => ResolveLaunch("claude", JoinArgs(
+                    JoinArgs($"--resume {sessionId}",
+                        AppConfig.Load().BypassPermissions ? "--permission-mode bypassPermissions" : ""),
+                    extraArgs)),
+        };
+
         private static string JoinArgs(string a, string b)
         {
             if (string.IsNullOrEmpty(b)) return a;

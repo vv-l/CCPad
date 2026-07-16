@@ -24,6 +24,18 @@ namespace CCPad
         private Microsoft.UI.Dispatching.DispatcherQueueTimer? _autosaveTimer;
         private bool _autosaveSubscribed;
 
+        // Close-confirmation state. _closeConfirmed short-circuits the dialog when
+        // Close() is re-invoked from the dialog's own confirm path.
+        private bool _closeConfirmed;
+        private bool _confirmDialogOpen;
+        private bool _restoreOnNextLaunch;
+
+        private MenuFlyoutSubItem? _closedSessionsMenu;
+
+        // Memory-pressure guard state (see StartResourceGuard).
+        private Microsoft.UI.Dispatching.DispatcherQueueTimer? _resourceTimer;
+        private bool _resourceWarningArmed = true;
+
         public MainWindow()
         {
             InitializeComponent();
@@ -35,10 +47,13 @@ namespace CCPad
             RootGrid.Loaded += OnRootLoaded;
             Closed += OnWindowClosed;
             InitAboutMenu();
+            InitFreezeMenu();
             ApplyLocalizedChrome();
             Loc.LanguageChanged += OnLanguageChanged;
             RootContainer.ActualThemeChanged += OnActualThemeChanged;
             ThemeManager.PrefChanged += OnThemePrefChanged;
+            LastCmdButton.IsChecked = LastCmdBarManager.IsOn;
+            LastCmdBarManager.Changed += OnLastCmdBarManagerChanged;
             SessionRecovery.MarkRunning();
         }
 
@@ -97,23 +112,48 @@ namespace CCPad
                         EnterWorkspaceMode();
                         Activated += OnActivated;
                         AttachAutosave();
+                        StartResourceGuard();
                         _ = DelayedUpdateCheckAsync();
                         return;
                     }
                 }
 
-                // Crash recovery: only when no explicit workspace/dir argument
-                // and the feature is enabled in prefs.
-                if (workspaceFile == null && startDir == null && AppConfig.Load().SessionRecoveryEnabled)
+                // Session restore: sweep dead instances' autosaves into the
+                // closed-session history, then take the newest entry flagged for
+                // auto-restore — either a crash victim (Task Manager kill etc.)
+                // or the last clean close with the restore checkbox ticked.
+                // Crashed entries restore silently once; if that silent restore
+                // itself never reached a clean close, the crash-loop guard falls
+                // back to asking. Everything else stays in the history menu.
+                if (workspaceFile == null && startDir == null)
                 {
-                    var recovered = SessionRecovery.DetectCrashedSession();
-                    if (recovered?.Layout != null)
+                    SessionRecovery.SweepCrashedSessions();
+                    bool recoveryEnabled = AppConfig.Load().SessionRecoveryEnabled;
+                    var pending = SessionRecovery.TryConsumePendingRestore(includeCrashed: recoveryEnabled);
+                    if (pending?.Entry.Layout != null)
                     {
-                        var restored = await TryShowRecoveryDialogAsync(recovered, projects);
+                        bool restored;
+                        if (pending.WasCrashed && SessionRecovery.HasCrashRestoreAttempt())
+                        {
+                            restored = await TryShowRecoveryDialogAsync(pending.Entry, projects);
+                        }
+                        else
+                        {
+                            if (pending.WasCrashed)
+                                SessionRecovery.MarkCrashRestoreAttempt();
+                            _splitHost = SplitHost.RestoreFromLayout(pending.Entry.Layout, projects);
+                            RootGrid.Children.Add(_splitHost);
+                            RestoreWindowSize(pending.Entry);
+                            await _splitHost.InitializeTerminals();
+                            RefreshWorkspaceFlyout();
+                            restored = true;
+                        }
+
                         if (restored)
                         {
                             Activated += OnActivated;
                             AttachAutosave();
+                            StartResourceGuard();
                             _ = DelayedUpdateCheckAsync();
                             return;
                         }
@@ -143,6 +183,7 @@ namespace CCPad
                 RefreshWorkspaceFlyout();
                 Activated += OnActivated;
                 AttachAutosave();
+                StartResourceGuard();
                 _ = DelayedUpdateCheckAsync();
             }
             catch (Exception ex)
@@ -194,11 +235,9 @@ namespace CCPad
                 AppConfig.Save(prefs);
             }
 
-            if (result != ContentDialogResult.Primary)
-            {
-                SessionRecovery.ClearSnapshot();
-                return false;
-            }
+            // Declined: nothing to clean up — the pending flag was already
+            // consumed, and the entry stays in the closed-session history menu.
+            if (result != ContentDialogResult.Primary) return false;
 
             _splitHost = SplitHost.RestoreFromLayout(recovered.Layout!, projects);
             RootGrid.Children.Add(_splitHost);
@@ -230,6 +269,18 @@ namespace CCPad
         {
             // ToggleButton has already flipped IsChecked; IsChecked is the intent.
             _splitHost?.ActiveTerminal?.SetStaging(StageButton.IsChecked == true);
+        }
+
+        /// <summary>Toggle the GLOBAL last-command info bar (same switch as Alt+L in a pane).</summary>
+        private void OnLastCmdButtonClick(object sender, RoutedEventArgs e)
+        {
+            LastCmdBarManager.Set(LastCmdButton.IsChecked == true);
+        }
+
+        /// <summary>Keep the toolbar button in sync when the bar is flipped via Alt+L.</summary>
+        private void OnLastCmdBarManagerChanged(bool on)
+        {
+            DispatcherQueue.TryEnqueue(() => LastCmdButton.IsChecked = on);
         }
 
         /// <summary>Toggle auto-confirm (自动回车) on the currently-active terminal.</summary>
@@ -372,6 +423,12 @@ namespace CCPad
             RestoreWindowSize(ws);
             await _splitHost.InitializeTerminals();
 
+            if (_autosaveSubscribed)
+            {
+                SubscribeSplitHostEvents();
+                WriteRecoverySnapshot();
+            }
+
             _currentWorkspaceFile = file.Path;
             EnterWorkspaceMode();
         }
@@ -512,17 +569,41 @@ namespace CCPad
                 prefs.SessionRecoveryEnabled = ((ToggleMenuFlyoutItem)s).IsChecked;
                 AppConfig.Save(prefs);
                 if (!prefs.SessionRecoveryEnabled)
-                    SessionRecovery.ClearSnapshot();
+                    SessionRecovery.DeleteOwnSnapshot();
             };
             AboutFlyout.Items.Add(recoveryToggle);
+
+            // Closed-session history \u2014 repopulated every time the flyout opens.
+            _closedSessionsMenu = new MenuFlyoutSubItem
+            {
+                Text = Loc.T("closed_menu"),
+                Icon = new FontIcon { Glyph = "\uE823" } // Recent (clock)
+            };
+            AboutFlyout.Items.Add(_closedSessionsMenu);
+            AboutFlyout.Opening -= OnAboutFlyoutOpening;
+            AboutFlyout.Opening += OnAboutFlyoutOpening;
 
             var clearSessionItem = new MenuFlyoutItem
             {
                 Text = Loc.T("menu_clear_recovery"),
                 Icon = new FontIcon { Glyph = "\uE74D" }
             };
-            clearSessionItem.Click += (_, _) => SessionRecovery.ClearSnapshot();
+            clearSessionItem.Click += (_, _) => SessionRecovery.ClearAll();
             AboutFlyout.Items.Add(clearSessionItem);
+
+            var confirmCloseToggle = new ToggleMenuFlyoutItem
+            {
+                Text = Loc.T("menu_confirm_close"),
+                Icon = new FontIcon { Glyph = "\uE8BB" }, // ChromeClose
+                IsChecked = AppConfig.Load().ConfirmOnClose
+            };
+            confirmCloseToggle.Click += (s, _) =>
+            {
+                var prefs = AppConfig.Load();
+                prefs.ConfirmOnClose = ((ToggleMenuFlyoutItem)s).IsChecked;
+                AppConfig.Save(prefs);
+            };
+            AboutFlyout.Items.Add(confirmCloseToggle);
 
             var notifyToggle = new ToggleMenuFlyoutItem
             {
@@ -612,6 +693,140 @@ namespace CCPad
             AboutFlyout.Items.Add(githubItem);
         }
 
+        // ── Freeze menu ────────────────────────────────────────────────────
+        // Manual-first memory relief: freezing closes a tab's WebView2 page and
+        // CLI process, leaving a click-to-restore placeholder in the tab. The
+        // optional auto-freeze does the same to long-idle tabs, piggybacked on
+        // the 30s resource timer.
+
+        private void InitFreezeMenu()
+        {
+            // Rebuildable: cleared and repopulated on language change / threshold pick.
+            FreezeFlyout.Items.Clear();
+
+            var freezeIdle = new MenuFlyoutItem
+            {
+                Text = Loc.T("freeze_idle_all"),
+                Icon = new FontIcon { Glyph = "" }
+            };
+            freezeIdle.Click += async (_, _) =>
+            {
+                if (_splitHost != null)
+                    await _splitHost.FreezeAllAsync(idleOnly: true);
+            };
+            FreezeFlyout.Items.Add(freezeIdle);
+
+            var freezeAll = new MenuFlyoutItem
+            {
+                Text = Loc.T("freeze_all"),
+                Icon = new FontIcon { Glyph = "" }
+            };
+            freezeAll.Click += async (_, _) =>
+            {
+                if (_splitHost == null) return;
+                int working = _splitHost.CountLive(workingOnly: true);
+                if (working > 0 && !await ConfirmFreezeAllAsync(working)) return;
+                await _splitHost.FreezeAllAsync(idleOnly: false);
+            };
+            FreezeFlyout.Items.Add(freezeAll);
+
+            var unfreezeAll = new MenuFlyoutItem
+            {
+                Text = Loc.T("unfreeze_all"),
+                Icon = new FontIcon { Glyph = "" } // play / resume
+            };
+            unfreezeAll.Click += async (_, _) =>
+            {
+                if (_splitHost != null)
+                    await _splitHost.UnfreezeAllAsync();
+            };
+            FreezeFlyout.Items.Add(unfreezeAll);
+
+            FreezeFlyout.Items.Add(new MenuFlyoutSeparator());
+
+            var autoToggle = new ToggleMenuFlyoutItem
+            {
+                Text = Loc.T("autofreeze_toggle"),
+                Icon = new FontIcon { Glyph = "" }, // Recent (clock)
+                IsChecked = AppConfig.Load().AutoFreezeEnabled
+            };
+            autoToggle.Click += (s, _) =>
+            {
+                var prefs = AppConfig.Load();
+                prefs.AutoFreezeEnabled = ((ToggleMenuFlyoutItem)s).IsChecked;
+                AppConfig.Save(prefs);
+            };
+            FreezeFlyout.Items.Add(autoToggle);
+
+            var delayItem = new MenuFlyoutSubItem
+            {
+                Text = Loc.T("autofreeze_delay"),
+                Icon = new FontIcon { Glyph = "" } // Stopwatch
+            };
+            foreach (var (minutes, key) in new[]
+                     {
+                         (30, "dur_30m"),
+                         (60, "dur_1h"),
+                         (120, "dur_2h"),
+                         (240, "dur_4h"),
+                     })
+            {
+                var m = minutes;
+                var choice = new ToggleMenuFlyoutItem
+                {
+                    Text = Loc.T(key),
+                    IsChecked = AppConfig.Load().AutoFreezeMinutes == m
+                };
+                choice.Click += (_, _) =>
+                {
+                    var prefs = AppConfig.Load();
+                    prefs.AutoFreezeMinutes = m;
+                    AppConfig.Save(prefs);
+                    InitFreezeMenu(); // refresh the radio checks
+                };
+                delayItem.Items.Add(choice);
+            }
+            FreezeFlyout.Items.Add(delayItem);
+        }
+
+        private async System.Threading.Tasks.Task<bool> ConfirmFreezeAllAsync(int workingCount)
+        {
+            if (Content?.XamlRoot == null) return true;
+            try
+            {
+                var dlg = new ContentDialog
+                {
+                    Title = Loc.T("freeze_working_title"),
+                    Content = Loc.T("freeze_all_working_body", workingCount),
+                    PrimaryButtonText = Loc.T("freeze_confirm"),
+                    CloseButtonText = Loc.T("cancel"),
+                    DefaultButton = ContentDialogButton.Close,
+                    XamlRoot = Content.XamlRoot
+                };
+                return await dlg.ShowAsync() == ContentDialogResult.Primary;
+            }
+            catch { return false; }
+        }
+
+        // Reentrancy guard: an auto-freeze pass can outlive one timer tick
+        // (screenshots + teardown per tab), so ticks that land mid-pass skip.
+        private bool _autoFreezeBusy;
+
+        private async void RunAutoFreezeCheck()
+        {
+            if (_autoFreezeBusy || _splitHost == null) return;
+            var prefs = AppConfig.Load();
+            if (!prefs.AutoFreezeEnabled) return;
+            _autoFreezeBusy = true;
+            try
+            {
+                int minutes = Math.Max(5, prefs.AutoFreezeMinutes);
+                await _splitHost.AutoFreezeIdleAsync(TimeSpan.FromMinutes(minutes));
+            }
+            catch { }
+            finally { _autoFreezeBusy = false; }
+        }
+
         /// <summary>
         /// Lay out the two top-right overlay buttons (Workspace + the per-panel
         /// Projects button) by measured size instead of hard-coded margins, so long
@@ -649,6 +864,8 @@ namespace CCPad
         {
             ToolTipService.SetToolTip(UpdateButton, Loc.T("tip_check_update"));
             ToolTipService.SetToolTip(AboutButton, Loc.T("tip_about"));
+            ToolTipService.SetToolTip(FreezeButton, Loc.T("tip_freeze"));
+            FreezeButtonLabel.Text = Loc.T("btn_freeze");
             ToolTipService.SetToolTip(WorkspaceButton, Loc.T("tip_workspace"));
             WorkspaceLabel.Text = Loc.T("btn_workspace");
         }
@@ -659,6 +876,7 @@ namespace CCPad
             try
             {
                 InitAboutMenu();
+                InitFreezeMenu();
                 UpdateRemoteMenuItem(_webServer?.IsRunning == true);
                 RefreshWorkspaceFlyout();
                 ApplyLocalizedChrome();
@@ -1003,8 +1221,41 @@ namespace CCPad
 
         private void OnWindowClosed(object sender, WindowEventArgs args)
         {
+            if (!_closeConfirmed)
+            {
+                var prefs = AppConfig.Load();
+                if (prefs.ConfirmOnClose && _splitHost != null && Content?.XamlRoot != null)
+                {
+                    // Cancel this close and ask first; the dialog re-enters Close()
+                    // with _closeConfirmed set when the user confirms.
+                    args.Handled = true;
+                    if (!_confirmDialogOpen)
+                        _ = ConfirmCloseAsync();
+                    return;
+                }
+                // Confirmation disabled — honor the last checkbox choice directly.
+                _restoreOnNextLaunch = prefs.RestoreOnClose;
+            }
+
             Loc.LanguageChanged -= OnLanguageChanged;
             ThemeManager.PrefChanged -= OnThemePrefChanged;
+            LastCmdBarManager.Changed -= OnLastCmdBarManagerChanged;
+
+            _resourceTimer?.Stop();
+
+            // Snapshot for the closed-session history must be taken while the
+            // panes (and their session IDs / working dirs) are still alive.
+            WorkspaceEntry? finalSnapshot = null;
+            if (_splitHost != null)
+            {
+                try
+                {
+                    finalSnapshot = CreateSnapshot();
+                    finalSnapshot.RestoreOnLaunch = _restoreOnNextLaunch;
+                }
+                catch { }
+            }
+
             if (_splitHost != null)
             {
                 try
@@ -1023,13 +1274,84 @@ namespace CCPad
             _webServer?.Dispose();
             Notify.ToastService.Unregister();
 
-            // Clean exit — clear lock + snapshot so next launch starts fresh.
+            // Clean exit — every close lands in the restorable history; the
+            // checkbox only decides whether the next launch restores it
+            // automatically or leaves it in the menu.
             try
             {
+                if (finalSnapshot?.Layout != null)
+                    SessionRecovery.ArchiveClosed(finalSnapshot);
                 SessionRecovery.MarkClosedCleanly();
-                SessionRecovery.ClearSnapshot();
             }
             catch { }
+        }
+
+        private async System.Threading.Tasks.Task ConfirmCloseAsync()
+        {
+            _confirmDialogOpen = true;
+            try
+            {
+                var xamlRoot = Content?.XamlRoot;
+                if (xamlRoot == null)
+                {
+                    _closeConfirmed = true;
+                    Close();
+                    return;
+                }
+
+                var prefs = AppConfig.Load();
+                var restoreBox = new CheckBox
+                {
+                    Content = new TextBlock
+                    {
+                        Text = Loc.T("close_restore_check"),
+                        TextWrapping = TextWrapping.Wrap
+                    },
+                    IsChecked = prefs.RestoreOnClose
+                };
+                var panel = new StackPanel { Spacing = 8 };
+                panel.Children.Add(new TextBlock
+                {
+                    Text = Loc.T("close_confirm_body"),
+                    TextWrapping = TextWrapping.Wrap
+                });
+                panel.Children.Add(restoreBox);
+
+                var dlg = new ContentDialog
+                {
+                    Title = Loc.T("close_confirm_title"),
+                    Content = panel,
+                    PrimaryButtonText = Loc.T("close_confirm_quit"),
+                    CloseButtonText = Loc.T("cancel"),
+                    DefaultButton = ContentDialogButton.Primary,
+                    XamlRoot = xamlRoot
+                };
+
+                var result = await dlg.ShowAsync();
+                if (result != ContentDialogResult.Primary) return;
+
+                bool restore = restoreBox.IsChecked == true;
+                if (prefs.RestoreOnClose != restore)
+                {
+                    prefs.RestoreOnClose = restore;
+                    AppConfig.Save(prefs);
+                }
+                _restoreOnNextLaunch = restore;
+                _closeConfirmed = true;
+                Close();
+            }
+            catch
+            {
+                // Dialog failed (e.g. another ContentDialog already open) — never
+                // leave the window unclosable.
+                _closeConfirmed = true;
+                _restoreOnNextLaunch = AppConfig.Load().RestoreOnClose;
+                Close();
+            }
+            finally
+            {
+                _confirmDialogOpen = false;
+            }
         }
 
         // ── Session-recovery autosave ───────────────────────────────────
@@ -1045,14 +1367,23 @@ namespace CCPad
             _autosaveTimer.IsRepeating = false;
             _autosaveTimer.Tick += (_, _) => WriteRecoverySnapshot();
 
+            SubscribeSplitHostEvents();
+
+            // Initial snapshot so a crash before any layout change still recovers.
+            WriteRecoverySnapshot();
+        }
+
+        /// <summary>Events live on the SplitHost instance, so every code path that
+        /// swaps _splitHost (open workspace, restore closed session) must re-run
+        /// this or autosave silently stops following the new layout.</summary>
+        private void SubscribeSplitHostEvents()
+        {
+            if (_splitHost == null) return;
             _splitHost.LayoutChanged += ScheduleAutosave;
             _splitHost.LayoutChanged += ScheduleTopRightAdjust; // re-reserve for new split panels
             _splitHost.ActivePaneChanged += RefreshStageButton; // keep the staging toggle in sync
             _splitHost.StagingChanged += RefreshStageButton;    // Alt+` hotkey re-syncs the button
             _splitHost.ActivePaneChanged += RefreshFilePanelRoot; // follow active project dir
-
-            // Initial snapshot so a crash before any layout change still recovers.
-            WriteRecoverySnapshot();
         }
 
         private void ScheduleAutosave()
@@ -1075,5 +1406,185 @@ namespace CCPad
 
         /// <summary>Called by SplitHost when layout/tabs change.</summary>
         public void NotifyLayoutChanged() => ScheduleAutosave();
+
+        // ── Closed-session history menu ─────────────────────────────────
+
+        private void OnAboutFlyoutOpening(object? sender, object e) => RefreshClosedSessionsMenu();
+
+        private void RefreshClosedSessionsMenu()
+        {
+            if (_closedSessionsMenu == null) return;
+            _closedSessionsMenu.Items.Clear();
+
+            var closed = SessionRecovery.ListClosed();
+            if (closed.Count == 0)
+            {
+                _closedSessionsMenu.Items.Add(new MenuFlyoutItem
+                {
+                    Text = Loc.T("closed_none"),
+                    IsEnabled = false
+                });
+                return;
+            }
+
+            foreach (var item in closed)
+            {
+                var captured = item;
+                var entryItem = new MenuFlyoutItem
+                {
+                    Text = $"{item.ClosedAt:MM-dd HH:mm}  {DescribeLayout(item.Entry.Layout)}"
+                };
+                entryItem.Click += async (_, _) => await RestoreClosedSessionAsync(captured);
+                _closedSessionsMenu.Items.Add(entryItem);
+            }
+        }
+
+        /// <summary>Short human label for a saved layout: its first few tab names.</summary>
+        private static string DescribeLayout(LayoutNode? node)
+        {
+            var names = new List<string>();
+            CollectTabNames(node, names);
+            if (names.Count == 0) return Loc.T("closed_unnamed");
+            var text = string.Join(", ", names.GetRange(0, Math.Min(3, names.Count)));
+            if (names.Count > 3) text += $" (+{names.Count - 3})";
+            return text;
+        }
+
+        private static void CollectTabNames(LayoutNode? node, List<string> into)
+        {
+            if (node == null) return;
+            if (node.Tabs != null)
+                foreach (var t in node.Tabs)
+                    if (!string.IsNullOrWhiteSpace(t.Name)) into.Add(t.Name);
+            CollectTabNames(node.First, into);
+            CollectTabNames(node.Second, into);
+        }
+
+        private async System.Threading.Tasks.Task RestoreClosedSessionAsync(SessionRecovery.ClosedEntry item)
+        {
+            var ws = item.Entry;
+            if (ws.Layout == null) return;
+            var projects = ProjectConfig.Load();
+
+            try
+            {
+                if (_splitHost != null)
+                {
+                    var xamlRoot = Content?.XamlRoot;
+                    if (xamlRoot != null)
+                    {
+                        var dlg = new ContentDialog
+                        {
+                            Title = Loc.T("closed_restore_title"),
+                            Content = new TextBlock
+                            {
+                                Text = Loc.T("closed_restore_body"),
+                                TextWrapping = TextWrapping.Wrap
+                            },
+                            PrimaryButtonText = Loc.T("recovery_restore"),
+                            CloseButtonText = Loc.T("cancel"),
+                            DefaultButton = ContentDialogButton.Primary,
+                            XamlRoot = xamlRoot
+                        };
+                        if (await dlg.ShowAsync() != ContentDialogResult.Primary) return;
+                    }
+
+                    // The replaced layout becomes a history entry itself, so this
+                    // action is always undoable from the same menu.
+                    try
+                    {
+                        var current = CreateSnapshot();
+                        if (current.Layout != null)
+                            SessionRecovery.ArchiveClosed(current);
+                    }
+                    catch { }
+
+                    _splitHost.DisposeAll();
+                    RootGrid.Children.Remove(_splitHost);
+                }
+
+                _splitHost = SplitHost.RestoreFromLayout(ws.Layout, projects);
+                RootGrid.Children.Add(_splitHost);
+                RestoreWindowSize(ws);
+                await _splitHost.InitializeTerminals();
+
+                if (_autosaveSubscribed)
+                {
+                    SubscribeSplitHostEvents();
+                    WriteRecoverySnapshot();
+                }
+                RefreshWorkspaceFlyout();
+            }
+            catch (Exception ex)
+            {
+                App.LogStartupError("RestoreClosedSession", ex);
+            }
+        }
+
+        // ── Memory-pressure guard ───────────────────────────────────────
+        // Many parallel CC Pad windows (each with its WebView2 renderer chain and
+        // CLI node processes) can exhaust RAM until every window — and its close
+        // dialog — freezes. Warn via InfoBar before that point: once at launch
+        // when this window joins an already-crowded/loaded system, and again at
+        // runtime when load crosses the red line.
+
+        private void StartResourceGuard()
+        {
+            if (_resourceTimer != null) return;
+            _resourceTimer = DispatcherQueue.CreateTimer();
+            _resourceTimer.Interval = TimeSpan.FromSeconds(30);
+            _resourceTimer.IsRepeating = true;
+            _resourceTimer.Tick += (_, _) =>
+            {
+                CheckResourcePressure(atLaunch: false);
+                RunAutoFreezeCheck();
+            };
+            _resourceTimer.Start();
+
+            // Launch check is delayed so this window's own WebView2/CLI spawn-up
+            // is already counted in the reading it warns about.
+            var initial = DispatcherQueue.CreateTimer();
+            initial.Interval = TimeSpan.FromSeconds(5);
+            initial.IsRepeating = false;
+            initial.Tick += (_, _) => CheckResourcePressure(atLaunch: true);
+            initial.Start();
+        }
+
+        private void CheckResourcePressure(bool atLaunch)
+        {
+            try
+            {
+                var (load, availGb) = ResourceGuard.MemorySnapshot();
+                if (load <= 0) return; // probe failed — stay quiet
+
+                if (atLaunch)
+                {
+                    int instances = ResourceGuard.CountInstances();
+                    if (instances >= ResourceGuard.WarnInstanceCount || load >= ResourceGuard.WarnLoadAtLaunch)
+                    {
+                        ResourceInfoBar.Title = Loc.T("mem_warn_title");
+                        ResourceInfoBar.Message = Loc.T("mem_warn_launch", instances, load, availGb.ToString("0.0"));
+                        ResourceInfoBar.IsOpen = true;
+                    }
+                    return;
+                }
+
+                if (load >= ResourceGuard.WarnLoadRuntime)
+                {
+                    // One warning per pressure episode: re-arm only after the
+                    // load has clearly come back down.
+                    if (!_resourceWarningArmed) return;
+                    _resourceWarningArmed = false;
+                    ResourceInfoBar.Title = Loc.T("mem_warn_title");
+                    ResourceInfoBar.Message = Loc.T("mem_warn_runtime", load, availGb.ToString("0.0"));
+                    ResourceInfoBar.IsOpen = true;
+                }
+                else if (load < ResourceGuard.RearmBelowLoad)
+                {
+                    _resourceWarningArmed = true;
+                }
+            }
+            catch { }
+        }
     }
 }

@@ -30,7 +30,16 @@ namespace CCPad
         // no session file). Used by the numpad-up recovery hotkey.
         private string? _resumeCommand;
         private bool _ready;
+        private bool _coreWired;   // one-time CoreWebView2 event/settings wiring done
         private bool _sessionPending;
+        // CLI output that arrived before xterm reported ready (the session is now
+        // started in parallel with the page load); replayed on "ready".
+        private readonly object _pendingLock = new();
+        private System.IO.MemoryStream? _pendingOutput;
+        private const int PendingOutputCap = 4 * 1024 * 1024;
+        // Actual spawn time of the current CLI process (StartSession), as opposed
+        // to LaunchedAtUtc which is when the pane was told to launch.
+        private DateTime _cliStartedUtc;
         private bool _focusOnFirstOutput;
         private int _cols = 120;
         private int _rows = 30;
@@ -51,6 +60,10 @@ namespace CCPad
 
         /// <summary>Display label set by the tab host.</summary>
         public string Label { get; set; } = "";
+
+        /// <summary>User-defined tag shown as a badge next to the tab title.
+        /// Empty = no tag. Persisted with the workspace snapshot.</summary>
+        public string TabTag { get; set; } = "";
 
         public event Action? NewTabRequested;
         public event Action? CloseTabRequested;
@@ -87,6 +100,28 @@ namespace CCPad
         private DateTime _outputRunStartUtc = DateTime.MinValue; // start of the current continuous output run while Waiting
         private DateTime _lastOutputUtc = DateTime.MinValue;     // last output seen while Waiting
 
+        // Symmetric self-correction for a stale GREEN light: green→amber normally
+        // rides on the CLI's Stop hook, but that callback can be lost (hookless
+        // resume, notify request dropped, hook file rejected) or undone by the
+        // amber→green persistence heuristic above firing on a long turn-end
+        // burst. Either way the pane reports Working forever and the staging
+        // queue never flushes. The tell for "actually idle" is the mirror of the
+        // persistence signal: a working CLI repaints its spinner/elapsed timer at
+        // least once a second, so sustained SILENCE while we show Working means
+        // the turn is over. Checked by a 1s timer (silence produces no output
+        // events, so an event-driven check could never see it). Guards:
+        //  • >6s since the last user keystroke, so someone idling mid-composition
+        //    at a stale-green prompt isn't interrupted by a queue flush;
+        //  • normally requires ≥1 output chunk since the green flip and >6s of
+        //    silence after it (≈six missed spinner frames);
+        //  • if NOTHING has painted at all since the flip (optimistic Enter on an
+        //    empty prompt, dead-quiet CLI), fall back to a longer 15s window.
+        // Real hook events keep overriding this — it only runs while Working.
+        private DateTime _lastAnyOutputUtc = DateTime.MinValue; // last output in ANY status
+        private DateTime _workingSinceUtc = DateTime.MinValue;  // when the light last turned green
+        private bool _workingOutputSeen;                        // any output since the green flip
+        private Timer? _workingWatchTimer;
+
         // The live CLI printed a fatal API error (e.g. "API Error: 529 Overloaded",
         // 402 billing, 403 auth). The process is still alive at its prompt, so no
         // exit fires and the hooks would show amber ("your turn") — but it's really
@@ -95,6 +130,17 @@ namespace CCPad
         // session restarts.
         private bool _apiErrored;
         private string _recentErrScan = "";
+
+        // While dropped to the fallback shell, watch for the user relaunching the
+        // CLI by hand ("claude --resume ..." typed at the cmd prompt WITHOUT our
+        // --settings hook file — only the ↑-injected command carries it). A
+        // hookless CLI never posts status callbacks, so nothing would ever clear
+        // the exit-red light. Two independent signals hand the light back to the
+        // heuristics: the typed command line itself (TrackShellInput) and the
+        // CLI's startup banner in the output stream (CheckShellCliBanner).
+        private bool _shellCliActive;
+        private string _shellLineBuf = "";
+        private string _recentBannerScan = "";
 
         private void SetStatus(PaneStatus status)
         {
@@ -106,6 +152,12 @@ namespace CCPad
                 // is actually still working despite this amber flip.
                 _outputRunStartUtc = DateTime.MinValue;
                 _lastOutputUtc = DateTime.MinValue;
+            }
+            else if (status == PaneStatus.Working)
+            {
+                // Arm the stale-green watch: silence from here on means idle.
+                _workingSinceUtc = DateTime.UtcNow;
+                _workingOutputSeen = false;
             }
             DispatcherQueue.TryEnqueue(() => StatusChanged?.Invoke(this));
             // Mirror the status into the WebView so the in-terminal command-staging
@@ -226,8 +278,17 @@ namespace CCPad
         }
 
         /// <summary>Map a hook callback (waiting/working) to a status change.</summary>
-        private void OnCliNotify(string evt)
+        private void OnCliNotify(string evt, string? cliSessionId)
         {
+            // Claude hooks report the CLI's real conversation UUID with every event.
+            // Track it live so snapshots survive /clear, an in-CLI /resume, or a
+            // claude relaunched from the fallback shell — the --session-id assigned
+            // at launch goes stale in all of those, and a stale ID makes the next
+            // restore silently start a fresh conversation.
+            if (!string.IsNullOrEmpty(cliSessionId) &&
+                !string.Equals(cliSessionId, SessionId, StringComparison.OrdinalIgnoreCase))
+                SessionId = cliSessionId;
+
             switch (evt)
             {
                 case "waiting":
@@ -254,15 +315,81 @@ namespace CCPad
         /// <summary>CLI mode this pane was launched with ("claude" / "codex"). Null until LaunchSession/InitializeAsync.</summary>
         public string? CliMode { get; private set; }
 
+        /// <summary>Conversation ID for this pane, when known. Claude: always set (we pass
+        /// --session-id / --resume). Codex: set only when restored via resume; fresh Codex
+        /// sessions are harvested from disk at snapshot time instead.</summary>
+        public string? SessionId { get; set; }
+
+        /// <summary>When the CLI process was started — used to scope the Codex
+        /// session-file scan to files this pane could have produced.</summary>
+        public DateTime LaunchedAtUtc { get; private set; }
+
+        /// <summary>When a CLI was brought back to life inside the fallback shell
+        /// (possibly hand-typed, without our hooks), or null if that never happened.
+        /// Such a CLI can own a conversation the pane isn't tracking, so it re-opens
+        /// the disk-scan fallback in ResolveSessionId — scoped to files written
+        /// since this moment, to keep unrelated same-cwd CLIs (bots, plain
+        /// terminals) from being mistaken for ours.</summary>
+        public DateTime? ShellRelaunchUtc { get; private set; }
+
+        /// <summary>Most recent sign of life on this pane (launch, user keystroke,
+        /// or any pty output — a working CLI repaints its spinner every second, so
+        /// an old reading means the CLI really is idle at its prompt). Used by the
+        /// auto-freeze idle scan.</summary>
+        public DateTime LastActivityUtc
+        {
+            get
+            {
+                var t = LaunchedAtUtc;
+                if (_lastUserInputUtc > t) t = _lastUserInputUtc;
+                if (_lastAnyOutputUtc > t) t = _lastAnyOutputUtc;
+                return t;
+            }
+        }
+
+        /// <summary>
+        /// Screenshot of the live terminal page, for the frozen-tab placeholder.
+        /// Must be called BEFORE the pane is disposed. Null on any failure (e.g.
+        /// a dead renderer) — the placeholder then falls back to a plain card.
+        /// </summary>
+        public async Task<Microsoft.UI.Xaml.Media.ImageSource?> CaptureSnapshotAsync()
+        {
+            if (_disposed || WebView.CoreWebView2 == null) return null;
+            try
+            {
+                using var stream = new Windows.Storage.Streams.InMemoryRandomAccessStream();
+                await WebView.CoreWebView2.CapturePreviewAsync(
+                    CoreWebView2CapturePreviewImageFormat.Png, stream);
+                stream.Seek(0);
+                var bmp = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage();
+                await bmp.SetSourceAsync(stream);
+                return bmp;
+            }
+            catch { return null; }
+        }
+
         public TerminalPane()
         {
             InitializeComponent();
             WebView.DefaultBackgroundColor = Windows.UI.Color.FromArgb(255, 12, 12, 12);
             CCPad.Settings.ThemeManager.EffectiveChanged += OnThemeEffectiveChanged;
+            CCPad.Settings.LastCmdBarManager.Changed += OnLastCmdBarChanged;
+            // Stale-green watchdog. Always ticking (created once here so no
+            // create/dispose race with SetStatus); the callback no-ops unless
+            // the light is green. See the _workingWatchTimer field comment.
+            _workingWatchTimer = new Timer(CheckStaleWorking, null, 1000, 1000);
         }
 
         // Push the live theme into the xterm front-end (dark-only font/dim styling).
         private void OnThemeEffectiveChanged(bool dark) => SendTheme(dark);
+
+        // Global last-command-bar toggle flipped (toolbar button or Alt+L in any pane).
+        private void OnLastCmdBarChanged(bool on)
+        {
+            if (_disposed) return;
+            string json = $"{{\"type\":\"setLastCmdBar\",\"on\":{(on ? "true" : "false")}}}";
+            DispatcherQueue.TryEnqueue(() => WebView.CoreWebView2?.PostWebMessageAsString(json));
+        }
 
         private void SendTheme(bool dark)
         {
@@ -273,7 +400,8 @@ namespace CCPad
 
         /// <summary>
         /// Phase 1: Initialize WebView2 and load xterm.js. No process is started.
-        /// Can be called while the pane sits in a hidden container.
+        /// Can be called while the pane sits in a hidden container. Safe to call
+        /// again after a failure (retry button) — core wiring happens only once.
         /// </summary>
         public async Task PrewarmAsync()
         {
@@ -298,27 +426,153 @@ namespace CCPad
             if (WebView.CoreWebView2 == null)
                 throw new InvalidOperationException("WebView2 failed to initialize.");
 
-            WebView.CoreWebView2.Settings.IsWebMessageEnabled = true;
-            WebView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
-            // Disable WebView2's built-in page zoom (Ctrl+wheel / Ctrl +-0). Its
-            // ZoomFactor is a persistent, accumulating property capped at 5x, so a
-            // long-lived pane drifts to the ceiling and "can't zoom in any more".
-            // We handle Ctrl+wheel ourselves as terminal font-size zoom instead.
-            WebView.CoreWebView2.Settings.IsZoomControlEnabled = false;
-            WebView.CoreWebView2.WebMessageReceived += OnWebMessage;
-            WebView.GotFocus += (_, _) => PaneFocused?.Invoke();
+            if (!_coreWired)
+            {
+                _coreWired = true;
+                WebView.CoreWebView2.Settings.IsWebMessageEnabled = true;
+                WebView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
+                // Disable WebView2's built-in page zoom (Ctrl+wheel / Ctrl +-0). Its
+                // ZoomFactor is a persistent, accumulating property capped at 5x, so a
+                // long-lived pane drifts to the ceiling and "can't zoom in any more".
+                // We handle Ctrl+wheel ourselves as terminal font-size zoom instead.
+                WebView.CoreWebView2.Settings.IsZoomControlEnabled = false;
+                WebView.CoreWebView2.WebMessageReceived += OnWebMessage;
+                // Renderer death (Chromium reclaims hidden/background renderers under
+                // memory pressure) is only ever reported through this event — without
+                // it the pane just turns permanently white.
+                WebView.CoreWebView2.ProcessFailed += OnProcessFailed;
+                WebView.GotFocus += (_, _) => PaneFocused?.Invoke();
 
-            string xtermFolder = GetXtermFolder();
-            WebView.CoreWebView2.SetVirtualHostNameToFolderMapping(
-                "xterm.local", xtermFolder,
-                CoreWebView2HostResourceAccessKind.Allow);
+                string xtermFolder = GetXtermFolder();
+                WebView.CoreWebView2.SetVirtualHostNameToFolderMapping(
+                    "xterm.local", xtermFolder,
+                    CoreWebView2HostResourceAccessKind.Allow);
+            }
 
+            NavigatePage();
+            await WaitForReadyAsync();
+        }
+
+        /// <summary>(Re)load the terminal page. Resets the ready gate first, so a
+        /// pending StartSession fires again once the fresh page reports in.</summary>
+        private void NavigatePage()
+        {
+            _ready = false;
             _readyTcs = new TaskCompletionSource();
-            WebView.CoreWebView2.NavigateToString(
+            WebView.CoreWebView2!.NavigateToString(
                 TerminalHtml
                     .Replace("Auto Confirm (自动回车)", Localization.Loc.T("autoconfirm_title"))
-                    .Replace("__INITIAL_DARK__", CCPad.Settings.ThemeManager.IsDark ? "true" : "false"));
-            await _readyTcs.Task;
+                    .Replace("__INITIAL_DARK__", CCPad.Settings.ThemeManager.IsDark ? "true" : "false")
+                    .Replace("__INITIAL_LASTCMD__", CCPad.Settings.LastCmdBarManager.IsOn ? "true" : "false"));
+        }
+
+        /// <summary>Await xterm's "ready" callback, bounded — an unbounded wait is
+        /// how a failed page load used to become a silent, permanent white pane.</summary>
+        private async Task WaitForReadyAsync()
+        {
+            var readyTask = _readyTcs!.Task;
+            var winner = await Task.WhenAny(readyTask, Task.Delay(ReadyTimeoutMs));
+            if (winner != readyTask)
+                throw new TimeoutException($"终端页面在 {ReadyTimeoutMs / 1000} 秒内未就绪。");
+            await readyTask;
+        }
+
+        private const int ReadyTimeoutMs = 10000;
+
+        /// <summary>
+        /// Liveness probe: does the page's renderer still answer script execution?
+        /// A prewarmed pane can sit hidden for hours and have its renderer reclaimed
+        /// by Chromium; handing it out unprobed mounts a dead (white) terminal.
+        /// </summary>
+        public async Task<bool> PingAsync(int timeoutMs = 1000)
+        {
+            if (_disposed || !_ready || WebView.CoreWebView2 == null) return false;
+            try
+            {
+                var probe = WebView.CoreWebView2.ExecuteScriptAsync("1").AsTask();
+                var winner = await Task.WhenAny(probe, Task.Delay(timeoutMs));
+                return winner == probe && probe.Status == TaskStatus.RanToCompletion;
+            }
+            catch { return false; }
+        }
+
+        private void OnProcessFailed(CoreWebView2 sender, CoreWebView2ProcessFailedEventArgs args)
+        {
+            if (_disposed) return;
+            DispatcherQueue.TryEnqueue(async () =>
+            {
+                if (_disposed) return;
+                switch (args.ProcessFailedKind)
+                {
+                    case CoreWebView2ProcessFailedKind.RenderProcessExited:
+                    case CoreWebView2ProcessFailedKind.RenderProcessUnresponsive:
+                    case CoreWebView2ProcessFailedKind.FrameRenderProcessExited:
+                        // The renderer died but the ConPty session (and the CLI in
+                        // it) is untouched — reload the page and hand it back.
+                        try
+                        {
+                            NavigatePage();
+                            await WaitForReadyAsync();
+                            OnPageRecovered();
+                        }
+                        catch
+                        {
+                            if (!_disposed)
+                                ShowErrorOverlay($"渲染进程崩溃（{args.ProcessFailedKind}），自动恢复失败。会话进程仍在运行，点击重试重新加载页面。");
+                        }
+                        break;
+
+                    default:
+                        // Browser-process-level failure — reload alone can't fix it;
+                        // let the retry button drive a full re-init attempt.
+                        ShowErrorOverlay($"WebView2 进程异常（{args.ProcessFailedKind}）。会话进程仍在运行，点击重试重新初始化。");
+                        break;
+                }
+            });
+        }
+
+        /// <summary>Re-sync pane state onto the freshly reloaded page after a renderer
+        /// crash: scrollback is gone, but the pty and the CLI in it are still alive.</summary>
+        private void OnPageRecovered()
+        {
+            if (_disposed || _sessionPending) return;
+            if (_session != null)
+            {
+                SendOutput(Encoding.UTF8.GetBytes(
+                    "\r\n\x1b[33m[终端页面已自动恢复；之前的滚动内容丢失，会话仍在运行]\x1b[0m\r\n"));
+                // Wiggle the pty size so full-screen CLIs repaint into the blank page.
+                _session.Resize(Math.Max(2, _cols - 1), _rows);
+                _session.Resize(_cols, _rows);
+            }
+            SendPaneStatus(_status);
+            SendShellMode(_inShell && _resumeCommand != null);
+            if (StagingOn) SetStaging(true);
+        }
+
+        private void ShowErrorOverlay(string message)
+        {
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                if (_disposed) return;
+                ErrorDetail.Text = message;
+                ErrorOverlay.Visibility = Visibility.Visible;
+            });
+        }
+
+        private async void OnRetryClick(object sender, RoutedEventArgs e)
+        {
+            if (_disposed) return;
+            ErrorOverlay.Visibility = Visibility.Collapsed;
+            try
+            {
+                await PrewarmAsync();
+                OnPageRecovered();
+            }
+            catch (Exception ex)
+            {
+                if (!_disposed)
+                    ShowErrorOverlay("重试失败：" + ex.Message);
+            }
         }
 
         /// <summary>
@@ -330,6 +584,7 @@ namespace CCPad
             _command = command;
             _workingDir = workingDir;
             CliMode = cliMode;
+            LaunchedAtUtc = DateTime.UtcNow;
             _sessionPending = true;
             _focusOnFirstOutput = focusOnReady;
             if (_ready)
@@ -337,16 +592,32 @@ namespace CCPad
         }
 
         /// <summary>
-        /// Combined init for non-prewarmed path (first tab).
+        /// Combined init for non-prewarmed path (first tab). Failures surface as an
+        /// in-pane error overlay with a retry button instead of propagating up into
+        /// async-void event handlers (or, before this, a silent white pane).
         /// </summary>
         public async Task InitializeAsync(string command, string? workingDir = null, bool focusOnReady = false, string? cliMode = null)
         {
             _command = command;
             _workingDir = workingDir;
             CliMode = cliMode;
+            LaunchedAtUtc = DateTime.UtcNow;
             _sessionPending = true;
             _focusOnFirstOutput = focusOnReady;
-            await PrewarmAsync();
+            // Spawn the CLI in parallel with the WebView2/xterm bring-up instead of
+            // after it — early output is buffered (SendOutput) and replayed when the
+            // page reports ready. A cold start/thaw then costs max(page, CLI)
+            // instead of page + CLI.
+            StartSession();
+            try
+            {
+                await PrewarmAsync();
+            }
+            catch (Exception ex)
+            {
+                if (_disposed) return;
+                ShowErrorOverlay("终端初始化失败：" + ex.Message);
+            }
         }
 
         private static string GetXtermFolder()
@@ -372,10 +643,15 @@ namespace CCPad
             _inShell = false;
             _apiErrored = false;
             _recentErrScan = "";
+            _shellCliActive = false;
+            _shellLineBuf = "";
+            _recentBannerScan = "";
             _resumeCommand = null;
+            ShellRelaunchUtc = null;
             SendShellMode(false);
             try
             {
+                _cliStartedUtc = DateTime.UtcNow;
                 _session = ConPtySession.Start(_command, _cols, _rows, _workingDir);
                 _session.OutputReceived += OnOutput;
                 _session.ProcessExited += OnProcessExited;
@@ -407,12 +683,16 @@ namespace CCPad
 
         private void OnOutput(byte[] data)
         {
+            _lastAnyOutputUtc = DateTime.UtcNow;
+            if (_status == PaneStatus.Working)
+                _workingOutputSeen = true;
             SendOutput(data);
             if (_focusOnFirstOutput)
             {
                 _focusOnFirstOutput = false;
                 DispatcherQueue.TryEnqueue(FocusTerminal);
             }
+            CheckShellCliBanner(data);
             CheckApiError(data);
             MaybeCorrectStaleWaiting(data);
             if (_autoConfirm)
@@ -427,7 +707,7 @@ namespace CCPad
         // cleared on match so the same banner can't re-trigger after recovery.
         private void CheckApiError(byte[] data)
         {
-            if (_inShell || _apiErrored) return;
+            if ((_inShell && !_shellCliActive) || _apiErrored) return;
             _recentErrScan += Encoding.UTF8.GetString(data);
             if (_recentErrScan.Length > 1024)
                 _recentErrScan = _recentErrScan[^1024..];
@@ -438,6 +718,79 @@ namespace CCPad
                 _apiErrored = true;
                 SetStatus(PaneStatus.Disconnected);
             }
+        }
+
+        // While at the fallback shell with no CLI detected yet, watch the output
+        // stream for Claude's startup banner ("Claude Code v2.1.198"). This
+        // catches relaunches the input watcher can't see (doskey history recall,
+        // a .bat wrapper). Same rolling-buffer trick as CheckApiError. Codex has
+        // no stable banner marker; its relaunch is caught by TrackShellInput only.
+        private void CheckShellCliBanner(byte[] data)
+        {
+            if (!_inShell || _shellCliActive) return;
+            _recentBannerScan += Encoding.UTF8.GetString(data);
+            if (_recentBannerScan.Length > 1024)
+                _recentBannerScan = _recentBannerScan[^1024..];
+            if (_recentBannerScan.ToLowerInvariant().Contains("claude code v"))
+            {
+                _recentBannerScan = "";
+                OnShellCliRelaunched();
+            }
+        }
+
+        // Keystroke-level watcher for the fallback shell: reconstruct the command
+        // line being typed so the Enter that runs "claude ..." / "codex ..." is
+        // recognized even though the relaunched CLI is a grandchild of the pty
+        // (invisible to our process-exit tracking). Best-effort: backspace is
+        // honored; escape sequences (history recall, cursor moves) abandon the
+        // line and leave detection to the banner watcher.
+        private void TrackShellInput(string data)
+        {
+            foreach (char c in data)
+            {
+                if (c == '\r' || c == '\n')
+                {
+                    string line = _shellLineBuf.Trim();
+                    _shellLineBuf = "";
+                    if (line.StartsWith("claude", StringComparison.OrdinalIgnoreCase) ||
+                        line.StartsWith("codex", StringComparison.OrdinalIgnoreCase))
+                        OnShellCliRelaunched();
+                }
+                else if (c == '\b' || c == '\x7f')
+                {
+                    if (_shellLineBuf.Length > 0)
+                        _shellLineBuf = _shellLineBuf[..^1];
+                }
+                else if (c == '\x1b')
+                {
+                    _shellLineBuf = "";
+                    return;
+                }
+                else if (!char.IsControl(c) && _shellLineBuf.Length < 512)
+                {
+                    _shellLineBuf += c;
+                }
+            }
+        }
+
+        // The user brought a CLI back to life inside the fallback shell. It may
+        // run WITHOUT our --settings hook file (hand-typed resume), so hooks may
+        // never fire for this pane again: clear the exit-red lock and hand the
+        // light back to the heuristics (Enter → green, sustained output → green)
+        // with the amber resting state as the starting point.
+        private void OnShellCliRelaunched()
+        {
+            _shellCliActive = true;
+            _apiErrored = false;
+            _recentErrScan = "";
+            // May be running untracked (hand-typed, no hooks) — remember when, so
+            // the snapshot fallback can scan for a conversation it started.
+            ShellRelaunchUtc = DateTime.UtcNow;
+            // The ↑ resume offer is stale now — a later ↑ must reach the CLI
+            // (prompt history), not paste a resume command into its input box.
+            _resumeCommand = null;
+            SendShellMode(false);
+            SetStatus(PaneStatus.Waiting);
         }
 
         // If we're showing Waiting (amber) but the CLI streams output CONTINUOUSLY
@@ -475,6 +828,26 @@ namespace CCPad
 
             if ((now - _outputRunStartUtc).TotalMilliseconds >= OutputRunFlipMs)
                 SetStatus(PaneStatus.Working);
+        }
+
+        // The mirror correction: showing Working (green) but the CLI has gone
+        // SILENT for a sustained window → the turn actually ended and the Stop
+        // signal was lost, so recover the amber light (which also lets the
+        // staging queue flush). See the _workingWatchTimer field comment for the
+        // full rationale and guards. Runs on a 1s timer, off the UI thread.
+        private const double WorkingSilenceFlipMs = 6000;
+        private const double WorkingNoPaintFlipMs = 15000;
+        private void CheckStaleWorking(object? _)
+        {
+            if (_disposed || _status != PaneStatus.Working) return;
+            var now = DateTime.UtcNow;
+            if (_lastUserInputUtc != DateTime.MinValue &&
+                (now - _lastUserInputUtc).TotalMilliseconds < WorkingSilenceFlipMs) return;
+            double silentMs = _workingOutputSeen
+                ? (now - _lastAnyOutputUtc).TotalMilliseconds
+                : (now - _workingSinceUtc).TotalMilliseconds;
+            if (silentMs >= (_workingOutputSeen ? WorkingSilenceFlipMs : WorkingNoPaintFlipMs))
+                SetStatus(PaneStatus.Waiting);
         }
 
         private void CheckAutoConfirm(byte[] data)
@@ -550,9 +923,20 @@ namespace CCPad
                 // latest session file on disk ourselves and print the exact
                 // resume command, so recovery works even when Claude died hard.
                 _inShell = true;
+                _shellCliActive = false;
+                _shellLineBuf = "";
+                _recentBannerScan = "";
                 SetStatus(PaneStatus.Disconnected);
+                // A CLI that dies within seconds of its spawn almost certainly
+                // failed to start (resume conflict, bad session, missing binary
+                // deeper down) — say so in red instead of letting the drop to cmd
+                // read as "still restoring".
+                var aliveSecs = (int)(DateTime.UtcNow - _cliStartedUtc).TotalSeconds;
+                string quickExitWarn = aliveSecs < 20
+                    ? "\r\n\x1b[31m[" + Localization.Loc.T("cli_exit_fast", aliveSecs) + "]\x1b[0m\r\n"
+                    : "";
                 // BuildExitBanner() also sets _resumeCommand as a side effect.
-                SendOutput(Encoding.UTF8.GetBytes(BuildExitBanner()));
+                SendOutput(Encoding.UTF8.GetBytes(quickExitWarn + BuildExitBanner()));
                 SendShellMode(_resumeCommand != null);
                 _session?.SpawnProcess(ShellCommand, _workingDir);
             }
@@ -560,6 +944,7 @@ namespace CCPad
             {
                 // The fallback shell exited too — offer to relaunch the CLI.
                 _inShell = false;
+                _shellCliActive = false;
                 _resumeCommand = null;
                 SendShellMode(false);
                 _awaitingRestart = true;
@@ -658,10 +1043,31 @@ namespace CCPad
         private void SendOutput(byte[] data)
         {
             if (_disposed) return;
+            // Page not up yet (parallel CLI start, or a reload after a renderer
+            // crash) — buffer; the "ready" handler replays the backlog in order.
+            if (!_ready)
+            {
+                lock (_pendingLock)
+                {
+                    if (!_ready)
+                    {
+                        _pendingOutput ??= new System.IO.MemoryStream();
+                        if (_pendingOutput.Length < PendingOutputCap)
+                            _pendingOutput.Write(data, 0, data.Length);
+                        return;
+                    }
+                }
+            }
             string b64 = Convert.ToBase64String(data);
             string json = $"{{\"type\":\"output\",\"data\":\"{b64}\"}}";
             DispatcherQueue.TryEnqueue(() => WebView.CoreWebView2?.PostWebMessageAsString(json));
         }
+
+        /// <summary>Print a yellow host-side notice line into the terminal (e.g.
+        /// "saved conversation not found"). Buffered along with CLI output when
+        /// the page isn't ready yet, so it survives a cold thaw.</summary>
+        public void ShowNotice(string text)
+            => SendOutput(Encoding.UTF8.GetBytes("\r\n\x1b[33m[" + text + "]\x1b[0m\r\n"));
 
         // Tell the xterm front-end whether we're in the dropped-to-cmd recovery
         // state, so it knows to map numpad-↑ to a resume request (and to leave
@@ -687,10 +1093,32 @@ namespace CCPad
                     case "ready":
                         _cols = doc.RootElement.GetProperty("cols").GetInt32();
                         _rows = doc.RootElement.GetProperty("rows").GetInt32();
-                        _ready = true;
+                        byte[]? backlog = null;
+                        lock (_pendingLock)
+                        {
+                            _ready = true;
+                            if (_pendingOutput is { Length: > 0 })
+                                backlog = _pendingOutput.ToArray();
+                            _pendingOutput = null;
+                        }
                         _readyTcs?.TrySetResult();
                         if (_sessionPending)
+                        {
                             StartSession();
+                        }
+                        else if (_session != null)
+                        {
+                            // The CLI outlived (or preceded) this page load: replay
+                            // what it printed while the page was coming up, re-sync
+                            // the status light, and wiggle the pty size so a
+                            // full-screen CLI repaints cleanly at the real
+                            // dimensions (a parallel start spawns at the default).
+                            if (backlog != null)
+                                SendOutput(backlog);
+                            SendPaneStatus(_status);
+                            _session.Resize(Math.Max(2, _cols - 1), _rows);
+                            _session.Resize(_cols, _rows);
+                        }
                         break;
 
                     case "input":
@@ -713,6 +1141,11 @@ namespace CCPad
                                 _apiErrored = false;
                                 SetStatus(PaneStatus.Working);
                             }
+                            // Ordered after the green-flip check: a pasted
+                            // "claude --resume ...\r" must land on amber (fresh
+                            // CLI resting state), not flash green.
+                            if (_inShell && !_shellCliActive)
+                                TrackShellInput(data);
                             _session?.WriteInput(data);
                         }
                         break;
@@ -776,6 +1209,13 @@ namespace CCPad
                         DispatcherQueue.TryEnqueue(ToggleStaging);
                         break;
 
+                    case "toggleLastCmd":
+                        // Alt+L from the front-end: flip the GLOBAL last-command bar.
+                        // The manager fans the change out to every pane (and the
+                        // MainWindow button) via its Changed event.
+                        DispatcherQueue.TryEnqueue(CCPad.Settings.LastCmdBarManager.Toggle);
+                        break;
+
                     case "stageImagePaste":
                         // Alt+V inside the staging input: capture the clipboard image
                         // host-side and feed its file path back for queueing.
@@ -791,6 +1231,11 @@ namespace CCPad
                         if (_inShell && _resumeCommand != null)
                         {
                             _session?.WriteInput(_resumeCommand);
+                            // Seed the shell input watcher with the injected text
+                            // (it bypasses the "input" path) so the user's Enter
+                            // flips the light instantly; the SessionStart hook
+                            // then re-asserts the truth.
+                            _shellLineBuf = _resumeCommand;
                             _resumeCommand = null;
                             SendShellMode(false);
                         }
@@ -828,9 +1273,11 @@ namespace CCPad
             if (_disposed) return;
             _disposed = true;
             CCPad.Settings.ThemeManager.EffectiveChanged -= OnThemeEffectiveChanged;
+            CCPad.Settings.LastCmdBarManager.Changed -= OnLastCmdBarChanged;
             _loadedTcs?.TrySetCanceled();
             _readyTcs?.TrySetCanceled();
             _autoConfirmTimer?.Dispose();
+            _workingWatchTimer?.Dispose();
             CliNotify.Unregister(PaneId);
             CliNotify.CleanupHooks(PaneId);
             Notify.ToastService.UnregisterPane(PaneId);
@@ -846,7 +1293,10 @@ namespace CCPad
             try
             {
                 if (WebView.CoreWebView2 != null)
+                {
                     WebView.CoreWebView2.WebMessageReceived -= OnWebMessage;
+                    WebView.CoreWebView2.ProcessFailed -= OnProcessFailed;
+                }
                 WebView.Close();
             }
             catch { }
@@ -873,6 +1323,31 @@ namespace CCPad
                 ::-webkit-scrollbar-track { background: #1e1e1e; }
                 ::-webkit-scrollbar-thumb { background: #424242; border-radius: 5px; }
                 ::-webkit-scrollbar-thumb:hover { background: #555; }
+                /* ── Last-command info bar (上一条命令) — global toggle, Alt+L ── */
+                #lastcmd {
+                  display: none;
+                  flex: 0 0 auto;
+                  align-items: center;
+                  gap: 8px;
+                  padding: 3px 10px;
+                  background: #141414;
+                  border-bottom: 1px solid #333;
+                  font-family: 'Cascadia Code', 'Microsoft YaHei', 'Cascadia Mono', Consolas, monospace;
+                  font-size: 13px;
+                  color: #9aa;
+                  cursor: pointer;
+                  user-select: none;
+                }
+                #lastcmd.open { display: flex; }
+                #lastcmd .lbl { flex: 0 0 auto; color: #667; }
+                #lastcmd .txt {
+                  flex: 1 1 auto;
+                  overflow: hidden;
+                  text-overflow: ellipsis;
+                  white-space: nowrap;
+                  color: #cfcfcf;
+                }
+                #lastcmd .time { flex: 0 0 auto; color: #667; }
                 /* ── Command staging (命令寄存) — toggled by the WinUI toolbar button ── */
                 #stage {
                   display: none;
@@ -943,6 +1418,42 @@ namespace CCPad
                   background: #c0392b;
                   border-color: #c0392b;
                 }
+                #stage-list li .edit {
+                  flex: 0 0 auto;
+                  cursor: pointer;
+                  color: #c4c4c4;
+                  font-size: 15px;
+                  line-height: 1;
+                  width: 24px;
+                  height: 24px;
+                  display: flex;
+                  align-items: center;
+                  justify-content: center;
+                  border: 1px solid #444;
+                  border-radius: 4px;
+                  transition: all 0.12s;
+                }
+                #stage-list li .edit:hover {
+                  color: #fff;
+                  background: #3a4a8a;
+                  border-color: #5a6ac0;
+                }
+                #stage-list li .edit-box {
+                  flex: 1 1 auto;
+                  resize: none;
+                  min-height: 26px;
+                  max-height: 84px;
+                  background: #0c0c0c;
+                  color: #eee;
+                  border: 1px solid #6a78d8;
+                  border-radius: 4px;
+                  padding: 3px 6px;
+                  font-family: inherit;
+                  font-size: 14px;
+                  line-height: 1.3;
+                  outline: none;
+                  white-space: pre-wrap;
+                }
                 #stage-empty { padding: 6px 10px; font-size: 14px; color: #666; }
                 #stage-input-row { display: flex; align-items: flex-end; padding: 6px 10px; gap: 8px; }
                 #stage-input {
@@ -991,6 +1502,11 @@ namespace CCPad
               <link rel="stylesheet" href="https://xterm.local/xterm.css"/>
             </head>
             <body>
+              <div id="lastcmd" title="点击复制全文 · Alt+L 关闭">
+                <span class="lbl">▸ 上一条</span>
+                <span class="txt" id="lastcmd-text">—</span>
+                <span class="time" id="lastcmd-time"></span>
+              </div>
               <div id="terminal"></div>
               <div id="stage">
                 <div id="stage-head">
@@ -1012,7 +1528,7 @@ namespace CCPad
                     <button id="stage-bulk-cancel">取消</button>
                   </div>
                 </div>
-                <div id="stage-hint">寄存模式:输入排进队列,会话空闲时自动逐条发出。Alt+V 贴图(存为文件、路径入队),Alt+` 退出寄存。</div>
+                <div id="stage-hint">寄存模式:输入排进队列,会话空闲时自动逐条发出。点✎或双击可编辑(编辑中暂停发送),Alt+V 贴图,Alt+` 退出寄存。</div>
               </div>
               <script src="https://xterm.local/xterm.js"></script>
               <script src="https://xterm.local/xterm-addon-fit.js"></script>
@@ -1061,6 +1577,91 @@ namespace CCPad
                   setFontSize(term.options.fontSize + (e.deltaY < 0 ? 1 : -1));
                 }, { passive: false });
 
+                /* ── Last-command info bar (上一条命令) ──────────────────────
+                   A shadow buffer mirrors what the user types into the CLI —
+                   works for Claude, Codex, cmd, anything on the PTY: printable
+                   input (incl. IME-composed CJK and pastes, both arrive via
+                   term.onData) appends, backspace pops, Enter commits to the
+                   bar. Staged commands commit exactly at flush time in
+                   sendCmd(). Known limits: ↑/↓ history recall desyncs the
+                   buffer, so ↑/↓ clear it rather than guess wrong. */
+                let lastCmdOn = false;
+                let lastCmdFull = '';
+                let shadowBuf = '';
+                const lastCmdBar = document.getElementById('lastcmd');
+                const lastCmdText = document.getElementById('lastcmd-text');
+                const lastCmdTime = document.getElementById('lastcmd-time');
+                let lastCmdCopyTimer = null;
+                function applyLastCmdBar(on) {
+                  lastCmdOn = !!on;
+                  lastCmdBar.classList.toggle('open', lastCmdOn);
+                  fit.fit();
+                }
+                function setLastCmd(text) {
+                  const t = String(text).replace(/\s+$/, '');
+                  if (!t) return;
+                  lastCmdFull = t;
+                  lastCmdText.textContent = t.replace(/\r?\n|\r/g, ' ⏎ ');
+                  lastCmdText.title = t;
+                  const now = new Date();
+                  lastCmdTime.textContent =
+                    String(now.getHours()).padStart(2, '0') + ':' +
+                    String(now.getMinutes()).padStart(2, '0');
+                }
+                function shadowCommit() {
+                  if (shadowBuf.replace(/\s/g, '').length) setLastCmd(shadowBuf);
+                  shadowBuf = '';
+                }
+                function shadowFeed(data) {
+                  // Bracketed paste (CLIs turn it on): the payload is literal
+                  // text — an inner \r is a newline in the prompt box there,
+                  // NOT a submit.
+                  if (data.indexOf('\x1b[200~') !== -1) {
+                    shadowBuf += data.split('\x1b[200~').join('')
+                                     .split('\x1b[201~').join('')
+                                     .replace(/\r\n?/g, '\n');
+                    return;
+                  }
+                  for (let i = 0; i < data.length; i++) {
+                    const c = data[i];
+                    if (c === '\x1b') {
+                      const n = data[i + 1];
+                      if (n === '\r') { shadowBuf += '\n'; i++; continue; }  // Alt/Shift+Enter → newline
+                      if (n === '[') {
+                        let j = i + 2;                                       // skip CSI …final
+                        while (j < data.length && !(data[j] >= '@' && data[j] <= '~')) j++;
+                        if (data[j] === 'A' || data[j] === 'B') shadowBuf = ''; // ↑/↓ history: desynced
+                        i = j;
+                      } else if (n === 'O') {                                // SS3 (app-cursor arrows)
+                        if (data[i + 2] === 'A' || data[i + 2] === 'B') shadowBuf = '';
+                        i += 2;
+                      }
+                      continue;                                              // lone ESC: ignore
+                    }
+                    if (c === '\r' || c === '\n') { shadowCommit(); continue; }
+                    if (c === '\x7f' || c === '\b') {                        // backspace: pop a code point
+                      shadowBuf = Array.from(shadowBuf).slice(0, -1).join('');
+                      continue;
+                    }
+                    if (c === '\x15' || c === '\x03') { shadowBuf = ''; continue; } // Ctrl+U / Ctrl+C
+                    if (c === '\x17') {                                      // Ctrl+W: kill last word
+                      shadowBuf = shadowBuf.replace(/\S+\s*$/, '');
+                      continue;
+                    }
+                    if (c < ' ') continue;                                   // other control chars
+                    shadowBuf += c;
+                  }
+                }
+                lastCmdBar.addEventListener('click', () => {
+                  if (!lastCmdFull) return;
+                  window.chrome.webview.postMessage(JSON.stringify({ type: 'copy', data: lastCmdFull }));
+                  const prev = lastCmdTime.textContent;
+                  lastCmdTime.textContent = '已复制 ✓';
+                  if (lastCmdCopyTimer) clearTimeout(lastCmdCopyTimer);
+                  lastCmdCopyTimer = setTimeout(() => { lastCmdTime.textContent = prev; }, 1200);
+                });
+                applyLastCmdBar(__INITIAL_LASTCMD__);
+
                 /* ── Command staging (命令寄存) ── */
                 let stagingOn = false;
                 let queue = [];
@@ -1087,7 +1688,13 @@ namespace CCPad
                     : lastStatus === 'disconnected' ? ' disconnected' : '');
                   stageStatus.textContent = statusLabel(lastStatus);
                 }
+                // Index of the queue item being edited inline, or null. While an
+                // edit is open the flush machinery is PAUSED (see maybeFlush) so a
+                // CLI going idle mid-edit can't send the very line under the
+                // user's cursor, and indices can't shift under the editor.
+                let editingIdx = null;
                 function renderQueue() {
+                  editingIdx = null;   // any rebuild tears the edit box down
                   stageList.innerHTML = '';
                   queue.forEach((cmd, i) => {
                     const li = document.createElement('li');
@@ -1095,14 +1702,60 @@ namespace CCPad
                     idx.className = 'idx'; idx.textContent = (i + 1) + '.';
                     const txt = document.createElement('span');
                     txt.className = 'txt'; txt.textContent = cmd.replace(/\n/g, ' ⏎ ');
+                    txt.addEventListener('dblclick', () => beginEdit(i));
+                    const edit = document.createElement('span');
+                    edit.className = 'edit'; edit.textContent = '✎'; edit.title = '编辑这条(双击文字也可)';
+                    edit.addEventListener('click', () => beginEdit(i));
                     const del = document.createElement('span');
                     del.className = 'del'; del.textContent = '✕'; del.title = '删除这条';
                     del.addEventListener('click', () => { queue.splice(i, 1); renderQueue(); });
-                    li.appendChild(idx); li.appendChild(txt); li.appendChild(del);
+                    li.appendChild(idx); li.appendChild(txt); li.appendChild(edit); li.appendChild(del);
                     stageList.appendChild(li);
                   });
                   stageEmpty.style.display = queue.length ? 'none' : 'block';
                   stageCount.textContent = queue.length + ' 条待发';
+                }
+                // Swap item i's text span for a textarea in place. Enter saves,
+                // Esc cancels, clicking away saves (blur). Saving an emptied box
+                // deletes the item. Position in the queue is preserved.
+                function beginEdit(i) {
+                  if (editingIdx !== null) return;   // one edit at a time
+                  editingIdx = i;
+                  const li = stageList.children[i];
+                  const txt = li.querySelector('.txt');
+                  const box = document.createElement('textarea');
+                  box.className = 'edit-box';
+                  box.rows = 1;
+                  box.value = queue[i];
+                  const size = () => {
+                    box.style.height = 'auto';
+                    box.style.height = Math.min(84, box.scrollHeight) + 'px';
+                  };
+                  li.replaceChild(box, txt);
+                  size();
+                  box.focus();
+                  box.selectionStart = box.selectionEnd = box.value.length;
+                  const done = save => {
+                    if (editingIdx === null) return; // renderQueue already tore us down
+                    editingIdx = null;
+                    if (save) {
+                      const v = box.value.replace(/\s+$/, '');
+                      if (v.length === 0) queue.splice(i, 1);
+                      else queue[i] = v;
+                    }
+                    renderQueue();
+                    maybeFlush();   // the queue was paused for the edit; resume
+                  };
+                  box.addEventListener('input', size);
+                  box.addEventListener('keydown', e => {
+                    if (e.isComposing) return;       // IME confirm ≠ save
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault(); done(true);
+                    } else if (e.key === 'Escape') {
+                      e.preventDefault(); e.stopPropagation(); done(false);
+                    }
+                  });
+                  box.addEventListener('blur', () => done(true));
                 }
                 function autoSize() {
                   stageInput.style.height = 'auto';
@@ -1141,6 +1794,10 @@ namespace CCPad
                 function sendCmd(cmd) {
                   const post = d => window.chrome.webview.postMessage(
                     JSON.stringify({ type: 'input', data: d }));
+                  // Staged flush bypasses term.onData, so commit the exact text
+                  // to the last-command bar here (100% accurate path).
+                  setLastCmd(cmd);
+                  shadowBuf = '';
                   post(cmd);
                   setTimeout(() => post('\r'), 180);
                 }
@@ -1161,12 +1818,14 @@ namespace CCPad
                 function maybeFlush() {
                   if (!stagingOn || queue.length === 0) return;
                   ensureWatchdog();
+                  if (editingIdx !== null) return;   // paused while an item is being edited
                   if (lastStatus !== 'waiting') return;
                   if (flushTimer) return;
                   // Small settle delay so the CLI prompt is ready to receive input.
                   flushTimer = setTimeout(() => {
                     flushTimer = null;
                     if (!stagingOn || queue.length === 0 || lastStatus !== 'waiting') return;
+                    if (editingIdx !== null) return; // edit opened during the settle delay
                     const cmd = queue.shift();
                     renderQueue();
                     // Optimistically mark working so we don't double-send before the
@@ -1198,6 +1857,12 @@ namespace CCPad
                     e.preventDefault();
                     e.stopPropagation();
                     window.chrome.webview.postMessage(JSON.stringify({ type: 'toggleStaging' }));
+                  } else if (e.altKey && !e.ctrlKey && !e.shiftKey && !e.metaKey &&
+                      (e.code === 'KeyL' || e.key === 'l' || e.key === 'L')) {
+                    // Alt+L: flip the global last-command bar (host fans it out).
+                    e.preventDefault();
+                    e.stopPropagation();
+                    window.chrome.webview.postMessage(JSON.stringify({ type: 'toggleLastCmd' }));
                   }
                 }, true);
 
@@ -1308,7 +1973,9 @@ namespace CCPad
                   // Alt+A: clear the current CLI input line (send Ctrl+U). xterm can't
                   // truly "select the current command" — that text belongs to the CLI,
                   // not the terminal grid — so this serves the quick-delete intent.
+                  // (The Ctrl+U it sends bypasses onData — reset the shadow buffer here.)
                   if (e.altKey && !e.shiftKey && !e.ctrlKey && (e.key === 'a' || e.key === 'A')) {
+                    shadowBuf = '';
                     window.chrome.webview.postMessage(JSON.stringify({ type: 'input', data: '\u0015' }));
                     return false;
                   }
@@ -1355,6 +2022,7 @@ namespace CCPad
                 }));
 
                 term.onData(data => {
+                  shadowFeed(data);   // mirror typed input for the last-command bar
                   window.chrome.webview.postMessage(JSON.stringify({ type: 'input', data }));
                 });
 
@@ -1377,6 +2045,8 @@ namespace CCPad
                     if (lastStatus === 'waiting') maybeFlush();
                   } else if (msg.type === 'setStaging') {
                     applyStaging(!!msg.on);
+                  } else if (msg.type === 'setLastCmdBar') {
+                    applyLastCmdBar(!!msg.on);
                   } else if (msg.type === 'stageImagePasted') {
                     if (msg.path) insertAtCursor(stageInput, msg.path);
                     else flashHint(msg.error || '没有图片');

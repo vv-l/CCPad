@@ -80,21 +80,57 @@ namespace CCPad
             catch { }
         }
 
+        /// <summary>
+        /// Claude Code hooks pipe a JSON payload (session_id, transcript_path, cwd…)
+        /// to the hook command's stdin. Extract the session_id so the owning pane can
+        /// track the CLI's REAL conversation ID — the --session-id assigned at launch
+        /// goes stale the moment the user runs /clear or /resume inside the CLI, or
+        /// relaunches claude from the fallback shell. Hard timeout because Codex
+        /// direct-execs this helper without piping stdin.
+        /// </summary>
+        private static string? ReadHookSessionId()
+        {
+            try
+            {
+                if (!Console.IsInputRedirected) return null;
+                var read = System.Threading.Tasks.Task.Run(() => Console.In.ReadToEnd());
+                if (!read.Wait(1500)) return null;
+                var json = read.Result;
+                if (string.IsNullOrWhiteSpace(json)) return null;
+                using var doc = System.Text.Json.JsonDocument.Parse(json);
+                if (doc.RootElement.TryGetProperty("session_id", out var sid) &&
+                    Guid.TryParse(sid.GetString(), out _))
+                    return sid.GetString();
+            }
+            catch { }
+            return null;
+        }
+
         protected override void OnLaunched(LaunchActivatedEventArgs args)
         {
             var cmdArgs = Environment.GetCommandLineArgs();
 
-            // Lightweight notify helper spawned by Codex (notify=[...] config):
-            //   CCPad.exe --notify <paneId> <port> [<json-payload-codex-appends>]
-            // Forward the "your turn" nudge to the already-running CCPad listener
-            // and exit before any window is created. The trailing JSON arg Codex
+            // Lightweight notify helper spawned by a Claude hook or by Codex
+            // (notify=[...] config):
+            //   CCPad.exe --notify <paneId> <evt> [<json-payload-codex-appends>]
+            // Forward the status nudge to the running CCPad that owns the pane and
+            // exit before any window is created. The trailing JSON arg Codex
             // appends is ignored.
+            //   • <evt> is a word (waiting/working) → broadcast to whichever live
+            //     process holds this pane's handler (port-agnostic; the robust path).
+            //   • <evt> is a number → a port baked by an older hook/Codex config
+            //     that is still running; deliver to exactly that port (legacy).
             if (cmdArgs.Length > 3 && cmdArgs[1] == "--notify")
             {
                 try
                 {
-                    if (int.TryParse(cmdArgs[3], out int notifyPort))
-                        Web.CliNotify.SendLocal(notifyPort, cmdArgs[2], "waiting");
+                    string paneId = cmdArgs[2];
+                    string evtOrPort = cmdArgs[3];
+                    string? sid = ReadHookSessionId();
+                    if (int.TryParse(evtOrPort, out int notifyPort))
+                        Web.CliNotify.SendLocal(notifyPort, paneId, "waiting", sid);
+                    else
+                        Web.CliNotify.Broadcast(paneId, evtOrPort, sid);
                 }
                 catch { }
                 Environment.Exit(0);

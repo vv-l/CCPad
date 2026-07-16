@@ -11,10 +11,16 @@
         <TabView
             x:Name="Tabs"
             CanReorderTabs="True"
+            CanDragTabs="True"
+            AllowDropTabs="True"
             TabWidthMode="Equal"
             AddTabButtonClick="OnAddTab"
             TabCloseRequested="OnTabClose"
             SelectionChanged="OnTabSelectionChanged"
+            TabDragStarting="OnTabDragStarting"
+            TabDragCompleted="OnTabDragCompleted"
+            TabStripDragOver="OnTabStripDragOver"
+            TabStripDrop="OnTabStripDrop"
             HorizontalAlignment="Stretch"
             VerticalAlignment="Stretch">
             <TabView.TabStripFooter>

@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
@@ -15,15 +15,15 @@
     <WindowsAppSDKBootstrapAutoInitialize>true</WindowsAppSDKBootstrapAutoInitialize>
     <WindowsPackageType>None</WindowsPackageType>
 
-    <!-- 程序详情（右键→属性→详细信息） -->
+    <!-- 绋嬪簭璇︽儏锛堝彸閿啋灞炴€р啋璇︾粏淇℃伅锛?-->
     <Product>CC Pad</Product>
-    <Description>CC Pad - Claude Code 多会话工作台</Description>
+    <Description>CC Pad - Claude Code 澶氫細璇濆伐浣滃彴</Description>
     <Company>CCPad.dev</Company>
     <Authors>CC Pad</Authors>
-    <Copyright>Copyright © 2026 CC Pad</Copyright>
-    <Version>1.4.0</Version>
-    <FileVersion>1.4.0.0</FileVersion>
-    <InformationalVersion>1.4.0</InformationalVersion>
+    <Copyright>Copyright 漏 2026 CC Pad</Copyright>
+    <Version>1.8.0</Version>
+    <FileVersion>1.8.0.0</FileVersion>
+    <InformationalVersion>1.8.0</InformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>

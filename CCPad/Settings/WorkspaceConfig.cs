@@ -13,6 +13,19 @@ namespace CCPad.Settings
 
         /// <summary>"claude" or "codex". Empty/missing → use AppPrefs default at restore time.</summary>
         public string CliMode { get; set; } = "";
+
+        /// <summary>CLI conversation ID (UUID). Claude: assigned by us via --session-id at
+        /// launch. Codex: harvested from ~/.codex/sessions at snapshot time. Empty → the
+        /// restored tab starts a fresh conversation.</summary>
+        public string SessionId { get; set; } = "";
+
+        /// <summary>User-defined tag shown as a badge next to the tab title. Empty → none.</summary>
+        public string Tag { get; set; } = "";
+
+        /// <summary>Tab was frozen (processes shut down, placeholder shown) when this
+        /// snapshot was taken. Restore recreates it as a frozen placeholder — no
+        /// WebView2 or CLI is started until the user thaws it.</summary>
+        public bool Frozen { get; set; }
     }
 
     public class LayoutNode
@@ -38,6 +51,17 @@ namespace CCPad.Settings
         public int WindowY { get; set; } = -1;
         public bool IsMaximized { get; set; }
         public LayoutNode? Layout { get; set; }
+
+        /// <summary>Set only by the confirmed-close path when the user leaves the
+        /// "restore next launch" checkbox ticked. Autosave snapshots always write
+        /// false, so a crash never silently restores via this flag.</summary>
+        public bool RestoreOnLaunch { get; set; }
+
+        /// <summary>Set when the crash sweep archives a dead instance's autosave
+        /// into the closed-session history. Like RestoreOnLaunch it marks the
+        /// entry pending auto-restore; unlike it, restoring goes through the
+        /// crash-loop guard. Cleared once any launch consumes the pending set.</summary>
+        public bool Crashed { get; set; }
     }
 
     [JsonSerializable(typeof(WorkspaceEntry))]

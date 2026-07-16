@@ -7,8 +7,23 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-    <WebView2 x:Name="WebView"
-              HorizontalAlignment="Stretch"
-              VerticalAlignment="Stretch" />
+    <Grid>
+        <WebView2 x:Name="WebView"
+                  HorizontalAlignment="Stretch"
+                  VerticalAlignment="Stretch" />
+
+        <!-- Shown when the WebView2 page can't be brought up (init timeout /
+             browser-process failure). Replaces the silent white pane. -->
+        <Grid x:Name="ErrorOverlay" Visibility="Collapsed" Background="#0C0C0C">
+            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center"
+                        Spacing="10" MaxWidth="460">
+                <TextBlock Text="终端页面异常" Foreground="#E05555" FontSize="15"
+                           HorizontalAlignment="Center"/>
+                <TextBlock x:Name="ErrorDetail" Foreground="#999999" FontSize="12"
+                           TextWrapping="Wrap" TextAlignment="Center"/>
+                <Button Content="重试" HorizontalAlignment="Center" Click="OnRetryClick"/>
+            </StackPanel>
+        </Grid>
+    </Grid>
 
 </UserControl>

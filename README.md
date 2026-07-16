@@ -102,15 +102,49 @@ When launched without arguments, CC Pad auto-detects `.ccpad-workspace` files in
 
 ### Keyboard Shortcuts
 
+**Tabs & panes**
+
 | Action | Shortcut |
 |--------|----------|
 | New tab | `Ctrl+T` |
 | Close tab | `Ctrl+W` |
-| Copy selection | `Ctrl+C` |
-| Split right | `Alt+Shift+=` |
-| Split down | `Alt+Shift+-` |
-| Navigate panes | `Alt+Arrow Keys` |
-| Close pane | `Ctrl+Shift+W` |
+| Split right (vertical) | `Alt+Shift+=` |
+| Split down (horizontal) | `Alt+Shift+-` |
+| Navigate between panes | `Alt+Arrow Keys` |
+| Close current pane | `Ctrl+Shift+W` |
+
+**Font size**
+
+| Action | Shortcut |
+|--------|----------|
+| Zoom in | `Ctrl++` · `Ctrl+=` · `Ctrl+Wheel Up` |
+| Zoom out | `Ctrl+-` · `Ctrl+Wheel Down` |
+| Reset font size | `Ctrl+0` |
+
+**Terminal selection & copy**
+
+| Action | Shortcut |
+|--------|----------|
+| Copy selection | `Ctrl+C` *(passes through to the CLI when nothing is selected)* |
+| Clear the current input line | `Alt+A` |
+| Select the whole screen (to copy) | `Alt+Shift+A` |
+
+**Command staging** *(fork)*
+
+| Action | Shortcut |
+|--------|----------|
+| Toggle staging mode | ``Alt+` `` |
+| Queue the current entry | `Enter` *(`Shift+Enter` for a newline)* |
+| Select all / deselect in the staging box | `Alt+A` |
+| Paste a clipboard image (saved as PNG, path queued) | `Alt+V` |
+
+**Resume & file panel** *(fork)*
+
+| Action | Shortcut |
+|--------|----------|
+| Resume the last Claude conversation (at the prompt after the CLI exits) | `↑` |
+| File panel — open selection (enter folder / open file) | `Enter` |
+| File panel — go up one directory | `Backspace` |
 
 Right-click the terminal or a tab header for additional options.
 

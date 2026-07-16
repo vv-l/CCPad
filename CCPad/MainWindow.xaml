@@ -23,7 +23,7 @@
         <!-- Update button — global, bottom-right, left of the toggle cluster -->
         <Button x:Name="UpdateButton" Grid.Column="0"
                 HorizontalAlignment="Right" VerticalAlignment="Bottom"
-                Margin="0,0,322,9"
+                Margin="0,0,400,9"
                 Padding="6"
                 ToolTipService.ToolTip="检查更新"
                 Background="Transparent"
@@ -40,6 +40,18 @@
                     Orientation="Horizontal" Spacing="4"
                     HorizontalAlignment="Right" VerticalAlignment="Bottom"
                     Margin="0,0,8,8">
+            <ToggleButton x:Name="LastCmdButton"
+                          Width="74" Height="28" MinHeight="28" MinWidth="0"
+                          Padding="0" HorizontalContentAlignment="Center"
+                          VerticalContentAlignment="Center"
+                          ToolTipService.ToolTip="上一条命令信息栏：每个终端顶部显示最近发出的命令（Alt+L 开/关）"
+                          Click="OnLastCmdButtonClick">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <FontIcon Glyph="&#xE81C;" FontSize="14"/>
+                    <TextBlock Text="上条" FontSize="14" VerticalAlignment="Center"/>
+                </StackPanel>
+            </ToggleButton>
+
             <ToggleButton x:Name="FilesButton"
                           Width="74" Height="28" MinHeight="28" MinWidth="0"
                           Padding="0" HorizontalContentAlignment="Center"
@@ -76,6 +88,20 @@
                 </StackPanel>
             </ToggleButton>
 
+            <Button x:Name="FreezeButton"
+                    Width="74" Height="28" MinHeight="28" MinWidth="0"
+                    Padding="0" HorizontalContentAlignment="Center"
+                    VerticalContentAlignment="Center"
+                    ToolTipService.ToolTip="冻结：关闭后台标签的页面和进程释放内存，点击占位页即可恢复">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <FontIcon Glyph="&#xE9CA;" FontSize="14"/>
+                    <TextBlock x:Name="FreezeButtonLabel" Text="冻结" FontSize="14" VerticalAlignment="Center"/>
+                </StackPanel>
+                <Button.Flyout>
+                    <MenuFlyout x:Name="FreezeFlyout" Placement="TopEdgeAlignedRight"/>
+                </Button.Flyout>
+            </Button>
+
             <Button x:Name="AboutButton"
                     Width="74" Height="28" MinHeight="28" MinWidth="0"
                     Padding="0" HorizontalContentAlignment="Center"
@@ -106,6 +132,13 @@
                 <MenuFlyout x:Name="WorkspaceFlyout" Placement="BottomEdgeAlignedRight"/>
             </DropDownButton.Flyout>
         </DropDownButton>
+
+        <!-- Memory-pressure warning — non-modal so it can't wedge the window
+             the way a dialog would under the very pressure it warns about -->
+        <InfoBar x:Name="ResourceInfoBar" Grid.Column="0"
+                 Severity="Warning" IsOpen="False" IsClosable="True"
+                 HorizontalAlignment="Center" VerticalAlignment="Top"
+                 MaxWidth="680" Margin="12,40,12,0"/>
     </Grid>
 
 </Window>

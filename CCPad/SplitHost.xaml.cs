@@ -80,7 +80,10 @@ namespace CCPad
 
             Rebuild();
 
-            await newPanel.AddFirstTab(null, source.DefaultWorkingDir);
+            // New pane inherits the active tab's project directory (falling back to
+            // the panel default), so a split keeps working in the same project
+            // instead of dropping to the home directory.
+            await newPanel.AddFirstTab(null, source.CurrentPane?.WorkingDir ?? source.DefaultWorkingDir);
             SetActivePane(newNode);
             newPanel.FocusCurrentTab();
         }
@@ -149,6 +152,16 @@ namespace CCPad
             panel.NavigateRequested += (src, dir) => NavigateFocus(dir);
             panel.TabsChanged += () => LayoutChanged?.Invoke();
             panel.StagingChanged += () => StagingChanged?.Invoke();
+            // Window-wide session-ID ownership, so the freeze/snapshot fallback
+            // scan can never assign one conversation to two tabs — including tabs
+            // living in different split panels.
+            panel.ClaimedSessionIds = except =>
+            {
+                ISet<string> set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                if (_root != null)
+                    ForEachPanel(_root, p => p.CollectOwnedSessionIds(set, except));
+                return set;
+            };
             return panel;
         }
 
@@ -313,6 +326,51 @@ namespace CCPad
             }
 
             return grid;
+        }
+
+        // ── Freeze / thaw (aggregated over the split tree) ──────────────
+
+        /// <summary>Live (unfrozen) tabs across all panels; workingOnly counts only
+        /// panes whose CLI is currently running a command.</summary>
+        public int CountLive(bool workingOnly = false)
+        {
+            int n = 0;
+            ForEachPanel(_root, p => n += p.CountLive(workingOnly));
+            return n;
+        }
+
+        public int CountFrozen()
+        {
+            int n = 0;
+            ForEachPanel(_root, p => n += p.CountFrozen());
+            return n;
+        }
+
+        /// <summary>Freeze every live tab in every panel. idleOnly skips panes whose
+        /// CLI is mid-command; the caller confirms working panes when idleOnly is false.</summary>
+        public async Task FreezeAllAsync(bool idleOnly)
+        {
+            var panels = new List<TabPanel>();
+            ForEachPanel(_root, panels.Add);
+            foreach (var p in panels)
+                await p.FreezeAllAsync(idleOnly);
+        }
+
+        public async Task UnfreezeAllAsync()
+        {
+            var panels = new List<TabPanel>();
+            ForEachPanel(_root, panels.Add);
+            foreach (var p in panels)
+                await p.UnfreezeAllAsync();
+        }
+
+        /// <summary>One auto-freeze pass over every panel (called from the resource timer).</summary>
+        public async Task AutoFreezeIdleAsync(TimeSpan idleFor)
+        {
+            var panels = new List<TabPanel>();
+            ForEachPanel(_root, panels.Add);
+            foreach (var p in panels)
+                await p.AutoFreezeIdleAsync(idleFor);
         }
 
         // ── Workspace snapshot / restore ────────────────────────────────

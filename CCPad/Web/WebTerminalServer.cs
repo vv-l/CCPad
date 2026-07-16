@@ -200,7 +200,10 @@ namespace CCPad.Web
         public string GetAccessUrl()
         {
             var tokenParam = Token != null ? $"?token={Token}" : "";
-            return $"http://{Host}:{Port}/{tokenParam}";
+            var host = Host.Contains(':') && !Host.StartsWith("[", StringComparison.Ordinal)
+                ? $"[{Host}]"
+                : Host;
+            return $"http://{host}:{Port}/{tokenParam}";
         }
 
         public int ClientCount => _clients.Count;
@@ -213,28 +216,87 @@ namespace CCPad.Web
 
         public static List<string> GetLanAddresses()
         {
-            var addresses = new List<string>();
+            var addresses = new List<(string Address, int Score, int Index)>();
             try
             {
+                int index = 0;
                 foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
                 {
                     if (ni.OperationalStatus != OperationalStatus.Up) continue;
                     if (ni.NetworkInterfaceType is NetworkInterfaceType.Loopback
                         or NetworkInterfaceType.Tunnel) continue;
 
-                    foreach (var addr in ni.GetIPProperties().UnicastAddresses)
+                    var props = ni.GetIPProperties();
+                    bool hasGateway = props.GatewayAddresses.Any(g =>
+                        g.Address.AddressFamily == AddressFamily.InterNetwork
+                        && !IPAddress.Any.Equals(g.Address)
+                        && !IPAddress.IsLoopback(g.Address));
+                    bool physicalLan = ni.NetworkInterfaceType is NetworkInterfaceType.Ethernet
+                        or NetworkInterfaceType.Wireless80211
+                        or NetworkInterfaceType.GigabitEthernet
+                        or NetworkInterfaceType.FastEthernetFx
+                        or NetworkInterfaceType.FastEthernetT;
+                    bool likelyVirtual = LooksVirtual(ni);
+
+                    foreach (var addr in props.UnicastAddresses)
                     {
                         if (addr.Address.AddressFamily == AddressFamily.InterNetwork
-                            && !IPAddress.IsLoopback(addr.Address))
+                            && !IPAddress.IsLoopback(addr.Address)
+                            && IsUsableLanAddress(addr.Address))
                         {
-                            addresses.Add(addr.Address.ToString());
+                            int score = 0;
+                            if (IsPrivateLanAddress(addr.Address)) score += 100;
+                            if (hasGateway) score += 40;
+                            if (physicalLan) score += 20;
+                            if (likelyVirtual) score -= 80;
+                            addresses.Add((addr.Address.ToString(), score, index++));
                         }
                     }
                 }
             }
             catch { }
-            addresses.Reverse();
-            return addresses;
+
+            return addresses
+                .GroupBy(a => a.Address)
+                .Select(g => g.OrderByDescending(a => a.Score).ThenBy(a => a.Index).First())
+                .OrderByDescending(a => a.Score)
+                .ThenBy(a => a.Index)
+                .Select(a => a.Address)
+                .ToList();
+        }
+
+        private static bool IsUsableLanAddress(IPAddress address)
+        {
+            var b = address.GetAddressBytes();
+            if (b.Length != 4) return false;
+            if (b[0] == 0) return false;
+            if (b[0] == 169 && b[1] == 254) return false;
+            return true;
+        }
+
+        private static bool IsPrivateLanAddress(IPAddress address)
+        {
+            var b = address.GetAddressBytes();
+            if (b.Length != 4) return false;
+            return b[0] == 10
+                || (b[0] == 172 && b[1] >= 16 && b[1] <= 31)
+                || (b[0] == 192 && b[1] == 168);
+        }
+
+        private static bool LooksVirtual(NetworkInterface ni)
+        {
+            var text = (ni.Name + " " + ni.Description).ToLowerInvariant();
+            return text.Contains("virtual")
+                || text.Contains("hyper-v")
+                || text.Contains("vmware")
+                || text.Contains("virtualbox")
+                || text.Contains("docker")
+                || text.Contains("wsl")
+                || text.Contains("mihomo")
+                || text.Contains("clash")
+                || text.Contains("tap")
+                || text.Contains("tun")
+                || text.Contains("vpn");
         }
 
         private static string GetXtermFolder()

@@ -27,6 +27,23 @@ namespace CCPad.Settings
         /// <summary>Launch Claude with --permission-mode bypassPermissions (auto-approve, skip
         /// permission prompts). Default on; users can turn it off in the About menu.</summary>
         public bool BypassPermissions { get; set; } = true;
+
+        /// <summary>Show the last-command info bar (上一条命令) at the top of every pane.</summary>
+        public bool LastCmdBarEnabled { get; set; } = true;
+
+        /// <summary>Ask for confirmation when the main window is closed.</summary>
+        public bool ConfirmOnClose { get; set; } = true;
+
+        /// <summary>Last state of the close dialog's "restore next launch" checkbox.
+        /// Also used directly when ConfirmOnClose is off.</summary>
+        public bool RestoreOnClose { get; set; } = true;
+
+        /// <summary>Automatically freeze tabs whose CLI has been idle for
+        /// <see cref="AutoFreezeMinutes"/>. Default off — freezing is manual-first.</summary>
+        public bool AutoFreezeEnabled { get; set; }
+
+        /// <summary>Idle threshold (minutes) for auto-freeze.</summary>
+        public int AutoFreezeMinutes { get; set; } = 60;
     }
 
     [JsonSerializable(typeof(AppPrefs))]
@@ -68,6 +85,40 @@ namespace CCPad.Settings
             }
             catch { }
         }
+    }
+
+    /// <summary>
+    /// Global on/off state of the last-command info bar (上一条命令信息栏).
+    /// One switch for every pane in the process: TerminalPanes subscribe to
+    /// <see cref="Changed"/> and show/hide their in-page bar live; the
+    /// MainWindow toolbar button mirrors the state. Persisted in AppPrefs.
+    /// </summary>
+    public static class LastCmdBarManager
+    {
+        private static bool? _on;
+
+        public static bool IsOn
+        {
+            get
+            {
+                _on ??= AppConfig.Load().LastCmdBarEnabled;
+                return _on.Value;
+            }
+        }
+
+        public static event Action<bool>? Changed;
+
+        public static void Set(bool on)
+        {
+            if (_on == on) return;
+            _on = on;
+            var prefs = AppConfig.Load();
+            prefs.LastCmdBarEnabled = on;
+            AppConfig.Save(prefs);
+            try { Changed?.Invoke(on); } catch { }
+        }
+
+        public static void Toggle() => Set(!IsOn);
     }
 
     /// <summary>

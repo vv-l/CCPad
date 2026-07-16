@@ -381,20 +381,46 @@ namespace CCPad
             // This panel is (about to be) live again — give up its claim on the
             // one warm renderer reserved for fully-frozen panels.
             ReleaseFrozenPrewarm();
-            bool prewarmed = _prewarmedPane != null;
-            TerminalPane pane = _prewarmedPane ?? new TerminalPane();
-            if (prewarmed)
+            TerminalPane? pane = _prewarmedPane;
+            if (pane != null)
             {
                 _prewarmedPane = null;
                 PrewarmHost.Children.Remove(pane);
-                if (!await pane.PingAsync(1000))
-                {
-                    pane.Dispose();
-                    pane = new TerminalPane();
-                    prewarmed = false;
-                }
+            }
+            else
+            {
+                // No warm pane of our own — borrow the app-wide one reserved by
+                // the fully-frozen holder panel. Panes re-home across panels in
+                // the same window, so a thaw anywhere can start warm instead of
+                // paying the WebView2 cold start.
+                pane = StealSharedWarmPane();
+            }
+            bool prewarmed = pane != null;
+            if (pane == null)
+            {
+                pane = new TerminalPane();
+            }
+            else if (!await pane.PingAsync(1000))
+            {
+                pane.Dispose();
+                pane = new TerminalPane();
+                prewarmed = false;
             }
             return (pane, prewarmed);
+        }
+
+        /// <summary>Take the warm pane stashed by the app-wide frozen-prewarm
+        /// holder, restocking it so the next thaw is warm too. Null when nobody
+        /// holds one.</summary>
+        private static TerminalPane? StealSharedWarmPane()
+        {
+            var holder = s_frozenPrewarmHolder;
+            var pane = holder?._prewarmedPane;
+            if (holder == null || pane == null || holder._disposed) return null;
+            holder._prewarmedPane = null;
+            holder.PrewarmHost.Children.Remove(pane);
+            holder.PrewarmNextPane();
+            return pane;
         }
 
         // ── Per-tab context ─────────────────────────────────────────────
@@ -852,6 +878,14 @@ namespace CCPad
 
                 TabsChanged?.Invoke();
                 return true;
+            }
+            catch (Exception ex)
+            {
+                // Freeze failed mid-flight — the tab stays live (worst case the
+                // pane is already half torn down and shows its own error overlay).
+                // Log it: a silent failure here reads as "freeze did nothing".
+                App.LogStartupError("FreezeTab", ex);
+                return false;
             }
             finally { ctx.Busy = false; }
         }

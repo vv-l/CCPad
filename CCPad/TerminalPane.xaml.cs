@@ -358,8 +358,14 @@ namespace CCPad
             try
             {
                 using var stream = new Windows.Storage.Streams.InMemoryRandomAccessStream();
-                await WebView.CoreWebView2.CapturePreviewAsync(
-                    CoreWebView2CapturePreviewImageFormat.Png, stream);
+                // Bounded: CapturePreviewAsync on a sick renderer can hang forever
+                // (it doesn't throw), which used to strand the whole freeze with
+                // the Busy flag stuck. No screenshot beats no freeze.
+                var capture = WebView.CoreWebView2.CapturePreviewAsync(
+                    CoreWebView2CapturePreviewImageFormat.Png, stream).AsTask();
+                if (await Task.WhenAny(capture, Task.Delay(1500)) != capture)
+                    return null;
+                await capture;
                 stream.Seek(0);
                 var bmp = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage();
                 await bmp.SetSourceAsync(stream);
@@ -420,7 +426,13 @@ namespace CCPad
             }
             if (_disposed) throw new ObjectDisposedException(nameof(TerminalPane));
 
-            await WebView.EnsureCoreWebView2Async();
+            // Bounded: EnsureCoreWebView2Async occasionally never completes when
+            // the runtime is contended/sick — an unbounded await here is a silent
+            // permanent white pane that not even the ready timeout can catch.
+            var ensure = WebView.EnsureCoreWebView2Async().AsTask();
+            if (await Task.WhenAny(ensure, Task.Delay(15000)) != ensure)
+                throw new InvalidOperationException("WebView2 初始化超时（15 秒）。");
+            await ensure;
             if (_disposed) throw new ObjectDisposedException(nameof(TerminalPane));
 
             if (WebView.CoreWebView2 == null)

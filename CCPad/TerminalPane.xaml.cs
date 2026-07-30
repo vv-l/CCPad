@@ -1397,7 +1397,7 @@ namespace CCPad
               <style>
                 * { margin: 0; padding: 0; box-sizing: border-box; }
                 html, body { width: 100%; height: 100%; background: #0c0c0c; overflow: clip; }
-                body { display: flex; flex-direction: column; }
+                body { display: flex; flex-direction: column; position: relative; }
                 #terminal { width: 100%; flex: 1 1 auto; min-height: 0; overflow: hidden; }
                 /* Keep the IME helper textarea inside the viewport so Chromium
                    doesn't shift the page trying to scroll it into view. */
@@ -1435,13 +1435,21 @@ namespace CCPad
                   color: #cfcfcf;
                 }
                 #lastcmd .time { flex: 0 0 auto; color: #667; }
-                /* ── Command staging (命令寄存) — toggled by the WinUI toolbar button ── */
+                /* ── Command staging (命令寄存) — toggled by the WinUI toolbar button.
+                   Floats OVER the bottom of #terminal (not a flex sibling) so opening
+                   it never changes the terminal's row/col count: shrinking the
+                   terminal box would fire term.onResize → a real PTY resize → a
+                   full repaint in the CLI, which reads as the CLI's screen jumping
+                   to the top. An overlay keeps the pty dimensions untouched. ── */
                 #stage {
                   display: none;
-                  flex: 0 0 auto;
+                  position: absolute;
+                  left: 0; right: 0; bottom: 0;
+                  z-index: 5;
                   flex-direction: column;
                   background: #141414;
                   border-top: 1px solid #333;
+                  box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.4);
                   font-family: 'Cascadia Code', 'Cascadia Mono', Consolas, monospace;
                   color: #ddd;
                 }

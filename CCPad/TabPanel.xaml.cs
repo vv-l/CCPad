@@ -1588,6 +1588,17 @@ namespace CCPad
 
                 var sessionId = ResolveSessionId(pane, dir, claimed);
                 if (sessionId.Length > 0) claimed.Add(sessionId);
+                // Codex IDs live only on disk and are re-scanned every pass (see
+                // ResolveSessionId) — cache the result back onto the pane so a
+                // SIBLING panel's CollectOwnedSessionIds (which only ever reads
+                // pane.SessionId, never scans disk itself) can see and exclude it
+                // immediately. Without this, two same-cwd Codex panes that were
+                // both launched fresh (never resumed, so SessionId started null)
+                // could each independently disk-scan to the SAME latest rollout
+                // file and both persist it — then both try to `codex resume` the
+                // identical conversation on the next launch, corrupting each other.
+                if (pane != null && pane.CliMode == CliMode.Codex && sessionId.Length > 0)
+                    pane.SessionId = sessionId;
 
                 states.Add(new TabState
                 {
@@ -1601,34 +1612,41 @@ namespace CCPad
             return states;
         }
 
-        /// <summary>Conversation ID to persist for a pane. Codex IDs live only on disk,
-        /// so scan the sessions folder each time (a fresh in-pane conversation may have
-        /// replaced the one we resumed). Claude IDs are tracked on the pane (assigned at
-        /// launch, updated live from hook callbacks), and that hook-fed ID is treated as
-        /// authoritative: scanning the cwd for "the newest conversation" can steal a
-        /// session written by an UNRELATED claude running in the same directory (bots,
-        /// plain terminals — this machine runs several). The scan therefore only runs
-        /// when the pane could genuinely own an untracked conversation: it was launched
-        /// without hook instrumentation, or a CLI was brought back by hand inside the
-        /// fallback shell — and then only over files written since that relaunch,
-        /// excluding IDs already claimed by other tabs.</summary>
+        /// <summary>Conversation ID to persist for a pane. Codex assigns its own IDs,
+        /// so a freshly-launched pane (no tracked ID yet) is discovered by scanning the
+        /// sessions folder for the newest file matching its cwd. Once that ID is known
+        /// and still exists on disk, it is trusted like Claude's hook-fed ID — NOT
+        /// re-scanned on every later pass. Re-scanning unconditionally let a sibling
+        /// same-cwd pane's more-recently-written file (or an unrelated throwaway
+        /// session) outrank this pane's own conversation on a later snapshot, silently
+        /// reassigning it — the original cross-tab collision bug this scoping exists
+        /// to prevent, just spread across passes instead of within one. The scan only
+        /// re-opens when the ID is missing/gone, or the CLI was brought back by hand
+        /// inside the fallback shell (it may now own an untracked conversation) — and
+        /// then only over files written since that relaunch, excluding IDs already
+        /// claimed by other tabs.</summary>
         private static string ResolveSessionId(TerminalPane? pane, string? dir, ISet<string>? claimed = null)
         {
             if (pane == null) return "";
             if (pane.CliMode == CliMode.Codex)
             {
+                var known = pane.SessionId;
+                if (known != null && known.Length > 0 && pane.ShellRelaunchUtc == null &&
+                    CliSessions.CodexSessionExists(known))
+                    return known;
+
                 // The claimed set may include this pane's OWN tracked ID (the
                 // snapshot pass seeds it with every tab's ID) — never let that
                 // push the scan past the pane's own conversation onto someone
                 // else's.
                 var excl = claimed;
-                if (excl != null && pane.SessionId is string own && excl.Contains(own))
+                if (excl != null && known is string own && excl.Contains(own))
                 {
                     excl = new HashSet<string>(excl, StringComparer.OrdinalIgnoreCase);
                     excl.Remove(own);
                 }
-                return CliSessions.FindLatestCodexSessionId(dir, pane.LaunchedAtUtc, excl)
-                    ?? pane.SessionId ?? "";
+                return CliSessions.FindLatestCodexSessionId(
+                    dir, pane.ShellRelaunchUtc ?? pane.LaunchedAtUtc, excl) ?? known ?? "";
             }
             var id = pane.SessionId ?? "";
             if (id.Length > 0 && CliSessions.ClaudeSessionExists(id)) return id;

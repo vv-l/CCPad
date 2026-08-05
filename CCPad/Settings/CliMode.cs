@@ -58,7 +58,7 @@ namespace CCPad.Settings
             // "tmux new -A" IS the resume: reattaching the named session brings
             // the remote conversation back, so resume == a fresh connect and no
             // session id is needed.
-            CodexRemote => BuildRemoteCommand(),
+            CodexRemote => BuildCommand(CodexRemote),
             Codex => ResolveLaunch("codex", JoinArgs(
                     $"resume {sessionId} --dangerously-bypass-approvals-and-sandbox",
                     extraArgs)),

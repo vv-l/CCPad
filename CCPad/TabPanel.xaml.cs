@@ -268,7 +268,9 @@ namespace CCPad
                 // The named remote tmux session owns continuity. Never assign or
                 // scan a local Claude/Codex conversation ID for this pane.
                 pane.SessionId = null;
-                return (CliMode.BuildResumeCommand(mode, resumeSessionId ?? "", extra), true);
+                return resumeSessionId != null
+                    ? (CliMode.BuildResumeCommand(mode, resumeSessionId, extra), true)
+                    : (CliMode.BuildCommand(mode, extra), false);
             }
 
             if (mode == CliMode.Codex)

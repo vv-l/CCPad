@@ -9,8 +9,13 @@ namespace CCPad.Settings
     {
         public double TabHeight { get; set; } = TabHeightManager.DefaultHeight;
 
-        /// <summary>Default CLI for new tabs: "claude" or "codex".</summary>
+        /// <summary>Default CLI for new tabs: "claude" / "codex" / "codex-remote".</summary>
         public string DefaultCli { get; set; } = "claude";
+
+        /// <summary>Connection parameters for the "Codex@167" mode (ssh + tmux
+        /// attach). No settings UI in v1 — edit prefs.json by hand; missing
+        /// fields fall back to these defaults.</summary>
+        public RemoteCodexConfig RemoteCodex { get; set; } = new();
 
         /// <summary>Chrome-style crash recovery: prompt to restore on next launch.</summary>
         public bool SessionRecoveryEnabled { get; set; } = true;
@@ -44,6 +49,30 @@ namespace CCPad.Settings
 
         /// <summary>Idle threshold (minutes) for auto-freeze.</summary>
         public int AutoFreezeMinutes { get; set; } = 60;
+    }
+
+    /// <summary>
+    /// Everything CCPad needs to open a Codex@167 tab: ssh to
+    /// <see cref="User"/>@<see cref="Host"/> with <see cref="KeyPath"/> and run
+    /// <see cref="RemoteCommand"/> (with {dir}/{session} substituted from
+    /// <see cref="RemoteDir"/>/<see cref="TmuxSession"/>). All tabs attach the
+    /// SAME tmux session by design — mirrored views, no per-tab session names,
+    /// so the remote box never accumulates zombie tmux sessions.
+    /// </summary>
+    public class RemoteCodexConfig
+    {
+        public string Host { get; set; } = "192.168.32.167";
+        public string User { get; set; } = "root";
+        /// <summary>Private key file; %VAR% is expanded at launch time.</summary>
+        public string KeyPath { get; set; } = "%USERPROFILE%\\.ssh\\id_ed25519_167";
+        /// <summary>Remote working directory, substituted for {dir}.</summary>
+        public string RemoteDir { get; set; } = "/zettos/pool/1/agents/deploy/workspace";
+        /// <summary>tmux session name, substituted for {session}.</summary>
+        public string TmuxSession { get; set; } = "deploy";
+        /// <summary>Command run on the remote host (inside "..." on the ssh
+        /// line, so it must not itself contain double quotes).</summary>
+        public string RemoteCommand { get; set; } =
+            "cd {dir} && source /etc/profile.d/agents.sh && source /zettos/pool/1/agents/opt/proxy_env.sh && tmux new -A -s {session} codex";
     }
 
     [JsonSerializable(typeof(AppPrefs))]

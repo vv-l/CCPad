@@ -4,22 +4,29 @@ using System.IO;
 namespace CCPad.Settings
 {
     /// <summary>
-    /// Supported CLI launchers. Stored as a lowercase string ("claude"/"codex")
-    /// in AppPrefs and per-tab state for forward-compat with future modes.
+    /// Supported CLI launchers. Stored as a lowercase string
+    /// ("claude"/"codex"/"codex-remote") in AppPrefs and per-tab state for
+    /// forward-compat with future modes.
     /// </summary>
     public static class CliMode
     {
         public const string Claude = "claude";
         public const string Codex = "codex";
+        /// <summary>Codex on the 192.168.32.167 box: ssh + tmux attach. All
+        /// connection parameters live in <see cref="AppPrefs.RemoteCodex"/>.</summary>
+        public const string CodexRemote = "codex-remote";
 
-        public static string Normalize(string? value)
+        public static string Normalize(string? value) => value switch
         {
-            return value == Codex ? Codex : Claude;
-        }
+            Codex => Codex,
+            CodexRemote => CodexRemote,
+            _ => Claude,
+        };
 
         public static string DisplayName(string mode) => Normalize(mode) switch
         {
             Codex => "Codex",
+            CodexRemote => "Codex@167",
             _ => "Claude",
         };
 
@@ -32,6 +39,9 @@ namespace CCPad.Settings
         public static string BuildCommand(string mode, string extraArgs = "") => Normalize(mode) switch
         {
             Codex => ResolveLaunch("codex", JoinArgs("--yolo", extraArgs)),
+            // extraArgs is deliberately dropped: it carries local-CLI flags
+            // (--settings / -c notify) that would be parsed by ssh, not codex.
+            CodexRemote => BuildRemoteCommand(),
             _ => ResolveLaunch("claude", JoinArgs(
                     AppConfig.Load().BypassPermissions ? "--permission-mode bypassPermissions" : "",
                     extraArgs)),
@@ -45,6 +55,10 @@ namespace CCPad.Settings
         /// </summary>
         public static string BuildResumeCommand(string mode, string sessionId, string extraArgs = "") => Normalize(mode) switch
         {
+            // "tmux new -A" IS the resume: reattaching the named session brings
+            // the remote conversation back, so resume == a fresh connect and no
+            // session id is needed.
+            CodexRemote => BuildRemoteCommand(),
             Codex => ResolveLaunch("codex", JoinArgs(
                     $"resume {sessionId} --dangerously-bypass-approvals-and-sandbox",
                     extraArgs)),
@@ -53,6 +67,43 @@ namespace CCPad.Settings
                         AppConfig.Load().BypassPermissions ? "--permission-mode bypassPermissions" : ""),
                     extraArgs)),
         };
+
+        /// <summary>
+        /// Command line for a Codex@167 pane: ssh straight into the remote tmux
+        /// session running codex. Every parameter comes from
+        /// <see cref="AppPrefs.RemoteCodex"/> (hand-editable prefs.json — no
+        /// settings UI in v1). -t forces a tty (tmux needs one),
+        /// accept-new pins the host key on first connect without prompting, and
+        /// ServerAliveInterval keeps NAT/firewall state from silently dropping
+        /// an idle session. The key path is env-expanded here because the
+        /// command goes straight to CreateProcess — no shell ever expands it.
+        /// </summary>
+        private static string BuildRemoteCommand()
+        {
+            var rc = AppConfig.Load().RemoteCodex ?? new RemoteCodexConfig();
+            string key = Environment.ExpandEnvironmentVariables(rc.KeyPath ?? "");
+            string remoteCmd = (rc.RemoteCommand ?? "")
+                .Replace("{dir}", rc.RemoteDir ?? "")
+                .Replace("{session}", rc.TmuxSession ?? "");
+            return $"\"{ResolveSsh()}\" -t -i \"{key}\" " +
+                   "-o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 " +
+                   $"{rc.User}@{rc.Host} \"{remoteCmd}\"";
+        }
+
+        /// <summary>
+        /// Locate ssh.exe: PATH first, then the stock Windows OpenSSH install
+        /// dir (present even when the optional-feature dir isn't on PATH), else
+        /// the bare name and let CreateProcess's own search have a go.
+        /// </summary>
+        private static string ResolveSsh()
+        {
+            var onPath = FindOnPath("ssh");
+            if (onPath != null) return onPath;
+            var stock = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.System),
+                "OpenSSH", "ssh.exe");
+            return File.Exists(stock) ? stock : "ssh.exe";
+        }
 
         private static string JoinArgs(string a, string b)
         {

@@ -229,6 +229,14 @@ namespace CCPad
             else
             {
                 await pane.InitializeAsync(cmd, workingDir, focusOnReady: true, cliMode: mode);
+                // A fresh WebView2's first composited frame can race with a
+                // concurrent split-tree layout pass (SplitHost.Rebuild()),
+                // leaving the pane visually stuck at its initial paint even
+                // though the page is live and CLI output has been written —
+                // same class of issue NudgeRepaint fixes for re-homed panes.
+                DispatcherQueue.TryEnqueue(
+                    Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+                    () => pane.NudgeRepaint());
             }
 
             // A restore that asked for a conversation which no longer exists must

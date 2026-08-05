@@ -30,8 +30,8 @@
 - **Web Remote Terminal** — Built-in HTTP/WebSocket server lets you view and control any session from a browser on the same LAN. Optional token authentication. Touch-friendly UI with on-screen keys for mobile devices.
 - **Context Menu Integration** — Right-click any folder in Explorer to open it in CC Pad.
 - **File Association** — Double-click `.ccpad-workspace` files to open them directly.
-- **Dual-CLI (Claude + Codex)** *(fork)* — Run Claude and Codex tabs side by side in one window. Pick a default CLI; open any pinned project with either CLI.
-- **Tab Status Lights** *(fork)* — Each tab shows a colored dot at a glance: **green** = the AI is working, **amber** = it's waiting for your input, **red** = the CLI has exited. Works for both Claude (via official hooks) and Codex (via its `notify` config), so you always know which session needs you without switching tabs.
+- **Three CLI modes (Claude + Codex + Codex@167)** *(fork)* — Run local Claude, local Codex, and Codex attached through SSH to a named tmux session. Pick any mode as the default or use it for a pinned project.
+- **Tab Status Lights** *(fork)* — Each local CLI tab shows a colored dot at a glance: **green** = the AI is working, **amber** = it's waiting for your input, **red** = the CLI has exited. Claude uses official hooks and local Codex uses its `notify` config. Codex@167 v1 has no remote-to-local hook bridge, so only its red SSH-exit state is authoritative.
 - **Background "Your Turn" Notifications** *(fork)* — When a session in a background tab starts waiting for you, CC Pad pops a Windows toast; click it to jump straight to that tab. Toggle it from the About menu.
 - **Multi-Language UI** *(fork)* — Switch the interface language live (no restart) between **English, 简体中文, 繁體中文, Deutsch, 日本語, Français, 한국어, Español, Italiano**. First run follows your Windows display language. Covers the app UI, the Explorer right-click labels, and the remote web page.
 - **One-Key Conversation Resume** *(fork)* — After Claude exits, press **↑** at the prompt to pre-fill the exact `claude --resume <id>` command (reviewed before you hit Enter), and the tab's red dot flips back to amber once the conversation is restored.
@@ -177,6 +177,34 @@ Use the workspace button (top-right, visible in workspace mode) or the context m
 ### Projects
 
 Click the **Projects** button in any tab strip footer to manage pinned directories. Adding a project makes it available as a quick-launch option across all panes.
+
+### Codex@167 (SSH + tmux)
+
+Choosing **Codex@167** starts Windows OpenSSH and attaches the configured remote tmux session. The shipped defaults are equivalent to:
+
+```text
+ssh -t -i "%USERPROFILE%\.ssh\id_ed25519_167" -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 root@192.168.32.167 "cd /zettos/pool/1/agents/deploy/workspace && source /etc/profile.d/agents.sh && source /zettos/pool/1/agents/opt/proxy_env.sh && tmux new -A -s deploy codex"
+```
+
+There is no settings UI for this connection in v1. Edit the existing `%LOCALAPPDATA%\CCPad\prefs.json` and merge in the following properties (when `CCPAD_DATA_DIR` is set, `prefs.json` lives there instead):
+
+```json
+{
+  "DefaultCli": "codex-remote",
+  "RemoteCodex": {
+    "Host": "192.168.32.167",
+    "User": "root",
+    "KeyPath": "%USERPROFILE%\\.ssh\\id_ed25519_167",
+    "RemoteDir": "/zettos/pool/1/agents/deploy/workspace",
+    "TmuxSession": "deploy",
+    "RemoteCommand": "cd {dir} && source /etc/profile.d/agents.sh && source /zettos/pool/1/agents/opt/proxy_env.sh && tmux new -A -s {session} codex"
+  }
+}
+```
+
+`Host` and `User` select the SSH target. `KeyPath` supports Windows `%VAR%` expansion. `RemoteDir` and `TmuxSession` replace `{dir}` and `{session}` in `RemoteCommand`; keep the template free of double quotes because SSH wraps it in a quoted argument. `DefaultCli` may be `claude`, `codex`, or `codex-remote`, and can also be changed from the Projects menu.
+
+Every Codex@167 tab intentionally attaches the same tmux session. Opening several such tabs therefore creates mirrored views, not independent conversations; no per-tab tmux names are generated. Closing or disconnecting a tab does not end the remote conversation. Reopen a Codex@167 tab to reattach. If SSH exits, the tab turns red and falls back to a local `cmd`; press Enter on an empty prompt to reconnect.
 
 ## Architecture
 

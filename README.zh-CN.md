@@ -30,8 +30,8 @@
 - **网页远程终端** — 内置 HTTP/WebSocket 服务器，可在局域网内通过浏览器实时查看和控制任意终端会话。支持可选的令牌认证。移动端友好，提供触屏虚拟按键。
 - **右键菜单集成** — 在资源管理器中右键任意文件夹即可在 CC Pad 中打开。
 - **文件关联** — 双击 `.ccpad-workspace` 文件直接打开。
-- **双 CLI(Claude + Codex)** *(fork)* — 同一窗口并排开 Claude 和 Codex 标签;可设默认 CLI,固定项目可用任一 CLI 打开。
-- **标签状态指示灯** *(fork)* — 每个标签上有一个彩色小圆点,一眼可知会话状态:**绿色** = AI 正在工作,**琥珀色** = 正在等你输入,**红色** = CLI 已退出。Claude(通过官方 hooks)和 Codex(通过其 `notify` 配置)都支持,不用来回切标签就知道哪个会话在等你。
+- **三种 CLI 模式(Claude + Codex + Codex@167)** *(fork)* — 同一窗口可开本地 Claude、本地 Codex 和通过 SSH attach 固定 tmux 会话的 Codex@167 标签;三者都可设为默认 CLI,固定项目也可用任一模式打开。
+- **标签状态指示灯** *(fork)* — 本地 CLI 标签通过 Claude 官方 hooks 或 Codex 的 `notify` 配置显示:**绿色** = AI 正在工作,**琥珀色** = 正在等你输入,**红色** = CLI 已退出。Codex@167 v1 不打通远端到本机的 hook,因此只有 SSH 退出后的红灯状态可靠。
 - **后台"该你了"通知** *(fork)* — 当后台标签里的会话开始等待你输入时,CC Pad 会弹出 Windows 通知;点击即可直接跳到那个标签。可在"关于"菜单中开关。
 - **多语言界面** *(fork)* — 界面语言可即时切换(无需重启):**English、简体中文、繁體中文、Deutsch、日本語、Français、한국어、Español、Italiano**。首次运行跟随 Windows 显示语言。覆盖应用界面、资源管理器右键菜单文案以及远程网页。
 - **一键恢复对话** *(fork)* — Claude 退出后,在提示符按 **↑** 即可预填精确的 `claude --resume <id>` 命令(确认后再回车),对话恢复后标签的红灯会变回琥珀色。
@@ -177,6 +177,34 @@ CCPad.exe my-project.ccpad-workspace
 ### 项目管理
 
 点击任意标签栏右侧的 **项目** 按钮来管理固定目录。添加项目后即可在所有面板中快速创建对应目录的新标签页。
+
+### Codex@167（SSH + tmux）
+
+选择 **Codex@167** 后，CC Pad 会启动 Windows OpenSSH，并 attach 配置的远端 tmux 会话。内置默认值等价于：
+
+```text
+ssh -t -i "%USERPROFILE%\.ssh\id_ed25519_167" -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 root@192.168.32.167 "cd /zettos/pool/1/agents/deploy/workspace && source /etc/profile.d/agents.sh && source /zettos/pool/1/agents/opt/proxy_env.sh && tmux new -A -s deploy codex"
+```
+
+v1 不提供这组连接参数的设置界面。编辑现有的 `%LOCALAPPDATA%\CCPad\prefs.json`，把下面这些属性合并进去（若设置了 `CCPAD_DATA_DIR`，则编辑该目录中的 `prefs.json`）：
+
+```json
+{
+  "DefaultCli": "codex-remote",
+  "RemoteCodex": {
+    "Host": "192.168.32.167",
+    "User": "root",
+    "KeyPath": "%USERPROFILE%\\.ssh\\id_ed25519_167",
+    "RemoteDir": "/zettos/pool/1/agents/deploy/workspace",
+    "TmuxSession": "deploy",
+    "RemoteCommand": "cd {dir} && source /etc/profile.d/agents.sh && source /zettos/pool/1/agents/opt/proxy_env.sh && tmux new -A -s {session} codex"
+  }
+}
+```
+
+`Host`、`User` 是 SSH 目标；`KeyPath` 支持 Windows `%VAR%` 环境变量展开；`RemoteDir` 和 `TmuxSession` 会分别替换 `RemoteCommand` 中的 `{dir}`、`{session}`。模板会作为 SSH 的双引号参数传入，因此模板本身不要再含双引号。`DefaultCli` 可设为 `claude`、`codex` 或 `codex-remote`，也可直接在「项目」菜单中选择。
+
+所有 Codex@167 标签按设计 attach 同一个 tmux 会话。多个标签是同一画面的镜像，不是独立对话；不会自动生成每标签 tmux 名称，避免远端积累僵尸会话。关闭标签或 SSH 断线不会结束远端对话，重新打开 Codex@167 标签即可接回。SSH 退出时标签变红并回落本地 `cmd`，在空提示符按回车可直接重连。
 
 ## 架构
 

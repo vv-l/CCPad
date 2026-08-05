@@ -36,7 +36,7 @@ namespace CCPad
         public event Action? TabsChanged;
 
         private static string ResolveCliMode(string? requested)
-            => requested ?? CliMode.LoadDefault();
+            => CliMode.Normalize(requested ?? CliMode.LoadDefault());
 
         public TabPanel(List<ProjectEntry> projects)
         {
@@ -203,13 +203,15 @@ namespace CCPad
 
             var (pane, prewarmed) = await AcquirePaneAsync();
 
-            // Inject per-pane CLI notifications (no-op if the local listener
-            // can't start). Claude uses --settings hooks; Codex uses a -c notify
-            // override routed through CCPad.exe --notify. Needs pane.PaneId, so
-            // the command is built after the pane is acquired.
-            string extra = mode == CliMode.Codex
-                ? CliNotify.PrepareCodexNotify(pane.PaneId)
-                : CliNotify.PrepareClaudeHooks(pane.PaneId);
+            // Remote Codex cannot call this machine's loopback notify endpoint.
+            // v1 intentionally leaves its green/amber hook state degraded; the
+            // process-exit path still turns the tab red when ssh disconnects.
+            string extra = mode switch
+            {
+                CliMode.Codex => CliNotify.PrepareCodexNotify(pane.PaneId),
+                CliMode.CodexRemote => "",
+                _ => CliNotify.PrepareClaudeHooks(pane.PaneId),
+            };
             var (cmd, resumed) = await BuildLaunchCommandAsync(mode, extra, resumeSessionId, pane);
 
             var item = CreateTabItem(projectName, workingDir, pane, mode, tag);
@@ -261,6 +263,14 @@ namespace CCPad
         /// </summary>
         private static async Task<(string Cmd, bool Resumed)> BuildLaunchCommandAsync(string mode, string extra, string? resumeSessionId, TerminalPane pane)
         {
+            if (mode == CliMode.CodexRemote)
+            {
+                // The named remote tmux session owns continuity. Never assign or
+                // scan a local Claude/Codex conversation ID for this pane.
+                pane.SessionId = null;
+                return (CliMode.BuildResumeCommand(mode, resumeSessionId ?? "", extra), true);
+            }
+
             if (mode == CliMode.Codex)
             {
                 if (resumeSessionId != null &&
@@ -476,9 +486,11 @@ namespace CCPad
 
         private static TabCtx? CtxOf(TabViewItem item) => item.Tag as TabCtx;
 
-        // Tag non-default CLI tabs so mixed Claude/Codex panes are visually distinguishable.
+        // Tag non-Claude CLI tabs so mixed panes are visually distinguishable.
         private static string HeaderFor(string baseHeader, string cliMode)
-            => cliMode == CliMode.Codex ? $"{baseHeader} · Codex" : baseHeader;
+            => cliMode == CliMode.Claude
+                ? baseHeader
+                : $"{baseHeader} · {CliMode.DisplayName(cliMode)}";
 
         private TabViewItem CreateTabItem(string? projectName, string? workingDir, TerminalPane pane, string cliMode, string? tag = null)
         {
@@ -954,9 +966,12 @@ namespace CCPad
                 var (pane, prewarmed) = await AcquirePaneAsync();
                 acquired = pane;
                 long tAcquire = watch.ElapsedMilliseconds;
-                string extra = mode == CliMode.Codex
-                    ? CliNotify.PrepareCodexNotify(pane.PaneId)
-                    : CliNotify.PrepareClaudeHooks(pane.PaneId);
+                string extra = mode switch
+                {
+                    CliMode.Codex => CliNotify.PrepareCodexNotify(pane.PaneId),
+                    CliMode.CodexRemote => "",
+                    _ => CliNotify.PrepareClaudeHooks(pane.PaneId),
+                };
                 var (cmd, resumed) = await BuildLaunchCommandAsync(mode, extra, session, pane);
                 long tCmd = watch.ElapsedMilliseconds;
 
@@ -1415,19 +1430,27 @@ namespace CCPad
 
             string currentDefault = CliMode.LoadDefault();
 
-            // ── Default CLI toggle ──
-            var defaultItem = new ToggleMenuFlyoutItem
+            // ── Default CLI selector ──
+            var defaultItem = new MenuFlyoutSubItem
             {
                 Text = Loc.T("proj_default", CliMode.DisplayName(currentDefault)),
                 Icon = new FontIcon { Glyph = "\uE713" }, // settings gear
-                IsChecked = currentDefault == CliMode.Codex
             };
-            defaultItem.Click += (_, _) =>
+            foreach (string mode in new[] { CliMode.Claude, CliMode.Codex, CliMode.CodexRemote })
             {
-                string next = currentDefault == CliMode.Codex ? CliMode.Claude : CliMode.Codex;
-                CliMode.SaveDefault(next);
-                RefreshProjectFlyout();
-            };
+                string selectedMode = mode;
+                var choice = new ToggleMenuFlyoutItem
+                {
+                    Text = CliMode.DisplayName(selectedMode),
+                    IsChecked = currentDefault == selectedMode,
+                };
+                choice.Click += (_, _) =>
+                {
+                    CliMode.SaveDefault(selectedMode);
+                    RefreshProjectFlyout();
+                };
+                defaultItem.Items.Add(choice);
+            }
             ProjectFlyout.Items.Add(defaultItem);
 
             ProjectFlyout.Items.Add(new MenuFlyoutSeparator());
@@ -1449,6 +1472,14 @@ namespace CCPad
             newCodex.Click += async (_, _) => await AddNewTab(null, _defaultWorkingDir, CliMode.Codex);
             ProjectFlyout.Items.Add(newCodex);
 
+            var newRemoteCodex = new MenuFlyoutItem
+            {
+                Text = Loc.T("proj_new_codex_remote"),
+                Icon = new FontIcon { Glyph = "\uE756" }
+            };
+            newRemoteCodex.Click += async (_, _) => await AddNewTab(null, _defaultWorkingDir, CliMode.CodexRemote);
+            ProjectFlyout.Items.Add(newRemoteCodex);
+
             if (_projects.Count > 0)
                 ProjectFlyout.Items.Add(new MenuFlyoutSeparator());
 
@@ -1468,6 +1499,9 @@ namespace CCPad
 
                 var openCodex = new MenuFlyoutItem { Text = Loc.T("proj_open_codex"), Icon = new FontIcon { Glyph = "\uE756" } };
                 openCodex.Click += async (_, _) => await AddNewTab(entry.Name, entry.Path, CliMode.Codex);
+
+                var openRemoteCodex = new MenuFlyoutItem { Text = Loc.T("proj_open_codex_remote"), Icon = new FontIcon { Glyph = "\uE756" } };
+                openRemoteCodex.Click += async (_, _) => await AddNewTab(entry.Name, entry.Path, CliMode.CodexRemote);
 
                 var openInExplorer = new MenuFlyoutItem
                 {
@@ -1506,6 +1540,7 @@ namespace CCPad
                 var subFlyout = new MenuFlyout();
                 subFlyout.Items.Add(openClaude);
                 subFlyout.Items.Add(openCodex);
+                subFlyout.Items.Add(openRemoteCodex);
                 subFlyout.Items.Add(new MenuFlyoutSeparator());
                 subFlyout.Items.Add(openInExplorer);
                 subFlyout.Items.Add(new MenuFlyoutSeparator());
@@ -1588,11 +1623,17 @@ namespace CCPad
                 var pane = ctx?.Pane;
                 var dir = pane?.WorkingDir ?? _defaultWorkingDir;
                 var rawHeader = ctx?.HeaderBase ?? pane?.Label ?? "";
-                // Strip the " · Codex" suffix (present on pane.Label fallback) so
-                // restore doesn't double-append it.
-                const string codexSuffix = " · Codex";
-                if (rawHeader.EndsWith(codexSuffix))
-                    rawHeader = rawHeader[..^codexSuffix.Length];
+                // Strip a CLI suffix present on pane.Label fallback so restore
+                // doesn't double-append it.
+                foreach (string mode in new[] { CliMode.Codex, CliMode.CodexRemote })
+                {
+                    string suffix = " · " + CliMode.DisplayName(mode);
+                    if (rawHeader.EndsWith(suffix, StringComparison.Ordinal))
+                    {
+                        rawHeader = rawHeader[..^suffix.Length];
+                        break;
+                    }
+                }
 
                 var sessionId = ResolveSessionId(pane, dir, claimed);
                 if (sessionId.Length > 0) claimed.Add(sessionId);
@@ -1636,6 +1677,8 @@ namespace CCPad
         private static string ResolveSessionId(TerminalPane? pane, string? dir, ISet<string>? claimed = null)
         {
             if (pane == null) return "";
+            if (pane.CliMode == CliMode.CodexRemote)
+                return ""; // tmux owns remote continuity; never scan local sessions
             if (pane.CliMode == CliMode.Codex)
             {
                 var known = pane.SessionId;

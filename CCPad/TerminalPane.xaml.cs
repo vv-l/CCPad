@@ -315,7 +315,8 @@ namespace CCPad
         public string Command => _command;
         public string? WorkingDir => _workingDir;
 
-        /// <summary>CLI mode this pane was launched with ("claude" / "codex"). Null until LaunchSession/InitializeAsync.</summary>
+        /// <summary>CLI mode this pane was launched with ("claude" / "codex" /
+        /// "codex-remote"). Null until LaunchSession/InitializeAsync.</summary>
         public string? CliMode { get; private set; }
 
         /// <summary>Conversation ID for this pane, when known. Claude: always set (we pass
@@ -732,8 +733,9 @@ namespace CCPad
                 });
                 TerminalSessionRegistry.NotifyChanged();
 
-                // Notification wiring: Claude posts hook callbacks to CliNotify
-                // (per-pane hook file is injected at launch via --settings).
+                // Notification wiring is local-only. Codex@167 deliberately has
+                // no remote hook bridge in v1, so green/amber hook transitions are
+                // unavailable; process exit still drives the disconnected red state.
                 CliNotify.Register(PaneId, OnCliNotify);
                 Notify.ToastService.RegisterPane(PaneId, this);
                 SetStatus(PaneStatus.Waiting);
@@ -1034,6 +1036,10 @@ namespace CCPad
             // Codex has its own resume flow ("codex resume"); don't fake a claude
             // command. Leave _resumeCommand null so the numpad-up hotkey is inert.
             _resumeCommand = null;
+            if (string.Equals(CliMode, Settings.CliMode.CodexRemote, StringComparison.OrdinalIgnoreCase))
+            {
+                return "\r\n\x1b[90m[SSH exited — dropped to local cmd. Press Enter on an empty prompt to reconnect.]\x1b[0m\r\n";
+            }
             if (string.Equals(CliMode, Settings.CliMode.Codex, StringComparison.OrdinalIgnoreCase))
                 return head;
 
@@ -1192,6 +1198,14 @@ namespace CCPad
                         _lastUserInputUtc = DateTime.UtcNow;
                         if (_awaitingRestart && data == "\r")
                             StartSession();
+                        else if (_inShell &&
+                                 string.Equals(CliMode, Settings.CliMode.CodexRemote, StringComparison.OrdinalIgnoreCase) &&
+                                 data == "\r" && _shellLineBuf.Length == 0)
+                        {
+                            // Codex@167 continuity lives in tmux, so a blank Enter
+                            // can replace the fallback shell with a fresh ssh attach.
+                            StartSession();
+                        }
                         else
                         {
                             // Only a real submit (Enter) means you handed the AI

@@ -11,12 +11,14 @@ namespace CCPad.Settings
         public string Name { get; set; } = "";
         public string WorkingDir { get; set; } = "";
 
-        /// <summary>"claude" or "codex". Empty/missing → use AppPrefs default at restore time.</summary>
+        /// <summary>"claude", "codex", or "codex-remote". Empty/missing → use
+        /// AppPrefs default at restore time.</summary>
         public string CliMode { get; set; } = "";
 
         /// <summary>CLI conversation ID (UUID). Claude: assigned by us via --session-id at
-        /// launch. Codex: harvested from ~/.codex/sessions at snapshot time. Empty → the
-        /// restored tab starts a fresh conversation.</summary>
+        /// launch. Local Codex: harvested from ~/.codex/sessions at snapshot time.
+        /// Remote Codex: always empty because its named tmux session owns continuity.
+        /// Empty → the restored local-CLI tab starts a fresh conversation.</summary>
         public string SessionId { get; set; } = "";
 
         /// <summary>User-defined tag shown as a badge next to the tab title. Empty → none.</summary>

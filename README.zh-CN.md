@@ -188,6 +188,8 @@ ssh -t -i "%USERPROFILE%\.ssh\id_ed25519_167" -o StrictHostKeyChecking=accept-ne
 
 v1 不提供这组连接参数的设置界面。编辑现有的 `%LOCALAPPDATA%\CCPad\prefs.json`，把下面这些属性合并进去（若设置了 `CCPAD_DATA_DIR`，则编辑该目录中的 `prefs.json`）：
 
+手改 `prefs.json` 后请重启 CC Pad；偏好设置会在进程生命周期内缓存。
+
 ```json
 {
   "DefaultCli": "codex-remote",

@@ -188,6 +188,8 @@ ssh -t -i "%USERPROFILE%\.ssh\id_ed25519_167" -o StrictHostKeyChecking=accept-ne
 
 There is no settings UI for this connection in v1. Edit the existing `%LOCALAPPDATA%\CCPad\prefs.json` and merge in the following properties (when `CCPAD_DATA_DIR` is set, `prefs.json` lives there instead):
 
+Restart CC Pad after hand-editing `prefs.json`; preferences are cached for the lifetime of the process.
+
 ```json
 {
   "DefaultCli": "codex-remote",

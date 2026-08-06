@@ -70,9 +70,13 @@ namespace CCPad.Settings
         /// <summary>tmux session name, substituted for {session}.</summary>
         public string TmuxSession { get; set; } = "deploy";
         /// <summary>Command run on the remote host (inside "..." on the ssh
-        /// line, so it must not itself contain double quotes).</summary>
+        /// line, so it must not itself contain double quotes). ssh runs this in
+        /// a non-login shell with no LANG (Windows ssh sends no locale), so a
+        /// UTF-8 locale is exported and tmux gets -u — otherwise the tmux
+        /// client assumes a non-UTF-8 terminal and paints every CJK cell as
+        /// an underscore.</summary>
         public string RemoteCommand { get; set; } =
-            "cd {dir} && source /etc/profile.d/agents.sh && source /zettos/pool/1/agents/opt/proxy_env.sh && tmux new -A -s {session} codex";
+            "cd {dir} && source /etc/profile.d/agents.sh && source /zettos/pool/1/agents/opt/proxy_env.sh && export LANG=C.UTF-8 LC_ALL=C.UTF-8 && tmux -u new -A -s {session} codex";
     }
 
     [JsonSerializable(typeof(AppPrefs))]

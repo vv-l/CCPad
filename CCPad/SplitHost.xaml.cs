@@ -50,6 +50,23 @@ namespace CCPad
             await _activePane.Panel.AddFirstTab(projectName, workingDir);
         }
 
+        /// <summary>Remote tmux session names owned by any tab in this window
+        /// (live or frozen) — the session manager greys these out.</summary>
+        public ISet<string> CollectRemoteSessionNames()
+        {
+            var set = new HashSet<string>(StringComparer.Ordinal);
+            if (_root != null)
+                ForEachPanel(_root, p => p.CollectRemoteSessionNames(set));
+            return set;
+        }
+
+        /// <summary>Open a Codex@167 tab in the active panel reattached to an
+        /// existing remote session.</summary>
+        public Task AttachRemoteSession(string sessionName, string? deviceId = null,
+            string? remoteWorkingDir = null)
+            => _activePane.Panel.AddFirstTab(null, null, CliMode.CodexRemote, sessionName,
+                remoteProfileId: deviceId, remoteWorkingDir: remoteWorkingDir);
+
         public void UpdateProjects(List<ProjectEntry> projects)
         {
             _projects = projects;
@@ -105,6 +122,10 @@ namespace CCPad
             SplitNode sibling = parent.First == node ? parent.Second : parent.First;
             ReplaceNode(parent, sibling);
 
+            // A split panel closing is a permanent close for its tabs — take
+            // their private remote sessions with them (unlike window close,
+            // where the snapshot may be restored later).
+            node.Panel.KillAllRemoteSessions();
             node.Panel.DisposeAll();
 
             var newActive = FindFirstLeaf(sibling);
@@ -125,9 +146,28 @@ namespace CCPad
 
         public void FocusActive() => _activePane.Panel.FocusCurrentTab();
 
-        /// <summary>Apply the same right-edge reserve to every panel's tab strip.</summary>
+        /// <summary>Reserve tab-strip space for the floating WorkspaceButton — but
+        /// only on the panel whose strip actually sits under it (top row, flush with
+        /// the window's right edge). Other split panels get no reserve; blanking
+        /// them too just squeezes their tabs for a button that isn't there.</summary>
         public void SetWorkspaceReserve(double width)
-            => ForEachPanel(_root, p => p.SetWorkspaceReserve(width));
+            => ForEachPanel(_root, p =>
+            {
+                double reserve = 0;
+                if (width > 0)
+                {
+                    try
+                    {
+                        var origin = p.TransformToVisual(this)
+                            .TransformPoint(new Windows.Foundation.Point(0, 0));
+                        bool topRow = origin.Y < 1;
+                        bool rightEdge = ActualWidth - (origin.X + p.ActualWidth) < 1;
+                        if (topRow && rightEdge) reserve = width;
+                    }
+                    catch { reserve = width; }
+                }
+                p.SetWorkspaceReserve(reserve);
+            });
 
         /// <summary>Keep an all-frozen template at zero WebView2/CLI panes.</summary>
         public void DisableFrozenPrewarm()

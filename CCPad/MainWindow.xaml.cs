@@ -57,6 +57,8 @@ namespace CCPad
             ThemeManager.PrefChanged += OnThemePrefChanged;
             LastCmdButton.IsChecked = LastCmdBarManager.IsOn;
             LastCmdBarManager.Changed += OnLastCmdBarManagerChanged;
+            ReplyButton.IsChecked = AutoReplyManager.IsOn;
+            AutoReplyManager.Changed += OnAutoReplyManagerChanged;
             SessionRecovery.MarkRunning();
         }
 
@@ -304,6 +306,189 @@ namespace CCPad
         {
             _splitHost?.ActiveTerminal?.SetAutoConfirm(AutoButton.IsChecked == true);
         }
+
+        /// <summary>Another window flipped the auto-reply switch (each window is its
+        /// own process; the prefs watcher folds the change in) — mirror the button.</summary>
+        private void OnAutoReplyManagerChanged(bool on)
+        {
+            DispatcherQueue.TryEnqueue(() => ReplyButton.IsChecked = on);
+        }
+
+        /// <summary>Toggle auto-reply (自动应答) globally. First-time enable with no
+        /// rules opens the editor so the switch never silently guards an empty list.</summary>
+        private void OnReplyButtonClick(object sender, RoutedEventArgs e)
+        {
+            bool on = ReplyButton.IsChecked == true;
+            AutoReplyManager.SetEnabled(on);
+            if (on && AutoReplyManager.RuleCount == 0)
+                _ = ShowAutoReplyEditorAsync();
+        }
+
+        /// <summary>Right-click on the 应答 button opens the rule editor.</summary>
+        private void OnReplyButtonRightTapped(object sender, Microsoft.UI.Xaml.Input.RightTappedRoutedEventArgs e)
+        {
+            e.Handled = true;
+            _ = ShowAutoReplyEditorAsync();
+        }
+
+        /// <summary>Auto-reply rule editor: one card per rule (enable checkbox,
+        /// trigger phrase, reply message, delete), plus an add button. Edits are
+        /// made on a copy and only persisted on 保存.</summary>
+        private async System.Threading.Tasks.Task ShowAutoReplyEditorAsync()
+        {
+            if (RootGrid.XamlRoot == null) return;
+
+            var rows = new List<(Border Card, CheckBox Enabled, TextBox Trigger, TextBox Reply, TextBox Max)>();
+            var listPanel = new StackPanel { Spacing = 8 };
+
+            void AddRow(AutoReplyRule rule)
+            {
+                var grid = new Grid { RowSpacing = 6, ColumnSpacing = 8 };
+                grid.RowDefinitions.Add(new RowDefinition());
+                grid.RowDefinitions.Add(new RowDefinition());
+                grid.RowDefinitions.Add(new RowDefinition());
+                grid.RowDefinitions.Add(new RowDefinition());
+                grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+                var enabledBox = new CheckBox
+                {
+                    Content = Loc.T("reply_rule_enabled"),
+                    IsChecked = rule.Enabled,
+                    MinWidth = 0,
+                };
+                Grid.SetRow(enabledBox, 0); Grid.SetColumn(enabledBox, 0);
+
+                var card = new Border
+                {
+                    BorderThickness = new Thickness(1),
+                    BorderBrush = (Brush)Application.Current.Resources["ControlStrokeColorDefaultBrush"],
+                    CornerRadius = new CornerRadius(6),
+                    Padding = new Thickness(10),
+                    Child = grid,
+                };
+
+                var deleteBtn = new Button
+                {
+                    Content = new FontIcon { Glyph = "", FontSize = 13 },
+                    Padding = new Thickness(6, 4, 6, 4),
+                };
+                ToolTipService.SetToolTip(deleteBtn, Loc.T("remove"));
+                deleteBtn.Click += (_, _) =>
+                {
+                    listPanel.Children.Remove(card);
+                    rows.RemoveAll(r => r.Card == card);
+                };
+                Grid.SetRow(deleteBtn, 0); Grid.SetColumn(deleteBtn, 1);
+
+                var triggerBox = new TextBox
+                {
+                    Text = rule.Trigger,
+                    PlaceholderText = Loc.T("reply_trigger_ph"),
+                };
+                Grid.SetRow(triggerBox, 1); Grid.SetColumn(triggerBox, 0); Grid.SetColumnSpan(triggerBox, 2);
+
+                var replyBox = new TextBox
+                {
+                    Text = rule.Reply,
+                    PlaceholderText = Loc.T("reply_message_ph"),
+                };
+                Grid.SetRow(replyBox, 2); Grid.SetColumn(replyBox, 0); Grid.SetColumnSpan(replyBox, 2);
+
+                var maxPanel = new StackPanel
+                {
+                    Orientation = Orientation.Horizontal,
+                    Spacing = 8,
+                };
+                var maxBox = new TextBox
+                {
+                    Text = rule.MaxRetries.ToString(),
+                    Width = 72,
+                    InputScope = new Microsoft.UI.Xaml.Input.InputScope
+                    {
+                        Names = { new Microsoft.UI.Xaml.Input.InputScopeName(
+                            Microsoft.UI.Xaml.Input.InputScopeNameValue.Number) },
+                    },
+                };
+                maxPanel.Children.Add(new TextBlock
+                {
+                    Text = Loc.T("reply_max_label"),
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Opacity = 0.8,
+                    FontSize = 12,
+                });
+                maxPanel.Children.Add(maxBox);
+                Grid.SetRow(maxPanel, 3); Grid.SetColumn(maxPanel, 0); Grid.SetColumnSpan(maxPanel, 2);
+
+                grid.Children.Add(enabledBox);
+                grid.Children.Add(deleteBtn);
+                grid.Children.Add(triggerBox);
+                grid.Children.Add(replyBox);
+                grid.Children.Add(maxPanel);
+
+                listPanel.Children.Add(card);
+                rows.Add((card, enabledBox, triggerBox, replyBox, maxBox));
+            }
+
+            foreach (var rule in AutoReplyManager.GetRulesCopy())
+                AddRow(rule);
+
+            var addBtn = new Button
+            {
+                Content = "+ " + Loc.T("reply_add_rule"),
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+            };
+            addBtn.Click += (_, _) => AddRow(new AutoReplyRule());
+
+            var scroller = new ScrollViewer
+            {
+                Content = listPanel,
+                MaxHeight = 380,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            };
+
+            var content = new StackPanel { Spacing = 10, MinWidth = 420 };
+            content.Children.Add(new TextBlock
+            {
+                Text = Loc.T("reply_hint", AutoReplyCooldownDisplaySeconds),
+                TextWrapping = TextWrapping.Wrap,
+                Opacity = 0.7,
+                FontSize = 12,
+            });
+            content.Children.Add(scroller);
+            content.Children.Add(addBtn);
+
+            var dlg = new ContentDialog
+            {
+                Title = Loc.T("reply_dialog_title"),
+                Content = content,
+                PrimaryButtonText = Loc.T("save"),
+                CloseButtonText = Loc.T("cancel"),
+                DefaultButton = ContentDialogButton.Primary,
+                XamlRoot = RootGrid.XamlRoot,
+            };
+
+            var result = await dlg.ShowAsync();
+            if (result != ContentDialogResult.Primary) return;
+
+            var saved = new List<AutoReplyRule>();
+            foreach (var (_, enabledBox, triggerBox, replyBox, maxBox) in rows)
+            {
+                var trigger = triggerBox.Text.Trim();
+                if (trigger.Length == 0) continue;
+                saved.Add(new AutoReplyRule
+                {
+                    Trigger = trigger,
+                    Reply = replyBox.Text.Trim(),
+                    Enabled = enabledBox.IsChecked == true,
+                    MaxRetries = int.TryParse(maxBox.Text.Trim(), out var m) && m >= 0 ? m : 5,
+                });
+            }
+            AutoReplyManager.SaveRules(saved);
+        }
+
+        /// <summary>Mirrors TerminalPane.AutoReplyCooldownSeconds for the hint text.</summary>
+        private const int AutoReplyCooldownDisplaySeconds = 30;
 
         /// <summary>Sync the toggle visuals to the active terminal (called on focus / pane switch).</summary>
         private void RefreshStageButton()
@@ -603,6 +788,9 @@ namespace CCPad
                     RootGrid.Children.Remove(_splitHost);
                 }
 
+                // Items loaded from disk do not retain the transient ForkOnThaw
+                // hint. Reapply template semantics immediately before launch.
+                WorkspaceConfig.MarkAllTabsFrozen(template.Entry);
                 _splitHost = SplitHost.RestoreFromLayout(template.Entry.Layout, ProjectConfig.Load());
                 _splitHost.DisableFrozenPrewarm();
                 RootGrid.Children.Add(_splitHost);
@@ -833,6 +1021,14 @@ namespace CCPad
             };
             _remoteMenuItem.Click += (_, _) => OnRemoteTerminalClick();
             AboutFlyout.Items.Add(_remoteMenuItem);
+
+            var remoteSessionsItem = new MenuFlyoutItem
+            {
+                Text = Loc.T("rs_menu"),
+                Icon = new FontIcon { Glyph = "" } // Network
+            };
+            remoteSessionsItem.Click += async (_, _) => await ShowRemoteSessionsDialogAsync();
+            AboutFlyout.Items.Add(remoteSessionsItem);
 
             AboutFlyout.Items.Add(new MenuFlyoutSeparator());
 
@@ -1122,9 +1318,17 @@ namespace CCPad
             {
                 bool wsVisible = WorkspaceButton.Visibility == Visibility.Visible;
 
+                // DesiredSize includes the element's own Margin — which this method
+                // set to ~(projWidth+16) on a previous pass. Subtract it, or the
+                // reserve re-inflates by the margin on every call and the footer
+                // squeezes the tab strip into scroll arrows.
                 WorkspaceButton.Measure(new Windows.Foundation.Size(
                     double.PositiveInfinity, double.PositiveInfinity));
-                double wsWidth = wsVisible ? WorkspaceButton.DesiredSize.Width : 0;
+                double wsWidth = wsVisible
+                    ? WorkspaceButton.DesiredSize.Width
+                      - WorkspaceButton.Margin.Left - WorkspaceButton.Margin.Right
+                    : 0;
+                if (wsWidth < 0) wsWidth = 0;
 
                 double projWidth = _splitHost?.MaxProjectButtonWidth() ?? 64;
                 const double footerPad = 8, gap = 8;
@@ -1154,6 +1358,8 @@ namespace CCPad
             FilesButtonLabel.Text = Loc.T("btn_files");
             ToolTipService.SetToolTip(AutoButton, Loc.T("tip_auto"));
             AutoButtonLabel.Text = Loc.T("btn_auto");
+            ToolTipService.SetToolTip(ReplyButton, Loc.T("tip_reply"));
+            ReplyButtonLabel.Text = Loc.T("btn_reply");
             ToolTipService.SetToolTip(StageButton, Loc.T("tip_stage"));
             StageButtonLabel.Text = Loc.T("btn_stage");
         }
@@ -1307,6 +1513,148 @@ namespace CCPad
             // Launch installer and exit
             UpdateChecker.LaunchInstaller(localPath);
             Application.Current.Exit();
+        }
+
+        // ── Codex@167 session manager ─────────────────────────────────────
+
+        private static string FormatIdle(TimeSpan t) =>
+            t.TotalDays >= 1 ? $"{(int)t.TotalDays}d {t.Hours}h"
+            : t.TotalHours >= 1 ? $"{(int)t.TotalHours}h {t.Minutes}m"
+            : $"{Math.Max(0, (int)t.TotalMinutes)}m";
+
+        /// <summary>List the tmux sessions on the Codex@167 box: reattach a
+        /// detached one as a new tab, or kill it. Sessions owned by this
+        /// window's live tabs are shown greyed — killing one under a live tab
+        /// would just strand the pane, and attaching it twice would make close
+        /// kill the session out from under the sibling tab.</summary>
+        private async System.Threading.Tasks.Task ShowRemoteSessionsDialogAsync()
+        {
+            var device = RemoteDeviceConfig.Find();
+            if (device == null) return;
+            string deviceId = device.Id;
+            RemoteSessions.EnsureSweeperInBackground(deviceId);
+            var (sessions, error) = await RemoteSessions.ListSessionsAsync(deviceId);
+            var inUse = _splitHost?.CollectRemoteSessionNames()
+                ?? new HashSet<string>(StringComparer.Ordinal);
+
+            var listPanel = new StackPanel { Spacing = 10, MinWidth = 420 };
+            ContentDialog dlg = null!;
+
+            if (error != null)
+            {
+                listPanel.Children.Add(new TextBlock
+                {
+                    Text = Loc.T("rs_error", error),
+                    TextWrapping = TextWrapping.Wrap
+                });
+            }
+            else if (sessions == null || sessions.Count == 0)
+            {
+                listPanel.Children.Add(new TextBlock { Text = Loc.T("rs_none") });
+            }
+            else
+            {
+                foreach (var s in sessions)
+                {
+                    string name = s.Name;
+                    bool used = inUse.Contains(name);
+
+                    var info = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+                    info.Children.Add(new TextBlock
+                    {
+                        Text = name,
+                        FontWeight = Microsoft.UI.Text.FontWeights.SemiBold
+                    });
+                    string status = used ? Loc.T("rs_inuse")
+                        : s.Attached > 0 ? Loc.T("rs_attached", s.Attached)
+                        : Loc.T("rs_idle", FormatIdle(DateTimeOffset.Now - s.LastActivity));
+                    if (!RemoteSessions.IsOwnedName(name, deviceId))
+                        status += " · " + Loc.T("rs_legacy");
+                    var statusText = new TextBlock { Text = status, Opacity = 0.7, FontSize = 12 };
+                    info.Children.Add(statusText);
+
+                    var attachBtn = new Button
+                    {
+                        Content = Loc.T("rs_attach"),
+                        IsEnabled = !used && s.Attached == 0,
+                        Margin = new Thickness(8, 0, 0, 0)
+                    };
+                    var killBtn = new Button
+                    {
+                        Content = Loc.T("rs_kill"),
+                        // Attached may mean another CC Pad window (or another
+                        // operator) is actively using it. Never offer a remote
+                        // kill merely because this window does not own the tab.
+                        IsEnabled = !used && s.Attached == 0,
+                        Margin = new Thickness(8, 0, 0, 0)
+                    };
+                    attachBtn.Click += async (_, _) =>
+                    {
+                        dlg.Hide();
+                        if (_splitHost != null)
+                            await _splitHost.AttachRemoteSession(name, deviceId, device.DefaultWorkingDir);
+                    };
+                    bool killArmed = false;
+                    killBtn.Click += async (_, _) =>
+                    {
+                        // Inline two-step confirmation avoids trying to stack a
+                        // second ContentDialog on top of this session manager.
+                        if (!killArmed)
+                        {
+                            killArmed = true;
+                            killBtn.Content = Loc.T("rs_kill_confirm");
+                            return;
+                        }
+                        attachBtn.IsEnabled = false;
+                        killBtn.IsEnabled = false;
+                        bool ok = await RemoteSessions.KillSessionAsync(name, deviceId);
+                        statusText.Text = ok ? Loc.T("rs_killed") : Loc.T("rs_error", "kill");
+                        if (ok) info.Opacity = 0.5;
+                    };
+
+                    var row = new Grid();
+                    row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                    row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+                    row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+                    Grid.SetColumn(info, 0);
+                    Grid.SetColumn(attachBtn, 1);
+                    Grid.SetColumn(killBtn, 2);
+                    row.Children.Add(info);
+                    row.Children.Add(attachBtn);
+                    row.Children.Add(killBtn);
+                    listPanel.Children.Add(row);
+                }
+            }
+
+            int hours = Math.Max(1, device.SweepIdleHours);
+            string sweep = RemoteSessions.GetSweeperStatus(deviceId) switch
+            {
+                "ok" => Loc.T("rs_sweeper_ok", hours),
+                null => Loc.T("rs_sweeper_pending"),
+                var err => Loc.T("rs_sweeper_fail", err),
+            };
+            listPanel.Children.Add(new TextBlock
+            {
+                Text = sweep,
+                Opacity = 0.6,
+                FontSize = 12,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 6, 0, 0)
+            });
+
+            dlg = new ContentDialog
+            {
+                Title = $"{device.Name} · {Loc.T("rs_title")}",
+                Content = new ScrollViewer
+                {
+                    Content = listPanel,
+                    MaxHeight = 420,
+                    VerticalScrollBarVisibility = ScrollBarVisibility.Auto
+                },
+                CloseButtonText = Loc.T("close"),
+                XamlRoot = Content.XamlRoot
+            };
+            try { await dlg.ShowAsync(); } catch { }
         }
 
         // ── Web server ────────────────────────────────────────────────────
@@ -1672,6 +2020,12 @@ namespace CCPad
             _splitHost.ActivePaneChanged += RefreshStageButton; // keep the staging toggle in sync
             _splitHost.StagingChanged += RefreshStageButton;    // Alt+` hotkey re-syncs the button
             _splitHost.ActivePaneChanged += RefreshFilePanelRoot; // follow active project dir
+
+            // The ordinary launch and recovery paths do not enter workspace mode,
+            // so they otherwise keep the XAML fallback margin (sized for the old
+            // single project button).  Recalculate once after the SplitHost and
+            // both local/remote project buttons are in the visual tree.
+            ScheduleTopRightAdjust();
         }
 
         private void ScheduleAutosave()

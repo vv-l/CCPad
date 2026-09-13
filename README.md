@@ -176,37 +176,19 @@ Use the workspace button (top-right, visible in workspace mode) or the context m
 
 ### Projects
 
-Click the **Projects** button in any tab strip footer to manage pinned directories. Adding a project makes it available as a quick-launch option across all panes.
+Click the **Local** button in any tab strip footer to manage pinned Windows directories. Adding a project makes it available as a quick-launch option across all panes.
 
-### Codex@167 (SSH + tmux)
+The adjacent **External** button manages Linux SSH devices and project directories on those devices. Add a device with its name, host, port, Linux user, private-key path, and default working directory, then use the built-in test for SSH, Linux, directory, tmux, Codex CLI, and login readiness. Devices are stored in `%LOCALAPPDATA%\CCPad\remote-devices.json`; the legacy Codex@167 preferences migrate automatically.
 
-Choosing **Codex@167** starts Windows OpenSSH and attaches the configured remote tmux session. The shipped defaults are equivalent to:
+After a device is ready, add an external project, bind it to that device, and enter an absolute path such as `/zettos/pool/1/agents/myproject`. Adding only registers the directory; click the resulting item or use **Open with remote Codex** from its context menu. Projects remain in `remote-projects.json`, and device IDs/remote directories survive freeze, workspace restore, and crash recovery.
 
-```text
-ssh -t -i "%USERPROFILE%\.ssh\id_ed25519_167" -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 root@192.168.32.167 "cd /zettos/pool/1/agents/deploy/workspace && source /etc/profile.d/agents.sh && source /zettos/pool/1/agents/opt/proxy_env.sh && tmux new -A -s deploy codex"
-```
+**New remote Codex tab** and **Recover remote Codex conversation** use the selected device's default directory. Each tab owns a private `ccpad-*` tmux session. Explicit close ends it; freeze, pane migration, recoverable window close, and SSH loss only detach it, with the remote sweeper handling stale detached sessions.
 
-There is no settings UI for this connection in v1. Edit the existing `%LOCALAPPDATA%\CCPad\prefs.json` and merge in the following properties (when `CCPAD_DATA_DIR` is set, `prefs.json` lives there instead):
+The built-in `codex-167` device starts new sessions with `codex --yolo`, bypassing approvals and sandboxing; the resume picker inherits the same permission flag. Existing tmux processes keep their original launch arguments until closed and reopened.
 
-Restart CC Pad after hand-editing `prefs.json`; preferences are cached for the lifetime of the process.
+### AI-assisted onboarding
 
-```json
-{
-  "DefaultCli": "codex-remote",
-  "RemoteCodex": {
-    "Host": "192.168.32.167",
-    "User": "root",
-    "KeyPath": "%USERPROFILE%\\.ssh\\id_ed25519_167",
-    "RemoteDir": "/zettos/pool/1/agents/deploy/workspace",
-    "TmuxSession": "deploy",
-    "RemoteCommand": "cd {dir} && source /etc/profile.d/agents.sh && source /zettos/pool/1/agents/opt/proxy_env.sh && tmux new -A -s {session} codex"
-  }
-}
-```
-
-`Host` and `User` select the SSH target. `KeyPath` supports Windows `%VAR%` expansion. `RemoteDir` and `TmuxSession` replace `{dir}` and `{session}` in `RemoteCommand`; keep the template free of double quotes because SSH wraps it in a quoted argument. `DefaultCli` may be `claude`, `codex`, or `codex-remote`, and can also be changed from the Projects menu.
-
-Every Codex@167 tab intentionally attaches the same tmux session. Opening several such tabs therefore creates mirrored views, not independent conversations; no per-tab tmux names are generated. Closing or disconnecting a tab does not end the remote conversation. Reopen a Codex@167 tab to reattach. If SSH exits, the tab turns red and falls back to a local `cmd`; press Enter on an empty prompt to reconnect.
+The repository skill at `.agents/skills/ccpad-onboard-linux-device` supports two routes. Given an IP/SSH target, an AI can probe and prepare the Linux requirements and write the CC Pad device/project configuration directly, or return the exact readiness checks and fields for semi-manual UI entry. The skill never stores passwords, private-key contents, OpenAI keys, or Codex login credentials.
 
 ## Architecture
 

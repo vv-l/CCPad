@@ -25,9 +25,11 @@ namespace CCPad.Web
     /// we only parse the first request line and reply 204.
     ///
     /// Hook → event mapping:
-    ///   SessionStart, Notification, Stop → waiting  (started/resumed,
-    ///                                       needs you, or turn done)
-    ///   UserPromptSubmit                 → working  (you gave it work)
+    ///   SessionStart     → waiting  (started/resumed)
+    ///   Stop             → waiting only when no background work remains
+    ///   UserPromptSubmit → working  (you gave it work)
+    /// Notification is deliberately not a state transition: permission and other
+    /// mid-turn notices must never release a staged command.
     /// </summary>
     internal static class CliNotify
     {
@@ -280,15 +282,16 @@ namespace CCPad.Web
                 // refused connection and throws on timeout — both caught below, and
                 // it observes the connect task so there is no unobserved-exception.
                 await client.ConnectAsync(IPAddress.Loopback, port)
-                    .WaitAsync(TimeSpan.FromMilliseconds(500));
+                    .WaitAsync(TimeSpan.FromMilliseconds(500))
+                    .ConfigureAwait(false);
                 if (!client.Connected) return;
                 using var stream = client.GetStream();
                 string sidPart = string.IsNullOrEmpty(cliSessionId) ? "" : $"&sid={cliSessionId}";
                 var req = Encoding.ASCII.GetBytes(
                     $"GET /notify?session={paneId}&event={evt}{sidPart} HTTP/1.0\r\n" +
                     "Host: 127.0.0.1\r\nConnection: close\r\n\r\n");
-                await stream.WriteAsync(req, 0, req.Length);
-                await stream.FlushAsync();
+                await stream.WriteAsync(req, 0, req.Length).ConfigureAwait(false);
+                await stream.FlushAsync().ConfigureAwait(false);
             }
             catch { }
         }
@@ -306,7 +309,6 @@ namespace CCPad.Web
             // it comes up — no process-tracking needed.
             return "{\"hooks\":{" +
                    one("SessionStart", waiting) + "," +
-                   one("Notification", waiting) + "," +
                    one("Stop", waiting) + "," +
                    one("UserPromptSubmit", working) +
                    "}}";

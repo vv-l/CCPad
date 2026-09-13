@@ -11,14 +11,21 @@ namespace CCPad.Settings
         public string Name { get; set; } = "";
         public string WorkingDir { get; set; } = "";
 
+        /// <summary>SSH profile and Linux working directory for a remote tab.
+        /// Kept separate from WorkingDir so a Linux path is never handed to
+        /// Windows CreateProcess as its local current directory.</summary>
+        public string RemoteProfileId { get; set; } = "";
+        public string RemoteWorkingDir { get; set; } = "";
+
         /// <summary>"claude", "codex", or "codex-remote". Empty/missing → use
         /// AppPrefs default at restore time.</summary>
         public string CliMode { get; set; } = "";
 
         /// <summary>CLI conversation ID (UUID). Claude: assigned by us via --session-id at
         /// launch. Local Codex: harvested from ~/.codex/sessions at snapshot time.
-        /// Remote Codex: always empty because its named tmux session owns continuity.
-        /// Empty → the restored local-CLI tab starts a fresh conversation.</summary>
+        /// Remote Codex: the tab's private tmux session NAME ("ccpad-…") —
+        /// `tmux new -A` reattaches it on restore (see RemoteSessions).
+        /// Empty → the restored tab starts a fresh conversation/session.</summary>
         public string SessionId { get; set; } = "";
 
         /// <summary>User-defined tag shown as a badge next to the tab title. Empty → none.</summary>
@@ -28,6 +35,18 @@ namespace CCPad.Settings
         /// snapshot was taken. Restore recreates it as a frozen placeholder — no
         /// WebView2 or CLI is started until the user thaws it.</summary>
         public bool Frozen { get; set; }
+
+        /// <summary>Transient launch hint for reusable templates. A template may
+        /// be opened more than once while its source conversation is still live,
+        /// so local Codex must fork instead of competing for the source thread's
+        /// single writer. This is deliberately not persisted; ordinary recovery
+        /// snapshots must continue to resume the exact conversation.</summary>
+        [JsonIgnore]
+        public bool ForkOnThaw { get; set; }
+
+        /// <summary>User-dragged tab width in px (width grip on the tab's right edge).
+        /// 0/absent → auto width (TabView SizeToContent).</summary>
+        public double CustomWidth { get; set; }
     }
 
     public class LayoutNode
@@ -134,7 +153,10 @@ namespace CCPad.Settings
             if (node == null) return;
             if (node.Tabs != null)
                 foreach (var tab in node.Tabs)
+                {
                     tab.Frozen = true;
+                    tab.ForkOnThaw = true;
+                }
             MarkNodeFrozen(node.First);
             MarkNodeFrozen(node.Second);
         }

@@ -76,6 +76,19 @@
                 </StackPanel>
             </ToggleButton>
 
+            <ToggleButton x:Name="ReplyButton"
+                          Width="74" Height="28" MinHeight="28" MinWidth="0"
+                          Padding="0" HorizontalContentAlignment="Center"
+                          VerticalContentAlignment="Center"
+                          ToolTipService.ToolTip="自动应答：检测到自定义词条时自动发送预设消息（右键设置规则）"
+                          Click="OnReplyButtonClick"
+                          RightTapped="OnReplyButtonRightTapped">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <FontIcon Glyph="&#xE8BD;" FontSize="14"/>
+                    <TextBlock x:Name="ReplyButtonLabel" Text="应答" FontSize="14" VerticalAlignment="Center"/>
+                </StackPanel>
+            </ToggleButton>
+
             <ToggleButton x:Name="StageButton"
                           Width="74" Height="28" MinHeight="28" MinWidth="0"
                           Padding="0" HorizontalContentAlignment="Center"

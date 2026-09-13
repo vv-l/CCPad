@@ -20,6 +20,11 @@ namespace CCPad
 
         [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
         [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr hWnd);
+        [DllImport("user32.dll")] private static extern bool ReleaseCapture();
+        [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+        private const uint WmNcLButtonDown = 0x00A1;
+        private static readonly IntPtr HtCaption = new(2);
 
         /// <summary>True when CCPad's window is the foreground OS window.</summary>
         public static bool IsMainWindowForeground()
@@ -99,29 +104,81 @@ namespace CCPad
         }
 
         /// <summary>
-        /// Claude Code hooks pipe a JSON payload (session_id, transcript_path, cwd…)
-        /// to the hook command's stdin. Extract the session_id so the owning pane can
-        /// track the CLI's REAL conversation ID — the --session-id assigned at launch
-        /// goes stale the moment the user runs /clear or /resume inside the CLI, or
-        /// relaunches claude from the fallback shell. Hard timeout because Codex
-        /// direct-execs this helper without piping stdin.
+        /// Claude Code hooks pipe a JSON payload to the hook command's stdin. Besides
+        /// the real conversation ID, Stop payloads expose background_tasks and
+        /// session_crons: a non-empty list means Claude is paused for work that will
+        /// wake it again, not genuinely idle. Hard timeout because Codex direct-execs
+        /// this helper without piping stdin.
         /// </summary>
-        private static string? ReadHookSessionId()
+        private readonly record struct HookPayload(
+            string? SessionId, string? EventName, bool HasPendingWork);
+
+        private static HookPayload ReadHookPayload()
         {
             try
             {
-                if (!Console.IsInputRedirected) return null;
+                if (!Console.IsInputRedirected) return default;
                 var read = System.Threading.Tasks.Task.Run(() => Console.In.ReadToEnd());
-                if (!read.Wait(1500)) return null;
+                if (!read.Wait(1500)) return default;
                 var json = read.Result;
-                if (string.IsNullOrWhiteSpace(json)) return null;
+                if (string.IsNullOrWhiteSpace(json)) return default;
                 using var doc = System.Text.Json.JsonDocument.Parse(json);
+                var root = doc.RootElement;
+                string? sessionId = null;
+                string? eventName = null;
                 if (doc.RootElement.TryGetProperty("session_id", out var sid) &&
                     Guid.TryParse(sid.GetString(), out _))
-                    return sid.GetString();
+                    sessionId = sid.GetString();
+                if (root.TryGetProperty("hook_event_name", out var evt))
+                    eventName = evt.GetString();
+
+                static bool NonEmptyArray(System.Text.Json.JsonElement root, string name) =>
+                    root.TryGetProperty(name, out var value) &&
+                    value.ValueKind == System.Text.Json.JsonValueKind.Array &&
+                    value.GetArrayLength() > 0;
+
+                bool pending = NonEmptyArray(root, "background_tasks") ||
+                               NonEmptyArray(root, "session_crons");
+                return new HookPayload(sessionId, eventName, pending);
             }
             catch { }
-            return null;
+            return default;
+        }
+
+        /// <summary>Turn a left press on non-interactive tab-strip whitespace into
+        /// a normal Windows caption drag. The stock title bar remains enabled, so
+        /// this only adds the expected draggable gap between tabs and the add button.</summary>
+        public static void BeginMainWindowDrag()
+        {
+            try
+            {
+                if ((Current as App)?._window is not { } w) return;
+                var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(w);
+                ReleaseCapture();
+                SendMessage(hwnd, WmNcLButtonDown, HtCaption, IntPtr.Zero);
+            }
+            catch { }
+        }
+
+        /// <summary>Turn the coarse event word embedded in old and new hook files
+        /// into the pane state that the payload actually describes.</summary>
+        private static string? ResolveHookEvent(string requested, HookPayload payload)
+        {
+            // Notification is not a lifecycle transition. It can fire for permission
+            // prompts and other mid-turn notices; treating it as idle releases staged
+            // messages into a still-running turn.
+            if (string.Equals(payload.EventName, "Notification", StringComparison.Ordinal))
+                return null;
+
+            if (string.Equals(payload.EventName, "Stop", StringComparison.Ordinal))
+                return payload.HasPendingWork ? "working" : "waiting";
+            if (string.Equals(payload.EventName, "UserPromptSubmit", StringComparison.Ordinal))
+                return "working";
+            if (string.Equals(payload.EventName, "SessionStart", StringComparison.Ordinal))
+                return "waiting";
+
+            // Codex notify and older Claude versions may not provide hook_event_name.
+            return requested;
         }
 
         protected override void OnLaunched(LaunchActivatedEventArgs args)
@@ -144,11 +201,18 @@ namespace CCPad
                 {
                     string paneId = cmdArgs[2];
                     string evtOrPort = cmdArgs[3];
-                    string? sid = ReadHookSessionId();
-                    if (int.TryParse(evtOrPort, out int notifyPort))
-                        Web.CliNotify.SendLocal(notifyPort, paneId, "waiting", sid);
-                    else
-                        Web.CliNotify.Broadcast(paneId, evtOrPort, sid);
+                    var payload = ReadHookPayload();
+                    string requested = int.TryParse(evtOrPort, out int notifyPort)
+                        ? "waiting"
+                        : evtOrPort;
+                    string? effectiveEvent = ResolveHookEvent(requested, payload);
+                    if (effectiveEvent != null)
+                    {
+                        if (notifyPort > 0)
+                            Web.CliNotify.SendLocal(notifyPort, paneId, effectiveEvent, payload.SessionId);
+                        else
+                            Web.CliNotify.Broadcast(paneId, effectiveEvent, payload.SessionId);
+                    }
                 }
                 catch { }
                 Environment.Exit(0);

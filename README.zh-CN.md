@@ -176,37 +176,19 @@ CCPad.exe my-project.ccpad-workspace
 
 ### 项目管理
 
-点击任意标签栏右侧的 **项目** 按钮来管理固定目录。添加项目后即可在所有面板中快速创建对应目录的新标签页。
+点击任意标签栏右侧的 **本地项目** 按钮来管理固定的 Windows 目录。添加项目后即可在所有面板中快速创建对应目录的新标签页。
 
-### Codex@167（SSH + tmux）
+旁边的 **外部项目** 按钮管理 Linux SSH 设备和设备上的项目目录。先选择「添加外部设备」，填写设备名称、IP、端口、Linux 用户、私钥路径和默认工作目录，再用内置测试检查 SSH、Linux、目录、tmux、Codex CLI 与登录状态。设备保存到 `%LOCALAPPDATA%\CCPad\remote-devices.json`；旧版 Codex@167 配置会自动迁移。
 
-选择 **Codex@167** 后，CC Pad 会启动 Windows OpenSSH，并 attach 配置的远端 tmux 会话。内置默认值等价于：
+设备就绪后选择「添加外部项目」，绑定设备并填写 `/zettos/pool/1/agents/myproject` 这样的 Linux 绝对路径。添加只登记目录，不启动会话；菜单项可直接点击或右键「用远程 Codex 打开」。项目保存到 `remote-projects.json`，设备 ID 和远程目录会随冻结、工作区及崩溃恢复持久化。
 
-```text
-ssh -t -i "%USERPROFILE%\.ssh\id_ed25519_167" -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 root@192.168.32.167 "cd /zettos/pool/1/agents/deploy/workspace && source /etc/profile.d/agents.sh && source /zettos/pool/1/agents/opt/proxy_env.sh && tmux new -A -s deploy codex"
-```
+「新建远程 Codex 标签」与「恢复远程 Codex 对话」使用当前设备的默认工作目录。每个标签拥有独立的 `ccpad-*` tmux 会话：明确关闭标签会结束会话，冻结、跨面板移动、可恢复窗口关闭或 SSH 断线只会 detach，超期的断开会话由远程清扫器回收。
 
-v1 不提供这组连接参数的设置界面。编辑现有的 `%LOCALAPPDATA%\CCPad\prefs.json`，把下面这些属性合并进去（若设置了 `CCPAD_DATA_DIR`，则编辑该目录中的 `prefs.json`）：
+内置的 `codex-167` 设备默认以 `codex --yolo` 启动新会话，即跳过审批并使用最高权限；恢复选择器也继承该权限参数。已经运行的 tmux 会话保持原启动参数，关闭后重新打开项目即可应用。
 
-手改 `prefs.json` 后请重启 CC Pad；偏好设置会在进程生命周期内缓存。
+### AI 快速接入
 
-```json
-{
-  "DefaultCli": "codex-remote",
-  "RemoteCodex": {
-    "Host": "192.168.32.167",
-    "User": "root",
-    "KeyPath": "%USERPROFILE%\\.ssh\\id_ed25519_167",
-    "RemoteDir": "/zettos/pool/1/agents/deploy/workspace",
-    "TmuxSession": "deploy",
-    "RemoteCommand": "cd {dir} && source /etc/profile.d/agents.sh && source /zettos/pool/1/agents/opt/proxy_env.sh && tmux new -A -s {session} codex"
-  }
-}
-```
-
-`Host`、`User` 是 SSH 目标；`KeyPath` 支持 Windows `%VAR%` 环境变量展开；`RemoteDir` 和 `TmuxSession` 会分别替换 `RemoteCommand` 中的 `{dir}`、`{session}`。模板会作为 SSH 的双引号参数传入，因此模板本身不要再含双引号。`DefaultCli` 可设为 `claude`、`codex` 或 `codex-remote`，也可直接在「项目」菜单中选择。
-
-所有 Codex@167 标签按设计 attach 同一个 tmux 会话。多个标签是同一画面的镜像，不是独立对话；不会自动生成每标签 tmux 名称，避免远端积累僵尸会话。关闭标签或 SSH 断线不会结束远端对话，重新打开 Codex@167 标签即可接回。SSH 退出时标签变红并回落本地 `cmd`，在空提示符按回车可直接重连。
+仓库内的 `.agents/skills/ccpad-onboard-linux-device` Skill 支持两种流程：AI 收到 IP、SSH 用户和认证方式后探测并准备 Linux 环境，可以直接写入 CC Pad 设备/项目配置；也可以只返回所有检查结果和字段，由用户在界面中半手动添加。Skill 不保存密码、私钥内容、OpenAI 密钥或 Codex 登录凭据。
 
 ## 架构
 

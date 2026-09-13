@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
@@ -9,6 +9,7 @@ using CCPad.Web;
 using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 
@@ -19,6 +20,8 @@ namespace CCPad
         private int _tabCounter;
         private TerminalPane? _prewarmedPane;
         private List<ProjectEntry> _projects;
+        private List<RemoteProjectEntry> _remoteProjects;
+        private RemoteDeviceDocument _remoteDevices;
         private string? _defaultWorkingDir;
         private List<TabState>? _pendingRestoreTabs;
         private int _pendingRestoreActiveIndex;
@@ -42,16 +45,47 @@ namespace CCPad
         {
             InitializeComponent();
             _projects = projects;
+            _remoteProjects = RemoteProjectConfig.Load();
+            _remoteDevices = RemoteDeviceConfig.Load();
             RefreshProjectFlyout();
+            RefreshExternalProjectFlyout();
             ApplyLocalizedChrome();
+
+            // TabView consumes pointer events internally. Listen even when handled
+            // so blank tab-strip space can behave like a window caption without
+            // affecting tabs, the add button, scroll arrows or project controls.
+            Tabs.AddHandler(PointerPressedEvent,
+                new PointerEventHandler(OnTabStripBackgroundPointerPressed),
+                handledEventsToo: true);
+
+            // Handle tab-width dragging at the TabView boundary.  TabViewItem's
+            // template captures the pointer again after item-level handlers run,
+            // which immediately cancelled the old per-item drag implementation.
+            // The TabView is the last control in this routed-event path, so its
+            // capture remains authoritative for the rest of the gesture.
+            Tabs.AddHandler(PointerMovedEvent,
+                new PointerEventHandler(OnTabWidthPointerMoved),
+                handledEventsToo: true);
+            Tabs.AddHandler(PointerPressedEvent,
+                new PointerEventHandler(OnTabWidthPointerPressed),
+                handledEventsToo: true);
+            Tabs.AddHandler(PointerReleasedEvent,
+                new PointerEventHandler(OnTabWidthPointerReleased),
+                handledEventsToo: true);
+            Tabs.PointerCaptureLost += OnTabWidthPointerCaptureLost;
+            Tabs.PointerExited += OnTabWidthPointerExited;
 
             ApplyTabHeight(TabHeightManager.Height);
             TabHeightManager.Changed += OnSharedTabHeightChanged;
             Loc.LanguageChanged += OnLanguageChanged;
+            RemoteProjectConfig.Changed += OnRemoteProjectsChanged;
+            RemoteDeviceConfig.Changed += OnRemoteDevicesChanged;
             Unloaded += (_, _) =>
             {
                 TabHeightManager.Changed -= OnSharedTabHeightChanged;
                 Loc.LanguageChanged -= OnLanguageChanged;
+                RemoteProjectConfig.Changed -= OnRemoteProjectsChanged;
+                RemoteDeviceConfig.Changed -= OnRemoteDevicesChanged;
             };
         }
 
@@ -60,6 +94,7 @@ namespace CCPad
             try
             {
                 RefreshProjectFlyout();
+                RefreshExternalProjectFlyout();
                 ApplyLocalizedChrome();
             }
             catch { }
@@ -69,8 +104,22 @@ namespace CCPad
         private void ApplyLocalizedChrome()
         {
             ProjectLabel.Text = Loc.T("btn_project");
+            ExternalProjectLabel.Text = Loc.T("btn_external_project");
             ToolTipService.SetToolTip(ProjectButton, Loc.T("tip_project"));
+            ToolTipService.SetToolTip(ExternalProjectButton, Loc.T("tip_external_project"));
             ToolTipService.SetToolTip(ResizeHandle, Loc.T("tip_resize_tabs"));
+        }
+
+        private void OnRemoteProjectsChanged()
+        {
+            _remoteProjects = RemoteProjectConfig.Load();
+            RefreshExternalProjectFlyout();
+        }
+
+        private void OnRemoteDevicesChanged()
+        {
+            _remoteDevices = RemoteDeviceConfig.Load();
+            RefreshExternalProjectFlyout();
         }
 
         /// <summary>Blank space reserved at the right of the tab strip for the global
@@ -84,8 +133,10 @@ namespace CCPad
         /// <summary>Natural width of the project button (for laying out the overlay beside it).</summary>
         public double ProjectButtonDesiredWidth()
         {
-            ProjectButton.Measure(new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity));
-            return ProjectButton.DesiredSize.Width;
+            var infinite = new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity);
+            ProjectButton.Measure(infinite);
+            ExternalProjectButton.Measure(infinite);
+            return ProjectButton.DesiredSize.Width + ExternalProjectButton.DesiredSize.Width;
         }
 
         // ── Tab-strip height sync + resize handle ───────────────────────
@@ -93,6 +144,29 @@ namespace CCPad
         // Approx. vertical padding above the tab row inside TabView's tab strip
         // (window-drag reserve area). Used to place the handle at the strip's bottom edge.
         private const double TabStripTopPadding = 8;
+
+        private void OnTabStripBackgroundPointerPressed(object sender, PointerRoutedEventArgs e)
+        {
+            var point = e.GetCurrentPoint(Tabs);
+            if (!point.Properties.IsLeftButtonPressed ||
+                point.Position.Y < 0 ||
+                point.Position.Y >= TabStripTopPadding + TabHeightManager.Height - 3)
+                return;
+
+            // Only the strip's genuine background is draggable. Any interactive
+            // descendant keeps its normal behavior, including tab headers/close,
+            // add/scroll buttons and both project menus.
+            for (DependencyObject? node = e.OriginalSource as DependencyObject;
+                 node != null && !ReferenceEquals(node, Tabs);
+                 node = VisualTreeHelper.GetParent(node))
+            {
+                if (node is TabViewItem or ButtonBase or ScrollBar)
+                    return;
+            }
+
+            e.Handled = true;
+            App.BeginMainWindowDrag();
+        }
 
         private bool _dragging;
         private double _dragStartY;
@@ -159,6 +233,175 @@ namespace CCPad
             TabHeightManager.Persist();
         }
 
+        // ── Per-tab width grip (rightmost strip of each tab) ────────────
+
+        // Hot zone measured from the tab's RIGHT edge, independent of header
+        // content — a crowded title + tag badge can't crowd it out.
+        private const double WidthGripZone = 12;
+        private const double MinTabWidth = 72;
+        private const double MaxTabWidth = 640;
+
+        private bool _widthDragging;
+        private TabViewItem? _widthDragItem;
+        private TabViewItem? _widthHoverItem;
+        private double _widthDragStartX;
+        private double _widthDragStartWidth;
+
+        /// <summary>Explicit user width of a tab for persistence; 0 = auto (SizeToContent).</summary>
+        private static double CustomWidthOf(TabViewItem item)
+            => double.IsNaN(item.Width) ? 0 : item.Width;
+
+        /// <summary>Give a tab an explicit user width. Min/MaxWidth are pinned too:
+        /// TabView's layout writes the TabViewItemMaxWidth theme resource (240px)
+        /// onto every item, which would otherwise clamp a wider drag.</summary>
+        private static void ApplyCustomWidth(TabViewItem item, double w)
+        {
+            w = Math.Clamp(w, MinTabWidth, MaxTabWidth);
+            item.MinWidth = w;
+            item.MaxWidth = w;
+            item.Width = w;
+        }
+
+        /// <summary>Back to auto (SizeToContent) width; TabView re-applies its own
+        /// Min/MaxWidth on its next layout pass.</summary>
+        private static void ResetTabWidth(TabViewItem item)
+        {
+            item.Width = double.NaN;
+            item.ClearValue(FrameworkElement.MinWidthProperty);
+            item.ClearValue(FrameworkElement.MaxWidthProperty);
+        }
+
+        private static bool InWidthGripZone(TabViewItem item, Windows.Foundation.Point pos)
+            => pos.X >= item.ActualWidth - WidthGripZone;
+
+        /// <summary>Master switch for tab reorder/tear-out. Item-level flags
+        /// (CanDrag, Handled, capture) don't stop the gesture — TabView's inner
+        /// list drives it from CanReorderTabs/CanDragTabs, so toggle those.</summary>
+        private void SetTabStripDragEnabled(bool on)
+        {
+            Tabs.CanReorderTabs = on;
+            Tabs.CanDragTabs = on;
+        }
+
+        private static TabViewItem? TabItemFromSource(object? source)
+        {
+            for (DependencyObject? node = source as DependencyObject;
+                 node != null;
+                 node = VisualTreeHelper.GetParent(node))
+            {
+                if (node is TabViewItem item)
+                    return item;
+            }
+            return null;
+        }
+
+        private void SetWidthGripHover(TabViewItem? item)
+        {
+            if (ReferenceEquals(_widthHoverItem, item)) return;
+            _widthHoverItem = item;
+            SetTabStripDragEnabled(item == null);
+            ProtectedCursor = item == null
+                ? null
+                : InputSystemCursor.Create(InputSystemCursorShape.SizeWestEast);
+        }
+
+        private void OnTabWidthPointerMoved(object sender, PointerRoutedEventArgs e)
+        {
+            if (_widthDragging)
+            {
+                if (_widthDragItem == null) return;
+                double dx = e.GetCurrentPoint(Tabs).Position.X - _widthDragStartX;
+                ApplyCustomWidth(_widthDragItem, _widthDragStartWidth + dx);
+                e.Handled = true;
+                return;
+            }
+
+            var item = TabItemFromSource(e.OriginalSource);
+            if (item == null ||
+                !InWidthGripZone(item, e.GetCurrentPoint(item).Position))
+                item = null;
+            SetWidthGripHover(item);
+        }
+
+        private void OnTabWidthPointerPressed(object sender, PointerRoutedEventArgs e)
+        {
+            if (_widthDragging) return;
+            var point = e.GetCurrentPoint(Tabs);
+            var item = TabItemFromSource(e.OriginalSource);
+            if (!point.Properties.IsLeftButtonPressed || item == null ||
+                !InWidthGripZone(item, e.GetCurrentPoint(item).Position))
+                return;
+
+            _widthDragging = true;
+            _widthDragItem = item;
+            _widthDragStartX = point.Position.X;
+            _widthDragStartWidth = double.IsNaN(item.Width) ? item.ActualWidth : item.Width;
+            SetWidthGripHover(item);
+            Tabs.CapturePointer(e.Pointer);
+            e.Handled = true;
+        }
+
+        private void OnTabWidthPointerReleased(object sender, PointerRoutedEventArgs e)
+        {
+            if (!_widthDragging) return;
+            FinishTabWidthDrag();
+            Tabs.ReleasePointerCapture(e.Pointer);
+            e.Handled = true;
+        }
+
+        private void OnTabWidthPointerCaptureLost(object sender, PointerRoutedEventArgs e)
+        {
+            if (_widthDragging)
+                FinishTabWidthDrag();
+        }
+
+        private void OnTabWidthPointerExited(object sender, PointerRoutedEventArgs e)
+        {
+            if (!_widthDragging)
+                SetWidthGripHover(null);
+        }
+
+        private void FinishTabWidthDrag()
+        {
+            _widthDragging = false;
+            _widthDragItem = null;
+            SetWidthGripHover(null);
+            TabsChanged?.Invoke();
+        }
+
+        /// <summary>Horizontal-drag width grip on the tab's right edge: drag sets an
+        /// explicit width overriding SizeToContent; double-click restores auto.</summary>
+        private void AttachWidthGrip(TabViewItem item)
+        {
+            // TabView rewrites item Min/MaxWidth from theme resources during its
+            // layout passes; while a custom width is active, immediately pin them back.
+            item.RegisterPropertyChangedCallback(FrameworkElement.MaxWidthProperty, (_, _) =>
+            {
+                if (!double.IsNaN(item.Width) && item.MaxWidth != item.Width)
+                    item.MaxWidth = item.Width;
+            });
+            item.RegisterPropertyChangedCallback(FrameworkElement.MinWidthProperty, (_, _) =>
+            {
+                if (!double.IsNaN(item.Width) && item.MinWidth != item.Width)
+                    item.MinWidth = item.Width;
+            });
+
+            // DragStarting cancellation is a backstop for the native TabView drag
+            // recognizer if it races with our TabView-level pointer handler.
+            item.DragStarting += (_, e) =>
+            {
+                if (_widthDragging || ReferenceEquals(_widthHoverItem, item))
+                    e.Cancel = true;
+            };
+
+            item.AddHandler(DoubleTappedEvent, new DoubleTappedEventHandler((_, e) =>
+            {
+                if (!InWidthGripZone(item, e.GetPosition(item))) return;
+                ResetTabWidth(item);
+                e.Handled = true;
+            }), handledEventsToo: true);
+        }
+
         public void UpdateProjects(List<ProjectEntry> projects)
         {
             _projects = projects;
@@ -167,11 +410,14 @@ namespace CCPad
 
         // ── Public API ──────────────────────────────────────────────────
 
-        public async Task AddFirstTab(string? projectName = null, string? workingDir = null, string? cliMode = null, string? resumeSessionId = null, string? tag = null)
+        public async Task AddFirstTab(string? projectName = null, string? workingDir = null,
+            string? cliMode = null, string? resumeSessionId = null, string? tag = null,
+            string? remoteProfileId = null, string? remoteWorkingDir = null)
         {
             if (workingDir != null)
                 _defaultWorkingDir = workingDir;
-            await AddNewTab(projectName, workingDir, cliMode, resumeSessionId, tag);
+            await AddNewTab(projectName, workingDir, cliMode, resumeSessionId, tag,
+                remoteProfileId, remoteWorkingDir);
         }
 
         public void FocusCurrentTab()
@@ -196,12 +442,26 @@ namespace CCPad
 
         // ── Tab management ──────────────────────────────────────────────
 
-        private async Task AddNewTab(string? projectName = null, string? workingDir = null, string? cliMode = null, string? resumeSessionId = null, string? tag = null)
+        private async Task AddNewTab(string? projectName = null, string? workingDir = null,
+            string? cliMode = null, string? resumeSessionId = null, string? tag = null,
+            string? remoteProfileId = null, string? remoteWorkingDir = null,
+            bool remoteResumePicker = false)
         {
             _tabCounter++;
             string mode = ResolveCliMode(cliMode);
+            // A Linux project path is carried separately in remoteWorkingDir;
+            // never hand either it or a panel's local default to CreateProcess.
+            if (mode == CliMode.CodexRemote)
+                workingDir = null;
 
             var (pane, prewarmed) = await AcquirePaneAsync();
+            if (mode == CliMode.CodexRemote)
+            {
+                pane.RemoteProfileId = string.IsNullOrEmpty(remoteProfileId)
+                    ? RemoteDeviceConfig.Load().SelectedDeviceId
+                    : remoteProfileId;
+                pane.RemoteWorkingDir = remoteWorkingDir;
+            }
 
             // Remote Codex cannot call this machine's loopback notify endpoint.
             // v1 intentionally leaves its green/amber hook state degraded; the
@@ -212,7 +472,9 @@ namespace CCPad
                 CliMode.CodexRemote => "",
                 _ => CliNotify.PrepareClaudeHooks(pane.PaneId),
             };
-            var (cmd, resumed) = await BuildLaunchCommandAsync(mode, extra, resumeSessionId, pane);
+            pane.CompletionHooksActive = extra.Length > 0;
+            var (cmd, resumed) = await BuildLaunchCommandAsync(
+                mode, extra, resumeSessionId, pane, remoteWorkingDir, remoteResumePicker);
 
             var item = CreateTabItem(projectName, workingDir, pane, mode, tag);
 
@@ -261,16 +523,27 @@ namespace CCPad
         /// The session-exists checks walk the CLI's session directories on disk, so
         /// they run on the thread pool to keep the UI thread free.
         /// </summary>
-        private static async Task<(string Cmd, bool Resumed)> BuildLaunchCommandAsync(string mode, string extra, string? resumeSessionId, TerminalPane pane)
+        private static async Task<(string Cmd, bool Resumed)> BuildLaunchCommandAsync(
+            string mode, string extra, string? resumeSessionId, TerminalPane pane,
+            string? remoteWorkingDir = null, bool remoteResumePicker = false,
+            bool forkCodexSession = false)
         {
             if (mode == CliMode.CodexRemote)
             {
-                // The named remote tmux session owns continuity. Never assign or
-                // scan a local Claude/Codex conversation ID for this pane.
-                pane.SessionId = null;
-                return resumeSessionId != null
-                    ? (CliMode.BuildResumeCommand(mode, resumeSessionId, extra), true)
-                    : (CliMode.BuildCommand(mode, extra), false);
+                // Every remote tab owns a PRIVATE tmux session; its NAME is what
+                // SessionId stores (never a local conversation UUID), so the
+                // existing freeze/snapshot/restore plumbing reattaches it for
+                // free. An old snapshot's empty id just means a fresh session.
+                string deviceId = pane.RemoteProfileId ?? RemoteDeviceConfig.Load().SelectedDeviceId;
+                string name = string.IsNullOrEmpty(resumeSessionId)
+                    ? RemoteSessions.NewSessionName(deviceId)
+                    : resumeSessionId!;
+                pane.SessionId = name;
+                RemoteSessions.EnsureSweeperInBackground(deviceId);
+                string cmd = remoteResumePicker
+                    ? CliMode.BuildRemoteResumePickerCommand(name, remoteWorkingDir, deviceId)
+                    : CliMode.BuildRemoteCommand(name, remoteWorkingDir, deviceId);
+                return (cmd, resumeSessionId != null);
             }
 
             if (mode == CliMode.Codex)
@@ -278,8 +551,14 @@ namespace CCPad
                 if (resumeSessionId != null &&
                     await Task.Run(() => CliSessions.CodexSessionExists(resumeSessionId)))
                 {
-                    pane.SessionId = resumeSessionId;
-                    return (CliMode.BuildResumeCommand(mode, resumeSessionId, extra), true);
+                    // A fork receives a new ID from Codex's notify event. Do not
+                    // seed the pane with the source ID or a snapshot taken during
+                    // startup could later try to resume the shared source thread.
+                    if (!forkCodexSession)
+                        pane.SessionId = resumeSessionId;
+                    return (forkCodexSession
+                        ? CliMode.BuildForkCommand(resumeSessionId, extra)
+                        : CliMode.BuildResumeCommand(mode, resumeSessionId, extra), true);
                 }
                 return (CliMode.BuildCommand(mode, extra), false);
             }
@@ -522,13 +801,21 @@ namespace CCPad
                 VerticalAlignment = VerticalAlignment.Center,
                 Fill = StatusBrush(PaneStatus.Waiting)
             };
-            var headerPanel = new StackPanel { Orientation = Orientation.Horizontal };
+            // Grid instead of StackPanel so the title column can compress with an
+            // ellipsis when the user drags the tab narrower than its content.
+            var headerPanel = new Grid();
+            headerPanel.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });                   // dot
+            headerPanel.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) }); // title
+            headerPanel.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });                   // tag badge
             headerPanel.Children.Add(dot);
-            headerPanel.Children.Add(new TextBlock
+            var title = new TextBlock
             {
                 Text = HeaderFor(baseHeader, cliMode),
-                VerticalAlignment = VerticalAlignment.Center
-            });
+                VerticalAlignment = VerticalAlignment.Center,
+                TextTrimming = TextTrimming.CharacterEllipsis
+            };
+            Grid.SetColumn(title, 1);
+            headerPanel.Children.Add(title);
 
             // User tag badge: a small pill after the title. Ellipsized past MaxWidth;
             // the full text is available via tooltip (set in ApplyTag).
@@ -551,6 +838,7 @@ namespace CCPad
                 Visibility = Visibility.Collapsed,
                 Child = tagText
             };
+            Grid.SetColumn(tagBadge, 2);
             headerPanel.Children.Add(tagBadge);
 
             tabCtx.Dot = dot;
@@ -566,6 +854,8 @@ namespace CCPad
                 Tag = tabCtx,
                 Content = tabCtx.ContentHost
             };
+
+            AttachWidthGrip(item);
 
             var ctx = new MenuFlyout();
 
@@ -800,7 +1090,9 @@ namespace CCPad
             var toClose = Tabs.TabItems.Cast<TabViewItem>().Where(t => t != keep).ToList();
             foreach (var t in toClose)
             {
-                if (CtxOf(t)?.Pane is TerminalPane pane)
+                var ctx = CtxOf(t);
+                KillRemoteSession(ctx);
+                if (ctx?.Pane is TerminalPane pane)
                     pane.Dispose();
                 Tabs.TabItems.Remove(t);
             }
@@ -813,7 +1105,9 @@ namespace CCPad
                 .Where((t, i) => left ? i < idx : i > idx).ToList();
             foreach (var t in toClose)
             {
-                if (CtxOf(t)?.Pane is TerminalPane pane)
+                var ctx = CtxOf(t);
+                KillRemoteSession(ctx);
+                if (ctx?.Pane is TerminalPane pane)
                     pane.Dispose();
                 Tabs.TabItems.Remove(t);
             }
@@ -827,10 +1121,56 @@ namespace CCPad
                 CloseRequested?.Invoke(this);
                 return;
             }
-            if (CtxOf(item)?.Pane is TerminalPane pane)
+            var ctx = CtxOf(item);
+            KillRemoteSession(ctx);
+            if (ctx?.Pane is TerminalPane pane)
                 pane.Dispose();
             Tabs.TabItems.Remove(item);
             TabsChanged?.Invoke();
+        }
+
+        /// <summary>The private tmux session name a tab owns, live or frozen;
+        /// null for local tabs and for legacy remote tabs restored with an
+        /// empty id.</summary>
+        private static string? RemoteNameOf(TabCtx? ctx)
+        {
+            string? name = ctx?.Pane is TerminalPane p && p.CliMode == CliMode.CodexRemote
+                ? p.SessionId
+                : ctx?.FrozenState is { CliMode: CliMode.CodexRemote } fs ? fs.SessionId
+                : null;
+            return string.IsNullOrEmpty(name) ? null : name;
+        }
+
+        /// <summary>Closing a tab for good ends its private remote session.
+        /// Freeze and cross-panel migration detach instead and never come
+        /// through here; window close keeps sessions alive so the snapshot can
+        /// reattach them. Fire-and-forget: a kill lost to a network hiccup is
+        /// caught by the remote cron sweeper.</summary>
+        private static void KillRemoteSession(TabCtx? ctx)
+        {
+            if (RemoteNameOf(ctx) is string name)
+                RemoteSessions.KillSessionFireAndForget(name,
+                    ctx?.Pane?.RemoteProfileId ?? ctx?.FrozenState?.RemoteProfileId);
+        }
+
+        /// <summary>Kill every tab's private remote session — used when the
+        /// whole panel is closed for good (NOT on window close, where the
+        /// archived snapshot may be restored later and must find its sessions
+        /// alive).</summary>
+        public void KillAllRemoteSessions()
+        {
+            foreach (var t in Tabs.TabItems)
+                if (t is TabViewItem tvi)
+                    KillRemoteSession(CtxOf(tvi));
+        }
+
+        /// <summary>Add the remote tmux session names owned by this panel's
+        /// tabs (live or frozen) to <paramref name="into"/>.</summary>
+        internal void CollectRemoteSessionNames(ISet<string> into)
+        {
+            foreach (var t in Tabs.TabItems)
+                if (t is TabViewItem tvi && RemoteNameOf(CtxOf(tvi)) is string name)
+                    into.Add(name);
         }
 
         private async void OnAddTab(TabView sender, object args) => await AddNewTab(null, _defaultWorkingDir);
@@ -895,17 +1235,22 @@ namespace CCPad
             ctx.Busy = true;
             try
             {
-                var dir = pane.WorkingDir ?? _defaultWorkingDir;
+                var dir = pane.CliMode == CliMode.CodexRemote
+                    ? null
+                    : pane.WorkingDir ?? _defaultWorkingDir;
                 var state = new TabState
                 {
                     Name = ctx.HeaderBase,
                     WorkingDir = string.IsNullOrEmpty(dir) ? "" : dir,
+                    RemoteProfileId = pane.RemoteProfileId ?? "",
+                    RemoteWorkingDir = pane.RemoteWorkingDir ?? "",
                     CliMode = string.IsNullOrEmpty(pane.CliMode) ? ctx.Mode : pane.CliMode,
                     // Exclude IDs owned by every other tab in the window, so two
                     // same-cwd tabs can't freeze onto the same conversation.
                     SessionId = ResolveSessionId(pane, dir, ClaimedFor(item)),
                     Tag = ctx.TagValue,
-                    Frozen = true
+                    Frozen = true,
+                    CustomWidth = CustomWidthOf(item)
                 };
 
                 // Screenshot before teardown so the placeholder shows the last frame.
@@ -962,11 +1307,18 @@ namespace CCPad
             try
             {
                 string mode = string.IsNullOrEmpty(state.CliMode) ? ResolveCliMode(null) : state.CliMode;
-                string? dir = string.IsNullOrEmpty(state.WorkingDir) ? _defaultWorkingDir : state.WorkingDir;
+                string? dir = mode == CliMode.CodexRemote
+                    ? null
+                    : string.IsNullOrEmpty(state.WorkingDir) ? _defaultWorkingDir : state.WorkingDir;
                 string? session = string.IsNullOrEmpty(state.SessionId) ? null : state.SessionId;
 
                 var (pane, prewarmed) = await AcquirePaneAsync();
                 acquired = pane;
+                pane.RemoteProfileId = string.IsNullOrEmpty(state.RemoteProfileId)
+                    ? RemoteDeviceConfig.Load().SelectedDeviceId
+                    : state.RemoteProfileId;
+                pane.RemoteWorkingDir = string.IsNullOrEmpty(state.RemoteWorkingDir)
+                    ? null : state.RemoteWorkingDir;
                 long tAcquire = watch.ElapsedMilliseconds;
                 string extra = mode switch
                 {
@@ -974,7 +1326,10 @@ namespace CCPad
                     CliMode.CodexRemote => "",
                     _ => CliNotify.PrepareClaudeHooks(pane.PaneId),
                 };
-                var (cmd, resumed) = await BuildLaunchCommandAsync(mode, extra, session, pane);
+                pane.CompletionHooksActive = extra.Length > 0;
+                var (cmd, resumed) = await BuildLaunchCommandAsync(
+                    mode, extra, session, pane, pane.RemoteWorkingDir,
+                    forkCodexSession: state.ForkOnThaw);
                 long tCmd = watch.ElapsedMilliseconds;
 
                 // Don't steal focus when thawing a background tab (batch unfreeze).
@@ -1110,11 +1465,14 @@ namespace CCPad
                 HorizontalAlignment = HorizontalAlignment.Center
             });
             overlay.Children.Add(hint);
-            if (!string.IsNullOrEmpty(state.WorkingDir))
+            string shownDir = !string.IsNullOrEmpty(state.RemoteWorkingDir)
+                ? state.RemoteWorkingDir
+                : state.WorkingDir;
+            if (!string.IsNullOrEmpty(shownDir))
             {
                 overlay.Children.Add(new TextBlock
                 {
-                    Text = state.WorkingDir,
+                    Text = shownDir,
                     FontSize = 12,
                     Opacity = 0.5,
                     Foreground = FrozenTextBrush,
@@ -1141,13 +1499,18 @@ namespace CCPad
             {
                 Name = baseHeader,
                 WorkingDir = state.WorkingDir,
+                RemoteProfileId = state.RemoteProfileId,
+                RemoteWorkingDir = state.RemoteWorkingDir,
                 CliMode = mode,
                 SessionId = state.SessionId,
                 Tag = ctx.TagValue,
-                Frozen = true
+                Frozen = true,
+                ForkOnThaw = state.ForkOnThaw
             };
             SetTabVisual(ctx, BuildFrozenPlaceholder(item, ctx, ctx.FrozenState, null));
             ctx.Dot.Fill = FrozenBrush;
+            if (state.CustomWidth > 0)
+                ApplyCustomWidth(item, state.CustomWidth);
             Tabs.TabItems.Add(item);
         }
 
@@ -1315,6 +1678,9 @@ namespace CCPad
 
             _tabCounter++;
             var (newItem, newCtx) = BuildTabItem(ctx.HeaderBase, ctx.Mode, ctx.TagValue);
+            // Carry a user-dragged width across the migration (0 = auto, leave as-is).
+            if (CustomWidthOf(item) > 0)
+                ApplyCustomWidth(newItem, CustomWidthOf(item));
             if (pane != null)
             {
                 AttachPane(newItem, newCtx, pane);
@@ -1431,20 +1797,23 @@ namespace CCPad
             ProjectFlyout.Items.Clear();
 
             string currentDefault = CliMode.LoadDefault();
+            string localDefault = currentDefault == CliMode.Claude
+                ? CliMode.Claude
+                : CliMode.Codex;
 
             // ── Default CLI selector ──
             var defaultItem = new MenuFlyoutSubItem
             {
-                Text = Loc.T("proj_default", CliMode.DisplayName(currentDefault)),
+                Text = Loc.T("proj_default", CliMode.DisplayName(localDefault)),
                 Icon = new FontIcon { Glyph = "\uE713" }, // settings gear
             };
-            foreach (string mode in new[] { CliMode.Claude, CliMode.Codex, CliMode.CodexRemote })
+            foreach (string mode in new[] { CliMode.Claude, CliMode.Codex })
             {
                 string selectedMode = mode;
                 var choice = new ToggleMenuFlyoutItem
                 {
                     Text = CliMode.DisplayName(selectedMode),
-                    IsChecked = currentDefault == selectedMode,
+                    IsChecked = localDefault == selectedMode,
                 };
                 choice.Click += (_, _) =>
                 {
@@ -1474,14 +1843,6 @@ namespace CCPad
             newCodex.Click += async (_, _) => await AddNewTab(null, _defaultWorkingDir, CliMode.Codex);
             ProjectFlyout.Items.Add(newCodex);
 
-            var newRemoteCodex = new MenuFlyoutItem
-            {
-                Text = Loc.T("proj_new_codex_remote"),
-                Icon = new FontIcon { Glyph = "\uE756" }
-            };
-            newRemoteCodex.Click += async (_, _) => await AddNewTab(null, _defaultWorkingDir, CliMode.CodexRemote);
-            ProjectFlyout.Items.Add(newRemoteCodex);
-
             if (_projects.Count > 0)
                 ProjectFlyout.Items.Add(new MenuFlyoutSeparator());
 
@@ -1494,16 +1855,14 @@ namespace CCPad
                     Text = entry.Name,
                     Icon = new FontIcon { Glyph = "\uE8B7" }
                 };
-                item.Click += async (_, _) => await AddNewTab(entry.Name, entry.Path);
+                item.Click += async (_, _) =>
+                    await AddNewTab(entry.Name, entry.Path, localDefault);
 
                 var openClaude = new MenuFlyoutItem { Text = Loc.T("proj_open_claude"), Icon = new FontIcon { Glyph = "\uE756" } };
                 openClaude.Click += async (_, _) => await AddNewTab(entry.Name, entry.Path, CliMode.Claude);
 
                 var openCodex = new MenuFlyoutItem { Text = Loc.T("proj_open_codex"), Icon = new FontIcon { Glyph = "\uE756" } };
                 openCodex.Click += async (_, _) => await AddNewTab(entry.Name, entry.Path, CliMode.Codex);
-
-                var openRemoteCodex = new MenuFlyoutItem { Text = Loc.T("proj_open_codex_remote"), Icon = new FontIcon { Glyph = "\uE756" } };
-                openRemoteCodex.Click += async (_, _) => await AddNewTab(entry.Name, entry.Path, CliMode.CodexRemote);
 
                 var openInExplorer = new MenuFlyoutItem
                 {
@@ -1542,7 +1901,6 @@ namespace CCPad
                 var subFlyout = new MenuFlyout();
                 subFlyout.Items.Add(openClaude);
                 subFlyout.Items.Add(openCodex);
-                subFlyout.Items.Add(openRemoteCodex);
                 subFlyout.Items.Add(new MenuFlyoutSeparator());
                 subFlyout.Items.Add(openInExplorer);
                 subFlyout.Items.Add(new MenuFlyoutSeparator());
@@ -1572,6 +1930,472 @@ namespace CCPad
                 }
             };
             ProjectFlyout.Items.Add(addItem);
+        }
+
+        // ── Remote project config ──────────────────────────────────────
+
+        private void RefreshExternalProjectFlyout()
+        {
+            ExternalProjectFlyout.Items.Clear();
+            _remoteDevices = RemoteDeviceConfig.Load();
+            var current = _remoteDevices.Devices.FirstOrDefault(d => d.Id == _remoteDevices.SelectedDeviceId)
+                ?? _remoteDevices.Devices.FirstOrDefault();
+
+            if (current != null)
+            {
+                var selector = new MenuFlyoutSubItem
+                {
+                    Text = Loc.T("remote_profile_current", current.Name),
+                    Icon = new FontIcon { Glyph = "\uE968" }
+                };
+                foreach (var device in _remoteDevices.Devices)
+                {
+                    var selected = device;
+                    var choice = new ToggleMenuFlyoutItem
+                    {
+                        Text = $"{device.Name} · {device.User}@{device.Host}",
+                        IsChecked = device.Id == current.Id
+                    };
+                    choice.Click += (_, _) =>
+                    {
+                        _remoteDevices.SelectedDeviceId = selected.Id;
+                        RemoteDeviceConfig.Save(_remoteDevices);
+                    };
+                    selector.Items.Add(choice);
+                }
+                ExternalProjectFlyout.Items.Add(selector);
+            }
+            else
+            {
+                ExternalProjectFlyout.Items.Add(new MenuFlyoutItem
+                {
+                    Text = Loc.T("remote_device_none"),
+                    Icon = new FontIcon { Glyph = "\uE783" },
+                    IsEnabled = false
+                });
+            }
+            ExternalProjectFlyout.Items.Add(new MenuFlyoutSeparator());
+
+            var newRemote = new MenuFlyoutItem
+            {
+                Text = Loc.T("remote_new_tab"),
+                Icon = new FontIcon { Glyph = "\uE756" },
+                IsEnabled = current != null
+            };
+            newRemote.Click += async (_, _) =>
+                await AddNewTab(cliMode: CliMode.CodexRemote,
+                    remoteProfileId: current!.Id,
+                    remoteWorkingDir: current.DefaultWorkingDir);
+            ExternalProjectFlyout.Items.Add(newRemote);
+
+            var recoverRemote = new MenuFlyoutItem
+            {
+                Text = Loc.T("rs_recover_menu"),
+                Icon = new FontIcon { Glyph = "" },
+                IsEnabled = current != null
+            };
+            recoverRemote.Click += async (_, _) =>
+                await AddNewTab(cliMode: CliMode.CodexRemote,
+                    remoteProfileId: current!.Id,
+                    remoteWorkingDir: current.DefaultWorkingDir,
+                    remoteResumePicker: true);
+            ExternalProjectFlyout.Items.Add(recoverRemote);
+
+            if (_remoteProjects.Count > 0)
+                ExternalProjectFlyout.Items.Add(new MenuFlyoutSeparator());
+
+            foreach (var project in _remoteProjects)
+            {
+                var entry = project;
+                var item = new MenuFlyoutItem
+                {
+                    Text = entry.Name,
+                    Icon = new FontIcon { Glyph = "\uE968" }
+                };
+                ToolTipService.SetToolTip(item, entry.RemotePath);
+                item.Click += async (_, _) => await OpenRemoteProjectAsync(entry);
+                item.IsEnabled = _remoteDevices.Devices.Any(d => d.Id == entry.ProfileId);
+
+                var open = new MenuFlyoutItem
+                {
+                    Text = Loc.T("remote_project_open"),
+                    Icon = new FontIcon { Glyph = "\uE756" }
+                };
+                open.Click += async (_, _) => await OpenRemoteProjectAsync(entry);
+
+                var edit = new MenuFlyoutItem
+                {
+                    Text = Loc.T("remote_project_edit"),
+                    Icon = new FontIcon { Glyph = "\uE70F" }
+                };
+                edit.Click += async (_, _) => await ShowRemoteProjectDialogAsync(entry);
+
+                var test = new MenuFlyoutItem
+                {
+                    Text = Loc.T("remote_project_test"),
+                    Icon = new FontIcon { Glyph = "\uE9D9" }
+                };
+                test.Click += async (_, _) => await TestRemoteProjectAsync(entry);
+
+                var remove = new MenuFlyoutItem
+                {
+                    Text = Loc.T("proj_remove", entry.Name),
+                    Icon = new FontIcon { Glyph = "\uE74D" }
+                };
+                remove.Click += (_, _) =>
+                {
+                    _remoteProjects.Remove(entry);
+                    RemoteProjectConfig.Save(_remoteProjects);
+                };
+
+                var context = new MenuFlyout();
+                context.Items.Add(open);
+                context.Items.Add(new MenuFlyoutSeparator());
+                context.Items.Add(edit);
+                context.Items.Add(test);
+                context.Items.Add(new MenuFlyoutSeparator());
+                context.Items.Add(remove);
+                item.ContextFlyout = context;
+                ExternalProjectFlyout.Items.Add(item);
+            }
+
+            ExternalProjectFlyout.Items.Add(new MenuFlyoutSeparator());
+            var add = new MenuFlyoutItem
+            {
+                Text = Loc.T("remote_project_add"),
+                Icon = new FontIcon { Glyph = "\uE710" }
+            };
+            add.Click += async (_, _) =>
+            {
+                if (_remoteDevices.Devices.Count == 0)
+                    await ShowRemoteDeviceDialogAsync();
+                if (RemoteDeviceConfig.Load().Devices.Count > 0)
+                    await ShowRemoteProjectDialogAsync();
+            };
+            ExternalProjectFlyout.Items.Add(add);
+
+            var copyOnboarding = new MenuFlyoutItem
+            {
+                Text = Loc.T("remote_ai_copy"),
+                Icon = new FontIcon { Glyph = "\uE8C8" }
+            };
+            ToolTipService.SetToolTip(copyOnboarding, Loc.T("remote_ai_copy_tip"));
+            copyOnboarding.Click += async (_, _) => await CopyExternalOnboardingPromptAsync();
+            ExternalProjectFlyout.Items.Add(copyOnboarding);
+
+            ExternalProjectFlyout.Items.Add(new MenuFlyoutSeparator());
+            if (current != null)
+            {
+                var manage = new MenuFlyoutSubItem
+                {
+                    Text = Loc.T("remote_device_manage"),
+                    Icon = new FontIcon { Glyph = "\uE713" }
+                };
+                var testDevice = new MenuFlyoutItem { Text = Loc.T("remote_device_test"), Icon = new FontIcon { Glyph = "\uE9D9" } };
+                testDevice.Click += async (_, _) => await TestRemoteDeviceAsync(current);
+                var editDevice = new MenuFlyoutItem { Text = Loc.T("remote_device_edit"), Icon = new FontIcon { Glyph = "\uE70F" } };
+                editDevice.Click += async (_, _) => await ShowRemoteDeviceDialogAsync(current);
+                var removeDevice = new MenuFlyoutItem { Text = Loc.T("remote_device_remove"), Icon = new FontIcon { Glyph = "\uE74D" } };
+                removeDevice.Click += async (_, _) => await RemoveRemoteDeviceAsync(current);
+                manage.Items.Add(testDevice);
+                manage.Items.Add(editDevice);
+                manage.Items.Add(new MenuFlyoutSeparator());
+                manage.Items.Add(removeDevice);
+                ExternalProjectFlyout.Items.Add(manage);
+            }
+            var addDevice = new MenuFlyoutItem
+            {
+                Text = Loc.T("remote_device_add"),
+                Icon = new FontIcon { Glyph = "\uE710" }
+            };
+            addDevice.Click += async (_, _) => await ShowRemoteDeviceDialogAsync();
+            ExternalProjectFlyout.Items.Add(addDevice);
+        }
+
+        private async Task CopyExternalOnboardingPromptAsync()
+        {
+            const string skillPath = @"D:\CC Pad\.agents\skills\ccpad-onboard-linux-device\SKILL.md";
+            string prompt =
+                "请使用 $ccpad-onboard-linux-device 帮我将一台 Linux SSH 设备接入 CC Pad。\r\n" +
+                $"Skill 文件：{skillPath}\r\n\r\n" +
+                "接入方式：优先使用快速自动配置；如果不能自动写入，再返回半手动配置清单。\r\n" +
+                "IP/主机：<请填写>\r\n" +
+                "SSH 用户：root\r\n" +
+                "SSH 端口：22\r\n" +
+                "认证方式：优先发现已有 SSH 配置、ssh-agent 或私钥路径；不要索取、输出或保存密码和私钥内容。\r\n" +
+                $"默认工作目录：{RemoteDeviceConfig.DefaultWorkingDir}\r\n" +
+                "需要添加的项目目录：<请填写，可多项>\r\n\r\n" +
+                "请先只读探测，再准备缺失环境，验证 SSH、Linux、工作目录、tmux、Codex CLI 和 Codex 登录状态。";
+            try
+            {
+                var package = new Windows.ApplicationModel.DataTransfer.DataPackage();
+                package.SetText(prompt);
+                Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(package);
+                Windows.ApplicationModel.DataTransfer.Clipboard.Flush();
+                await ShowRemoteMessageAsync(Loc.T("remote_ai_copied_title"), Loc.T("remote_ai_copied_body"));
+            }
+            catch (Exception ex)
+            {
+                await ShowRemoteMessageAsync(Loc.T("remote_ai_copy"), ex.Message);
+            }
+        }
+
+        private Task OpenRemoteProjectAsync(RemoteProjectEntry entry) =>
+            AddNewTab(entry.Name, workingDir: null, cliMode: CliMode.CodexRemote,
+                remoteProfileId: entry.ProfileId, remoteWorkingDir: entry.RemotePath);
+
+        private async Task ShowRemoteProjectDialogAsync(RemoteProjectEntry? editing = null)
+        {
+            _remoteDevices = RemoteDeviceConfig.Load();
+            if (_remoteDevices.Devices.Count == 0) return;
+            var profile = new ComboBox
+            {
+                Header = Loc.T("remote_project_profile"),
+                HorizontalAlignment = HorizontalAlignment.Stretch
+            };
+            foreach (var device in _remoteDevices.Devices)
+            {
+                profile.Items.Add(new ComboBoxItem
+                {
+                    Content = $"{device.Name} · {device.User}@{device.Host}",
+                    Tag = device.Id
+                });
+            }
+            string wantedDevice = editing?.ProfileId ?? _remoteDevices.SelectedDeviceId;
+            profile.SelectedIndex = Math.Max(0, _remoteDevices.Devices.FindIndex(d => d.Id == wantedDevice));
+
+            var name = new TextBox
+            {
+                Header = Loc.T("remote_project_name"),
+                PlaceholderText = Loc.T("remote_project_name_hint"),
+                Text = editing?.Name ?? ""
+            };
+            var path = new TextBox
+            {
+                Header = Loc.T("remote_project_path"),
+                PlaceholderText = RemoteDeviceConfig.Find(wantedDevice)?.DefaultWorkingDir + "/project",
+                Text = editing?.RemotePath ?? ""
+            };
+            var error = new TextBlock
+            {
+                Text = Loc.T("remote_project_path_error"),
+                Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 220, 80, 80)),
+                FontSize = 12,
+                Visibility = Visibility.Collapsed,
+                TextWrapping = TextWrapping.Wrap
+            };
+            var testButton = new Button { Content = Loc.T("remote_project_test") };
+            var testStatus = new TextBlock { FontSize = 12, TextWrapping = TextWrapping.Wrap };
+            testButton.Click += async (_, _) =>
+            {
+                string id = (profile.SelectedItem as ComboBoxItem)?.Tag as string ?? "";
+                var device = RemoteDeviceConfig.Find(id);
+                if (device == null || !path.Text.Trim().StartsWith("/", StringComparison.Ordinal)) return;
+                testButton.IsEnabled = false;
+                testStatus.Text = Loc.T("remote_testing");
+                var check = await RemoteDeviceConnection.TestDirectoryAsync(device, path.Text.Trim());
+                testStatus.Text = check.Exists ? Loc.T("remote_project_test_ok")
+                    : Loc.T("remote_project_test_fail", check.Error);
+                testButton.IsEnabled = true;
+            };
+            var panel = new StackPanel { Spacing = 12, MinWidth = 420 };
+            panel.Children.Add(profile);
+            panel.Children.Add(name);
+            panel.Children.Add(path);
+            panel.Children.Add(error);
+            panel.Children.Add(testButton);
+            panel.Children.Add(testStatus);
+
+            var dialog = new ContentDialog
+            {
+                Title = Loc.T(editing == null ? "remote_project_add_title" : "remote_project_edit"),
+                Content = panel,
+                PrimaryButtonText = Loc.T("add"),
+                CloseButtonText = Loc.T("cancel"),
+                DefaultButton = ContentDialogButton.Primary,
+                XamlRoot = Content.XamlRoot
+            };
+            path.TextChanged += (_, _) =>
+            {
+                bool valid = path.Text.Trim().StartsWith("/", StringComparison.Ordinal);
+                dialog.IsPrimaryButtonEnabled = valid;
+                error.Visibility = valid || path.Text.Length == 0
+                    ? Visibility.Collapsed : Visibility.Visible;
+            };
+            dialog.IsPrimaryButtonEnabled = path.Text.Trim().StartsWith("/", StringComparison.Ordinal);
+
+            ContentDialogResult result;
+            try { result = await dialog.ShowAsync(); }
+            catch { return; }
+            if (result != ContentDialogResult.Primary) return;
+
+            string remotePath = path.Text.Trim();
+            if (remotePath.Length > 1) remotePath = remotePath.TrimEnd('/');
+            string projectName = name.Text.Trim();
+            string profileId = (profile.SelectedItem as ComboBoxItem)?.Tag as string
+                ?? _remoteDevices.SelectedDeviceId;
+            var selectedDevice = RemoteDeviceConfig.Find(profileId);
+            if (projectName.Length == 0)
+            {
+                int slash = remotePath.LastIndexOf('/');
+                projectName = slash >= 0 ? remotePath[(slash + 1)..] : remotePath;
+                if (projectName.Length == 0) projectName = selectedDevice?.Host ?? "remote";
+            }
+
+            var existing = _remoteProjects.FirstOrDefault(p =>
+                !ReferenceEquals(p, editing) &&
+                string.Equals(p.ProfileId, profileId, StringComparison.Ordinal) &&
+                string.Equals(p.RemotePath, remotePath, StringComparison.Ordinal));
+            if (existing != null)
+            {
+                RefreshExternalProjectFlyout();
+                return;
+            }
+
+            if (editing != null)
+            {
+                editing.Name = projectName;
+                editing.ProfileId = profileId;
+                editing.RemotePath = remotePath;
+            }
+            else
+            {
+                _remoteProjects.Add(new RemoteProjectEntry
+                {
+                    Name = projectName,
+                    ProfileId = profileId,
+                    RemotePath = remotePath
+                });
+            }
+            RemoteProjectConfig.Save(_remoteProjects);
+        }
+
+        private async Task ShowRemoteDeviceDialogAsync(RemoteDeviceEntry? editing = null)
+        {
+            var name = new TextBox { Header = Loc.T("remote_device_name"), Text = editing?.Name ?? "" };
+            var host = new TextBox { Header = Loc.T("remote_device_host"), Text = editing?.Host ?? "" };
+            var port = new NumberBox { Header = Loc.T("remote_device_port"), Minimum = 1, Maximum = 65535,
+                Value = editing?.Port ?? 22, SpinButtonPlacementMode = NumberBoxSpinButtonPlacementMode.Compact };
+            var user = new TextBox { Header = Loc.T("remote_device_user"), Text = editing?.User ?? "root" };
+            var key = new TextBox { Header = Loc.T("remote_device_key"), Text = editing?.KeyPath ?? "",
+                PlaceholderText = "%USERPROFILE%\\.ssh\\id_ed25519" };
+            var dir = new TextBox { Header = Loc.T("remote_device_default_dir"),
+                Text = editing?.DefaultWorkingDir ?? RemoteDeviceConfig.DefaultWorkingDir };
+            var codex = new TextBox { Header = Loc.T("remote_device_codex_command"), Text = editing?.CodexCommand ?? "codex" };
+            var command = new TextBox { Header = Loc.T("remote_device_launch_command"),
+                Text = editing?.LaunchCommand ?? RemoteDeviceConfig.DefaultLaunchCommand,
+                AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinHeight = 72 };
+            var test = new Button { Content = Loc.T("remote_device_test") };
+            var status = new TextBlock { FontSize = 12, TextWrapping = TextWrapping.Wrap };
+
+            RemoteDeviceEntry ReadForm() => new()
+            {
+                Id = editing?.Id ?? RemoteDeviceConfig.NewId(name.Text),
+                Name = name.Text.Trim(), Host = host.Text.Trim(), Port = (int)port.Value,
+                User = user.Text.Trim(), KeyPath = key.Text.Trim(),
+                DefaultWorkingDir = dir.Text.Trim(), CodexCommand = codex.Text.Trim(),
+                LaunchCommand = command.Text.Trim(),
+                SessionPrefix = editing?.SessionPrefix ?? "ccpad",
+                SweepIdleHours = editing?.SweepIdleHours ?? 48,
+            };
+
+            test.Click += async (_, _) =>
+            {
+                test.IsEnabled = false;
+                status.Text = Loc.T("remote_testing");
+                var result = await RemoteDeviceConnection.TestAsync(ReadForm());
+                status.Text = FormatDeviceTest(result);
+                test.IsEnabled = true;
+            };
+
+            var panel = new StackPanel { Spacing = 10, MinWidth = 460 };
+            panel.Children.Add(name); panel.Children.Add(host); panel.Children.Add(port);
+            panel.Children.Add(user); panel.Children.Add(key); panel.Children.Add(dir);
+            panel.Children.Add(codex); panel.Children.Add(command); panel.Children.Add(test);
+            panel.Children.Add(status);
+            var dialog = new ContentDialog
+            {
+                Title = Loc.T(editing == null ? "remote_device_add_title" : "remote_device_edit"),
+                Content = new ScrollViewer { Content = panel, MaxHeight = 560,
+                    VerticalScrollBarVisibility = ScrollBarVisibility.Auto },
+                PrimaryButtonText = Loc.T("save"), CloseButtonText = Loc.T("cancel"),
+                DefaultButton = ContentDialogButton.Primary, XamlRoot = Content.XamlRoot
+            };
+            void Validate()
+            {
+                dialog.IsPrimaryButtonEnabled = name.Text.Trim().Length > 0 &&
+                    RemoteDeviceConnection.IsSafeHost(host.Text.Trim()) &&
+                    RemoteDeviceConnection.IsSafeUser(user.Text.Trim()) &&
+                    !double.IsNaN(port.Value) && port.Value is >= 1 and <= 65535 &&
+                    dir.Text.Trim().StartsWith("/", StringComparison.Ordinal) &&
+                    command.Text.Contains("{dir}", StringComparison.Ordinal) &&
+                    command.Text.Contains("{session}", StringComparison.Ordinal) &&
+                    !command.Text.Contains('"');
+            }
+            name.TextChanged += (_, _) => Validate(); host.TextChanged += (_, _) => Validate();
+            user.TextChanged += (_, _) => Validate(); dir.TextChanged += (_, _) => Validate();
+            command.TextChanged += (_, _) => Validate(); port.ValueChanged += (_, _) => Validate(); Validate();
+            ContentDialogResult result;
+            try { result = await dialog.ShowAsync(); } catch { return; }
+            if (result != ContentDialogResult.Primary) return;
+
+            var saved = ReadForm();
+            _remoteDevices = RemoteDeviceConfig.Load();
+            int index = editing == null ? -1 : _remoteDevices.Devices.FindIndex(d => d.Id == editing.Id);
+            if (index >= 0) _remoteDevices.Devices[index] = saved;
+            else _remoteDevices.Devices.Add(saved);
+            _remoteDevices.SelectedDeviceId = saved.Id;
+            RemoteDeviceConfig.Save(_remoteDevices);
+        }
+
+        private static string FormatDeviceTest(RemoteDeviceTestResult r)
+        {
+            string Mark(bool ok) => ok ? "✓" : "✕";
+            string lines = $"{Mark(r.SshConnected)} SSH\n{Mark(r.IsLinux)} Linux\n" +
+                $"{Mark(r.DirectoryReady)} {Loc.T("remote_check_workdir")}\n{Mark(r.TmuxReady)} tmux\n" +
+                $"{Mark(r.CodexReady)} Codex CLI\n{Mark(r.CodexAuthenticated)} {Loc.T("remote_check_login")}";
+            return r.Error.Length == 0 ? lines : lines + "\n" + r.Error;
+        }
+
+        private async Task TestRemoteDeviceAsync(RemoteDeviceEntry device)
+        {
+            var result = await RemoteDeviceConnection.TestAsync(device);
+            await ShowRemoteMessageAsync(Loc.T("remote_device_test"), FormatDeviceTest(result));
+        }
+
+        private async Task TestRemoteProjectAsync(RemoteProjectEntry project)
+        {
+            var device = RemoteDeviceConfig.Find(project.ProfileId);
+            if (device == null) { await ShowRemoteMessageAsync(Loc.T("remote_project_test"), Loc.T("remote_device_missing")); return; }
+            var result = await RemoteDeviceConnection.TestDirectoryAsync(device, project.RemotePath);
+            await ShowRemoteMessageAsync(Loc.T("remote_project_test"), result.Exists
+                ? Loc.T("remote_project_test_ok") : Loc.T("remote_project_test_fail", result.Error));
+        }
+
+        private async Task RemoveRemoteDeviceAsync(RemoteDeviceEntry device)
+        {
+            int linked = _remoteProjects.Count(p => p.ProfileId == device.Id);
+            if (linked > 0)
+            {
+                await ShowRemoteMessageAsync(Loc.T("remote_device_remove"), Loc.T("remote_device_in_use", linked));
+                return;
+            }
+            var confirm = new ContentDialog
+            {
+                Title = Loc.T("remote_device_remove"), Content = Loc.T("remote_device_remove_confirm", device.Name),
+                PrimaryButtonText = Loc.T("remove"), CloseButtonText = Loc.T("cancel"),
+                DefaultButton = ContentDialogButton.Close, XamlRoot = Content.XamlRoot
+            };
+            if (await confirm.ShowAsync() != ContentDialogResult.Primary) return;
+            _remoteDevices.Devices.RemoveAll(d => d.Id == device.Id);
+            RemoteDeviceConfig.Save(_remoteDevices);
+        }
+
+        private async Task ShowRemoteMessageAsync(string title, string message)
+        {
+            var dialog = new ContentDialog { Title = title, Content = message,
+                CloseButtonText = Loc.T("close"), XamlRoot = Content.XamlRoot };
+            try { await dialog.ShowAsync(); } catch { }
         }
 
         // ── Folder picker ─────────────────────────────────────────────
@@ -1614,16 +2438,21 @@ namespace CCPad
                     {
                         Name = frozen.Name,
                         WorkingDir = frozen.WorkingDir,
+                        RemoteProfileId = frozen.RemoteProfileId,
+                        RemoteWorkingDir = frozen.RemoteWorkingDir,
                         CliMode = frozen.CliMode,
                         SessionId = frozen.SessionId,
                         Tag = ctx.TagValue,
-                        Frozen = true
+                        Frozen = true,
+                        CustomWidth = CustomWidthOf(tvi)
                     });
                     continue;
                 }
 
                 var pane = ctx?.Pane;
-                var dir = pane?.WorkingDir ?? _defaultWorkingDir;
+                var dir = pane?.CliMode == CliMode.CodexRemote
+                    ? null
+                    : pane?.WorkingDir ?? _defaultWorkingDir;
                 var rawHeader = ctx?.HeaderBase ?? pane?.Label ?? "";
                 // Strip a CLI suffix present on pane.Label fallback so restore
                 // doesn't double-append it.
@@ -1655,9 +2484,12 @@ namespace CCPad
                 {
                     Name = rawHeader,
                     WorkingDir = string.IsNullOrEmpty(dir) ? "" : dir,
+                    RemoteProfileId = pane?.RemoteProfileId ?? "",
+                    RemoteWorkingDir = pane?.RemoteWorkingDir ?? "",
                     CliMode = pane?.CliMode ?? "",
                     SessionId = sessionId,
-                    Tag = ctx?.TagValue ?? pane?.TabTag ?? ""
+                    Tag = ctx?.TagValue ?? pane?.TabTag ?? "",
+                    CustomWidth = CustomWidthOf(tvi)
                 });
             }
             return states;
@@ -1680,7 +2512,7 @@ namespace CCPad
         {
             if (pane == null) return "";
             if (pane.CliMode == CliMode.CodexRemote)
-                return ""; // tmux owns remote continuity; never scan local sessions
+                return pane.SessionId ?? ""; // the tab's private tmux session NAME; never scan local sessions
             if (pane.CliMode == CliMode.Codex)
             {
                 var known = pane.SessionId;
@@ -1751,20 +2583,27 @@ namespace CCPad
                 if (s.Frozen)
                 {
                     // Recreate as a placeholder — no WebView2/CLI until thawed.
-                    if (_defaultWorkingDir == null && !string.IsNullOrEmpty(s.WorkingDir))
+                    if (_defaultWorkingDir == null && s.CliMode != CliMode.CodexRemote &&
+                        !string.IsNullOrEmpty(s.WorkingDir))
                         _defaultWorkingDir = s.WorkingDir;
                     AddFrozenTab(s);
                     continue;
                 }
                 var name = string.IsNullOrEmpty(s.Name) ? null : s.Name;
-                var dir = string.IsNullOrEmpty(s.WorkingDir) ? null : s.WorkingDir;
                 var mode = string.IsNullOrEmpty(s.CliMode) ? null : s.CliMode;
+                var dir = mode == CliMode.CodexRemote || string.IsNullOrEmpty(s.WorkingDir)
+                    ? null : s.WorkingDir;
                 var session = string.IsNullOrEmpty(s.SessionId) ? null : s.SessionId;
                 var tag = string.IsNullOrEmpty(s.Tag) ? null : s.Tag;
+                var remoteProfile = string.IsNullOrEmpty(s.RemoteProfileId) ? null : s.RemoteProfileId;
+                var remoteDir = string.IsNullOrEmpty(s.RemoteWorkingDir) ? null : s.RemoteWorkingDir;
                 if (i == 0)
-                    await AddFirstTab(name, dir, mode, session, tag);
+                    await AddFirstTab(name, dir, mode, session, tag, remoteProfile, remoteDir);
                 else
-                    await AddNewTab(name, dir, mode, session, tag);
+                    await AddNewTab(name, dir, mode, session, tag, remoteProfile, remoteDir);
+                if (s.CustomWidth > 0 && i < Tabs.TabItems.Count &&
+                    Tabs.TabItems[i] is TabViewItem restored)
+                    ApplyCustomWidth(restored, s.CustomWidth);
             }
             if (activeIndex >= 0 && activeIndex < Tabs.TabItems.Count)
                 Tabs.SelectedIndex = activeIndex;

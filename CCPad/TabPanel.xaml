@@ -8,12 +8,15 @@
     mc:Ignorable="d">
 
     <Grid>
+        <!-- Size tabs from their headers so the tab strip can keep growing into the
+             free space before the right-side project controls. Equal mode can retain
+             a narrower, previously occupied viewport and show scroll arrows early. -->
         <TabView
             x:Name="Tabs"
             CanReorderTabs="True"
             CanDragTabs="True"
             AllowDropTabs="True"
-            TabWidthMode="Equal"
+            TabWidthMode="SizeToContent"
             AddTabButtonClick="OnAddTab"
             TabCloseRequested="OnTabClose"
             SelectionChanged="OnTabSelectionChanged"
@@ -24,7 +27,8 @@
             HorizontalAlignment="Stretch"
             VerticalAlignment="Stretch">
             <TabView.TabStripFooter>
-                <StackPanel Orientation="Horizontal" Padding="0,0,8,0"
+                <StackPanel x:Name="ProjectButtonsHost"
+                            Orientation="Horizontal" Padding="0,0,8,0"
                             HorizontalAlignment="Right">
                     <!-- Reserves space for the global WorkspaceButton overlay declared in MainWindow.xaml,
                          so tabs don't extend underneath it. Width is set at runtime to match the
@@ -36,10 +40,22 @@
                                     Margin="4,0">
                         <StackPanel Orientation="Horizontal" Spacing="4">
                             <FontIcon Glyph="&#xE8B7;" FontSize="14"/>
-                            <TextBlock x:Name="ProjectLabel" Text="项目" VerticalAlignment="Center" FontSize="12"/>
+                            <TextBlock x:Name="ProjectLabel" Text="本地项目" VerticalAlignment="Center" FontSize="12"/>
                         </StackPanel>
                         <DropDownButton.Flyout>
                             <MenuFlyout x:Name="ProjectFlyout" Placement="BottomEdgeAlignedRight"/>
+                        </DropDownButton.Flyout>
+                    </DropDownButton>
+                    <DropDownButton x:Name="ExternalProjectButton"
+                                    ToolTipService.ToolTip="从外部项目启动远程 Codex"
+                                    Padding="8,4"
+                                    Margin="0,0,4,0">
+                        <StackPanel Orientation="Horizontal" Spacing="4">
+                            <FontIcon Glyph="&#xE968;" FontSize="14"/>
+                            <TextBlock x:Name="ExternalProjectLabel" Text="外部项目" VerticalAlignment="Center" FontSize="12"/>
+                        </StackPanel>
+                        <DropDownButton.Flyout>
+                            <MenuFlyout x:Name="ExternalProjectFlyout" Placement="BottomEdgeAlignedRight"/>
                         </DropDownButton.Flyout>
                     </DropDownButton>
                 </StackPanel>

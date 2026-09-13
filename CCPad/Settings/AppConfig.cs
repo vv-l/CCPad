@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -49,15 +51,43 @@ namespace CCPad.Settings
 
         /// <summary>Idle threshold (minutes) for auto-freeze.</summary>
         public int AutoFreezeMinutes { get; set; } = 60;
+
+        /// <summary>Auto-reply (自动应答): watch every pane's output for custom
+        /// trigger phrases and send a preset message back. Off by default.</summary>
+        public bool AutoReplyEnabled { get; set; }
+
+        /// <summary>Auto-reply rule list. Seeded with the Codex capacity banner
+        /// so the feature works out of the box; users edit via the 应答 button.</summary>
+        public List<AutoReplyRule> AutoReplyRules { get; set; } = new()
+        {
+            new AutoReplyRule { Trigger = "Selected model is at capacity", Reply = "重试" },
+        };
+    }
+
+    /// <summary>One auto-reply rule: when <see cref="Trigger"/> appears in a
+    /// pane's output (case-insensitive, ANSI-stripped), send <see cref="Reply"/>
+    /// followed by Enter. An empty Reply sends Enter alone.</summary>
+    public class AutoReplyRule
+    {
+        public string Trigger { get; set; } = "";
+        public string Reply { get; set; } = "";
+        public bool Enabled { get; set; } = true;
+        /// <summary>Max consecutive auto-fires of this rule; a real user submit
+        /// resets the count. 0 = unlimited. Guards against a persistent error
+        /// banner turning the reply loop into an endless message stream.</summary>
+        public int MaxRetries { get; set; } = 5;
     }
 
     /// <summary>
     /// Everything CCPad needs to open a Codex@167 tab: ssh to
     /// <see cref="User"/>@<see cref="Host"/> with <see cref="KeyPath"/> and run
-    /// <see cref="RemoteCommand"/> (with {dir}/{session} substituted from
-    /// <see cref="RemoteDir"/>/<see cref="TmuxSession"/>). All tabs attach the
-    /// SAME tmux session by design — mirrored views, no per-tab session names,
-    /// so the remote box never accumulates zombie tmux sessions.
+    /// <see cref="RemoteCommand"/> (with {dir}/{session} substituted). Each tab
+    /// runs its OWN tmux session named "{SessionPrefix}-…" (the name doubles as
+    /// the tab's persisted SessionId, so freeze/snapshot/restore reattach it).
+    /// Closing a tab kills its session over a one-shot ssh, and an hourly cron
+    /// sweeper (installed by <see cref="RemoteSessions"/>) reaps detached
+    /// prefix-named sessions older than <see cref="SweepIdleHours"/> — the
+    /// backstop for kills lost to crashes or network drops.
     /// </summary>
     public class RemoteCodexConfig
     {
@@ -66,9 +96,19 @@ namespace CCPad.Settings
         /// <summary>Private key file; %VAR% is expanded at launch time.</summary>
         public string KeyPath { get; set; } = "%USERPROFILE%\\.ssh\\id_ed25519_167";
         /// <summary>Remote working directory, substituted for {dir}.</summary>
-        public string RemoteDir { get; set; } = "/zettos/pool/1/agents/deploy/workspace";
-        /// <summary>tmux session name, substituted for {session}.</summary>
+        public string RemoteDir { get; set; } = RemoteProjectConfig.DefaultWorkingDir;
+        /// <summary>Legacy shared session name from the single-session design.
+        /// New tabs no longer use it (each generates a private name); kept so
+        /// old prefs.json files load cleanly and the session manager can label
+        /// a still-running "deploy" session.</summary>
         public string TmuxSession { get; set; } = "deploy";
+        /// <summary>Prefix for generated per-tab session names. Only sessions
+        /// carrying this prefix are ever killed automatically (tab close /
+        /// cron sweeper); anything else on the box is left alone.</summary>
+        public string SessionPrefix { get; set; } = "ccpad";
+        /// <summary>Hours a DETACHED per-tab session may idle on the box before
+        /// the hourly cron sweeper kills it. Attached sessions are never swept.</summary>
+        public int SweepIdleHours { get; set; } = 48;
         /// <summary>Command run on the remote host (inside "..." on the ssh
         /// line, so it must not itself contain double quotes). ssh runs this in
         /// a non-login shell with no LANG (Windows ssh sends no locale), so a
@@ -76,7 +116,7 @@ namespace CCPad.Settings
         /// client assumes a non-UTF-8 terminal and paints every CJK cell as
         /// an underscore.</summary>
         public string RemoteCommand { get; set; } =
-            "cd {dir} && source /etc/profile.d/agents.sh && source /zettos/pool/1/agents/opt/proxy_env.sh && export LANG=C.UTF-8 LC_ALL=C.UTF-8 && tmux -u new -A -s {session} codex";
+            "mountpoint -q /zettos/pool/1 && cd {dir} && source /etc/profile.d/agents.sh && source /opt/agents/opt/proxy_env.sh && export LANG=C.UTF-8 LC_ALL=C.UTF-8 && tmux -u new -A -s {session} codex";
     }
 
     [JsonSerializable(typeof(AppPrefs))]
@@ -118,6 +158,15 @@ namespace CCPad.Settings
             }
             catch { }
         }
+
+        /// <summary>Drop the in-memory cache so the next Load() re-reads disk.
+        /// Every window is its own process and Save() writes the whole file from
+        /// this cache — without invalidation, any save from a window with a stale
+        /// cache silently reverts what another window persisted in the meantime.</summary>
+        internal static void Reload() => _cached = null;
+
+        /// <summary>Full path of prefs.json, for cross-process change watching.</summary>
+        internal static string PrefsFile => ConfigFile;
     }
 
     /// <summary>
@@ -152,6 +201,147 @@ namespace CCPad.Settings
         }
 
         public static void Toggle() => Set(!IsOn);
+    }
+
+    /// <summary>
+    /// Global on/off state + rule set of auto-reply (自动应答). One switch for
+    /// every pane in the process: TerminalPanes poll <see cref="IsOn"/> and
+    /// <see cref="ActiveRules"/> on their output threads, so the enabled-rule
+    /// snapshot is an immutable array swapped atomically on every save.
+    /// Persisted in AppPrefs; the MainWindow toolbar button mirrors the state.
+    /// </summary>
+    public static class AutoReplyManager
+    {
+        private static readonly object _gate = new();
+        private static bool _loaded;
+        private static bool _on;
+        private static volatile AutoReplyRule[] _active = Array.Empty<AutoReplyRule>();
+        private static FileSystemWatcher? _watcher;
+        private static System.Threading.Timer? _reloadDebounce;
+
+        private static void EnsureLoaded()
+        {
+            if (_loaded) return;
+            lock (_gate)
+            {
+                if (_loaded) return;
+                var prefs = AppConfig.Load();
+                _on = prefs.AutoReplyEnabled;
+                RebuildActive(prefs.AutoReplyRules);
+                _loaded = true;
+                StartWatcher();
+            }
+        }
+
+        // Every window is its own process with its own once-loaded state, so a
+        // toggle in one window would never reach the others (and their next save
+        // would revert it on disk). Watch prefs.json and fold external writes in.
+        private static void StartWatcher()
+        {
+            try
+            {
+                string dir = Path.GetDirectoryName(AppConfig.PrefsFile) ?? "";
+                if (dir.Length == 0 || !Directory.Exists(dir)) return;
+                _watcher = new FileSystemWatcher(dir, Path.GetFileName(AppConfig.PrefsFile))
+                {
+                    NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.CreationTime,
+                };
+                FileSystemEventHandler h = (_, _) => QueueReload();
+                _watcher.Changed += h;
+                _watcher.Created += h;
+                _watcher.Renamed += (_, _) => QueueReload();
+                _watcher.EnableRaisingEvents = true;
+            }
+            catch { _watcher = null; }
+        }
+
+        // Debounced: editors save in bursts, and our own Save() also lands here
+        // (harmless — the reload reads back what we just wrote).
+        private static void QueueReload()
+        {
+            _reloadDebounce?.Dispose();
+            _reloadDebounce = new System.Threading.Timer(_ =>
+            {
+                bool on, flipped;
+                lock (_gate)
+                {
+                    AppConfig.Reload();
+                    var prefs = AppConfig.Load();
+                    flipped = _on != prefs.AutoReplyEnabled;
+                    _on = prefs.AutoReplyEnabled;
+                    RebuildActive(prefs.AutoReplyRules);
+                    on = _on;
+                }
+                if (flipped) { try { Changed?.Invoke(on); } catch { } }
+            }, null, 300, System.Threading.Timeout.Infinite);
+        }
+
+        private static void RebuildActive(List<AutoReplyRule> rules)
+        {
+            _active = rules
+                .Where(r => r.Enabled && !string.IsNullOrWhiteSpace(r.Trigger))
+                .Select(r => new AutoReplyRule
+                {
+                    Trigger = r.Trigger.Trim(),
+                    Reply = r.Reply,
+                    Enabled = true,
+                    MaxRetries = Math.Max(0, r.MaxRetries),
+                })
+                .ToArray();
+        }
+
+        public static bool IsOn
+        {
+            get { EnsureLoaded(); return _on; }
+        }
+
+        /// <summary>Enabled rules only, trigger trimmed — safe to iterate from any thread.</summary>
+        public static AutoReplyRule[] ActiveRules
+        {
+            get { EnsureLoaded(); return _active; }
+        }
+
+        public static int RuleCount
+        {
+            get { EnsureLoaded(); return AppConfig.Load().AutoReplyRules.Count; }
+        }
+
+        public static event Action<bool>? Changed;
+
+        public static void SetEnabled(bool on)
+        {
+            EnsureLoaded();
+            if (_on == on) return;
+            _on = on;
+            var prefs = AppConfig.Load();
+            prefs.AutoReplyEnabled = on;
+            AppConfig.Save(prefs);
+            try { Changed?.Invoke(on); } catch { }
+        }
+
+        /// <summary>Deep copy for the editor dialog, so cancel discards edits.</summary>
+        public static List<AutoReplyRule> GetRulesCopy()
+        {
+            EnsureLoaded();
+            return AppConfig.Load().AutoReplyRules
+                .Select(r => new AutoReplyRule
+                {
+                    Trigger = r.Trigger,
+                    Reply = r.Reply,
+                    Enabled = r.Enabled,
+                    MaxRetries = r.MaxRetries,
+                })
+                .ToList();
+        }
+
+        public static void SaveRules(List<AutoReplyRule> rules)
+        {
+            EnsureLoaded();
+            var prefs = AppConfig.Load();
+            prefs.AutoReplyRules = rules;
+            AppConfig.Save(prefs);
+            RebuildActive(rules);
+        }
     }
 
     /// <summary>

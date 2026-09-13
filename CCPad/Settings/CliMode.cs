@@ -41,7 +41,7 @@ namespace CCPad.Settings
             Codex => ResolveLaunch("codex", JoinArgs("--yolo", extraArgs)),
             // extraArgs is deliberately dropped: it carries local-CLI flags
             // (--settings / -c notify) that would be parsed by ssh, not codex.
-            CodexRemote => BuildRemoteCommand(),
+            CodexRemote => BuildRemoteCommand(RemoteSessions.NewSessionName()),
             _ => ResolveLaunch("claude", JoinArgs(
                     AppConfig.Load().BypassPermissions ? "--permission-mode bypassPermissions" : "",
                     extraArgs)),
@@ -55,10 +55,10 @@ namespace CCPad.Settings
         /// </summary>
         public static string BuildResumeCommand(string mode, string sessionId, string extraArgs = "") => Normalize(mode) switch
         {
-            // "tmux new -A" IS the resume: reattaching the named session brings
-            // the remote conversation back, so resume == a fresh connect and no
-            // session id is needed.
-            CodexRemote => BuildCommand(CodexRemote),
+            // For remote tabs sessionId IS the tab's private tmux session name;
+            // "tmux new -A" reattaches it (or recreates it fresh if the box
+            // rebooted / the sweeper already reaped it).
+            CodexRemote => BuildRemoteCommand(sessionId),
             Codex => ResolveLaunch("codex", JoinArgs(
                     $"resume {sessionId} --dangerously-bypass-approvals-and-sandbox",
                     extraArgs)),
@@ -68,34 +68,79 @@ namespace CCPad.Settings
                     extraArgs)),
         };
 
+        /// <summary>Start an independent Codex conversation with the full
+        /// history of <paramref name="sessionId"/>. Used by reusable frozen
+        /// templates so opening the same template twice never gives two TUI
+        /// processes write access to one thread.</summary>
+        public static string BuildForkCommand(string sessionId, string extraArgs = "") =>
+            ResolveLaunch("codex", JoinArgs(
+                $"fork {sessionId} --dangerously-bypass-approvals-and-sandbox",
+                extraArgs));
+
         /// <summary>
         /// Command line for a Codex@167 pane: ssh straight into the remote tmux
-        /// session running codex. Every parameter comes from
-        /// <see cref="AppPrefs.RemoteCodex"/> (hand-editable prefs.json — no
-        /// settings UI in v1). -t forces a tty (tmux needs one),
-        /// accept-new pins the host key on first connect without prompting, and
-        /// ServerAliveInterval keeps NAT/firewall state from silently dropping
-        /// an idle session. The key path is env-expanded here because the
-        /// command goes straight to CreateProcess — no shell ever expands it.
+        /// session named <paramref name="sessionName"/> running codex (each tab
+        /// owns a private session; see <see cref="RemoteSessions"/>). Every
+        /// other parameter comes from <see cref="AppPrefs.RemoteCodex"/>
+        /// (hand-editable prefs.json — no settings UI in v1). -t forces a tty
+        /// (tmux needs one), accept-new pins the host key on first connect
+        /// without prompting, and ServerAliveInterval keeps NAT/firewall state
+        /// from silently dropping an idle session. The key path is env-expanded
+        /// here because the command goes straight to CreateProcess — no shell
+        /// ever expands it.
         /// </summary>
-        private static string BuildRemoteCommand()
+        internal static string BuildRemoteCommand(string sessionName, string? remoteWorkingDir = null,
+            string? remoteDeviceId = null)
+            => BuildRemoteCommandCore(sessionName, remoteWorkingDir, remoteDeviceId, resumePicker: false);
+
+        /// <summary>Same ssh line, but a session that has to be CREATED comes up
+        /// in the `codex resume` picker instead of a fresh conversation — the
+        /// recovery path for a killed session (tab closed, sweeper, box reboot):
+        /// codex's on-disk history survives the process. With `new -A` a still-
+        /// ALIVE session just reattaches and the picker never appears, so this
+        /// is always safe to use as a reconnect.</summary>
+        internal static string BuildRemoteResumePickerCommand(string sessionName, string? remoteWorkingDir = null,
+            string? remoteDeviceId = null)
+            => BuildRemoteCommandCore(sessionName, remoteWorkingDir, remoteDeviceId, resumePicker: true);
+
+        private static string BuildRemoteCommandCore(
+            string sessionName, string? remoteWorkingDir, string? remoteDeviceId, bool resumePicker)
         {
-            var rc = AppConfig.Load().RemoteCodex ?? new RemoteCodexConfig();
-            string key = Environment.ExpandEnvironmentVariables(rc.KeyPath ?? "");
-            string remoteCmd = (rc.RemoteCommand ?? "")
-                .Replace("{dir}", rc.RemoteDir ?? "")
-                .Replace("{session}", rc.TmuxSession ?? "");
-            return $"\"{ResolveSsh()}\" -t -i \"{key}\" " +
+            var device = RemoteDeviceConfig.Find(remoteDeviceId)
+                ?? throw new InvalidOperationException("No external SSH device is configured.");
+            if (!RemoteDeviceConnection.IsSafeUser(device.User) ||
+                !RemoteDeviceConnection.IsSafeHost(device.Host))
+                throw new InvalidOperationException("Invalid SSH user or host.");
+            string key = Environment.ExpandEnvironmentVariables(device.KeyPath ?? "");
+            string dir = string.IsNullOrWhiteSpace(remoteWorkingDir)
+                ? device.DefaultWorkingDir ?? ""
+                : remoteWorkingDir;
+            string codex = string.IsNullOrWhiteSpace(device.CodexCommand) ? "codex" : device.CodexCommand;
+            string remoteCmd = (device.LaunchCommand ?? RemoteDeviceConfig.DefaultLaunchCommand)
+                .Replace("{dir}", QuoteRemoteShellValue(dir))
+                .Replace("{session}", sessionName)
+                .Replace("{codex}", codex);
+            // Only append when the template visibly ends in the stock codex
+            // invocation — a customized template keeps its exact command.
+            if (resumePicker && remoteCmd.TrimEnd().EndsWith(" " + codex, StringComparison.Ordinal))
+                remoteCmd = remoteCmd.TrimEnd() + " resume";
+            string keyArgs = string.IsNullOrWhiteSpace(key) ? "" : $"-i \"{key}\" ";
+            return $"\"{ResolveSsh()}\" -t -p {device.Port} {keyArgs}" +
                    "-o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 " +
-                   $"{rc.User}@{rc.Host} \"{remoteCmd}\"";
+                   $"{device.User}@{device.Host} \"{remoteCmd}\"";
         }
+
+        private static string QuoteRemoteShellValue(string value) =>
+            // Keep the expansion free of double quotes because the complete
+            // remote command is itself the quoted final argument to ssh.exe.
+            "'" + value.Replace("'", "'\\''") + "'";
 
         /// <summary>
         /// Locate ssh.exe: PATH first, then the stock Windows OpenSSH install
         /// dir (present even when the optional-feature dir isn't on PATH), else
         /// the bare name and let CreateProcess's own search have a go.
         /// </summary>
-        private static string ResolveSsh()
+        internal static string ResolveSsh()
         {
             var onPath = FindOnPath("ssh");
             if (onPath != null) return onPath;

@@ -2030,6 +2030,32 @@ namespace CCPad
                 html, body { width: 100%; height: 100%; background: #0c0c0c; overflow: clip; }
                 body { display: flex; flex-direction: column; position: relative; }
                 #terminal { width: 100%; flex: 1 1 auto; min-height: 0; overflow: hidden; }
+                /* Browser-style middle-button autoscroll. Keep the affordance in
+                   the WebView so it never changes the PTY's measured dimensions. */
+                #terminal.middle-scroll-active,
+                #terminal.middle-scroll-active * { cursor: ns-resize !important; }
+                #middle-scroll-indicator {
+                  display: none;
+                  position: fixed;
+                  z-index: 20;
+                  width: 34px;
+                  height: 34px;
+                  align-items: center;
+                  justify-content: center;
+                  transform: translate(-50%, -50%);
+                  border: 1px solid rgba(180, 190, 205, .75);
+                  border-radius: 50%;
+                  background: rgba(25, 30, 38, .94);
+                  box-shadow: 0 2px 10px rgba(0, 0, 0, .55);
+                  color: #d8e0ea;
+                  font-family: 'Segoe UI Symbol', 'Microsoft YaHei', sans-serif;
+                  font-size: 18px;
+                  line-height: 1;
+                  pointer-events: none;
+                  user-select: none;
+                }
+                #middle-scroll-indicator.active { display: flex; }
+                #middle-scroll-indicator .arrow { transform: translateY(-1px); }
                 /* Keep the IME helper textarea inside the viewport so Chromium
                    doesn't shift the page trying to scroll it into view. */
                 .xterm .xterm-helper-textarea {
@@ -2283,6 +2309,7 @@ namespace CCPad
                 <span class="time" id="lastcmd-time"></span>
               </div>
               <div id="terminal"></div>
+              <div id="middle-scroll-indicator" aria-hidden="true"><span class="arrow">↕</span></div>
               <div id="stage">
                 <div id="stage-head">
                   <span class="dot" id="stage-dot"></span>
@@ -2338,6 +2365,80 @@ namespace CCPad
                 const terminalElement = document.getElementById('terminal');
                 term.open(terminalElement);
                 fit.fit();
+
+                /* Browser-style middle-button drag scrolling. This is kept inside
+                   the xterm page instead of the native host so the PTY dimensions
+                   and WebView layout never change. */
+                const middleScrollIndicator = document.getElementById('middle-scroll-indicator');
+                const middleScroll = {
+                  active: false,
+                  startY: 0,
+                  currentY: 0,
+                  lastLines: 0,
+                  raf: 0
+                };
+                function isMiddleScrollTarget(e) {
+                  if (!terminalElement.contains(e.target)) return false;
+                  const target = e.target && e.target.closest ? e.target : null;
+                  if (target && target.closest('#stage, #lastcmd, input, textarea, button, select')) return false;
+                  return true;
+                }
+                function middleScrollLineHeight() {
+                  const row = terminalElement.querySelector('.xterm-rows > div');
+                  const rectHeight = row ? row.getBoundingClientRect().height : 0;
+                  if (Number.isFinite(rectHeight) && rectHeight > 0) return rectHeight;
+                  const rows = terminalElement.querySelector('.xterm-rows');
+                  const computedHeight = rows ? parseFloat(getComputedStyle(rows).lineHeight) : NaN;
+                  return Number.isFinite(computedHeight) && computedHeight > 0 ? computedHeight : 18;
+                }
+                function applyMiddleScroll() {
+                  middleScroll.raf = 0;
+                  if (!middleScroll.active) return;
+                  const totalLines = Math.trunc(
+                    (middleScroll.currentY - middleScroll.startY) / middleScrollLineHeight()
+                  );
+                  const delta = totalLines - middleScroll.lastLines;
+                  if (delta !== 0) {
+                    term.scrollLines(delta);
+                    middleScroll.lastLines = totalLines;
+                  }
+                }
+                function scheduleMiddleScroll(e) {
+                  if (!middleScroll.active) return;
+                  e.preventDefault();
+                  middleScroll.currentY = e.clientY;
+                  if (!middleScroll.raf) middleScroll.raf = requestAnimationFrame(applyMiddleScroll);
+                }
+                function endMiddleScroll(e) {
+                  if (!middleScroll.active) return;
+                  if (e && e.type === 'mouseup' && e.button !== 1) return;
+                  if (middleScroll.raf) {
+                    cancelAnimationFrame(middleScroll.raf);
+                    middleScroll.raf = 0;
+                  }
+                  middleScroll.active = false;
+                  terminalElement.classList.remove('middle-scroll-active');
+                  middleScrollIndicator.classList.remove('active');
+                }
+                terminalElement.addEventListener('mousedown', e => {
+                  if (e.button !== 1 || !isMiddleScrollTarget(e)) return;
+                  e.preventDefault();
+                  e.stopPropagation();
+                  middleScroll.active = true;
+                  middleScroll.startY = e.clientY;
+                  middleScroll.currentY = e.clientY;
+                  middleScroll.lastLines = 0;
+                  middleScrollIndicator.style.left = e.clientX + 'px';
+                  middleScrollIndicator.style.top = e.clientY + 'px';
+                  middleScrollIndicator.classList.add('active');
+                  terminalElement.classList.add('middle-scroll-active');
+                }, true);
+                document.addEventListener('mousemove', scheduleMiddleScroll, true);
+                document.addEventListener('mouseup', endMiddleScroll, true);
+                window.addEventListener('blur', () => endMiddleScroll());
+                document.addEventListener('visibilitychange', () => {
+                  if (document.hidden) endMiddleScroll();
+                });
 
                 /* Xshell-style copy-on-select. Wait for the left-button gesture to
                    finish so dragging does not replace the clipboard with every

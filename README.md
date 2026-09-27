@@ -18,7 +18,7 @@
 
 ---
 
-> Current release: **v1.10.14**
+> Current release: **v1.10.15**
 >
 > Unreleased on `master`: Codex quota indicator.
 
@@ -313,6 +313,10 @@ This is a community fork of [nuomiaa/CCPad](https://github.com/nuomiaa/CCPad) (b
 - **Exact resume after exit** — Codex and Claude keep the detected session ID after exit, show a runnable resume command, and let **↑** put it back into the shell input line.
 - **Multi-process layout recovery** — When several CC Pad windows start together, each process consumes only its own recovery snapshot instead of clearing layouts still waiting for another window.
 - **CLI launch from elevated hosts** — When CC Pad is started from an administrator terminal, child CLIs use a standard-user token so a Codex daemon cannot inherit administrator privileges.
+
+### v1.10.15
+
+- **Long staged Codex submissions** — Scale the gap before the staged Enter key to the UTF-8 payload size, so long Codex prompts finish entering before the submit key arrives while short prompts keep the fast path.
 
 ### v1.10.14
 

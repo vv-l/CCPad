@@ -61,6 +61,7 @@ namespace CCPad
         private string _autoConfirmTail = "";
         private DateTime _codexApprovalPromptUtc = DateTime.MinValue;
         private Timer? _autoConfirmTimer;
+        private CancellationTokenSource? _stagedSubmitCts;
         private const int AutoConfirmTailChars = 512;
         private const int CodexApprovalWindowSeconds = 15;
         // Auto-reply (自动应答): incremental scan state — only the last
@@ -409,6 +410,59 @@ namespace CCPad
             _codexApprovalPromptUtc = DateTime.MinValue;
             _autoConfirmTimer?.Dispose();
             _autoConfirmTimer = null;
+        }
+
+        /// <summary>Write a staged command first, then submit it only after the
+        /// text write has returned and the adaptive settle delay has elapsed.
+        /// Keeping the delay here (after WriteInput) avoids a browser timer
+        /// racing a long WebView message that is still being written to ConPTY.</summary>
+        private void SendStagedInput(string data, int settleMs)
+        {
+            if (_disposed || _session == null || data.Length == 0) return;
+
+            CancelStagedSubmit();
+            var session = _session;
+            var cts = new CancellationTokenSource();
+            _stagedSubmitCts = cts;
+            _lastUserInputUtc = DateTime.UtcNow;
+            _lastRealInputUtc = DateTime.UtcNow;
+            ResetAutoConfirmState();
+            session.WriteInput(data);
+            _ = FinishStagedInputAsync(session, cts, Math.Clamp(settleMs, 180, 3000));
+        }
+
+        private async Task FinishStagedInputAsync(
+            ConPtySession session, CancellationTokenSource cts, int settleMs)
+        {
+            try
+            {
+                await Task.Delay(settleMs, cts.Token).ConfigureAwait(false);
+                if (cts.IsCancellationRequested || _disposed || !ReferenceEquals(_session, session))
+                    return;
+
+                session.WriteInput("\r");
+                _lastUserInputUtc = DateTime.UtcNow;
+                OnRealSubmitResetAutoReply();
+                if (_status == PaneStatus.Waiting || _apiErrored)
+                {
+                    _apiErrored = false;
+                    SetStatus(PaneStatus.Working);
+                }
+            }
+            catch (OperationCanceledException) { }
+            catch (ObjectDisposedException) { }
+            finally
+            {
+                if (ReferenceEquals(_stagedSubmitCts, cts))
+                    _stagedSubmitCts = null;
+                cts.Dispose();
+            }
+        }
+
+        private void CancelStagedSubmit()
+        {
+            var cts = Interlocked.Exchange(ref _stagedSubmitCts, null);
+            if (cts != null) cts.Cancel();
         }
 
         /// <summary>Push the current pane status to the xterm front-end (for command staging).</summary>
@@ -1659,8 +1713,20 @@ namespace CCPad
                         }
                         break;
 
+                    case "stagedInput":
+                        string staged = doc.RootElement.GetProperty("data").GetString() ?? "";
+                        int settleMs = doc.RootElement.TryGetProperty("settleMs", out var settleProp) &&
+                                       settleProp.TryGetInt32(out var requestedSettle)
+                            ? requestedSettle
+                            : 180;
+                        SendStagedInput(staged, settleMs);
+                        break;
+
                     case "input":
                         string data = doc.RootElement.GetProperty("data").GetString() ?? "";
+                        // A real keystroke takes precedence over a staged submit
+                        // that is still waiting for its final Enter.
+                        CancelStagedSubmit();
                         _lastUserInputUtc = DateTime.UtcNow;
                         _lastRealInputUtc = DateTime.UtcNow;
                         if (data.Length > 0)
@@ -1904,6 +1970,7 @@ namespace CCPad
             _loadedTcs?.TrySetCanceled();
             _readyTcs?.TrySetCanceled();
             _autoConfirmTimer?.Dispose();
+            CancelStagedSubmit();
             _autoReplyTimer?.Dispose();
             _workingWatchTimer?.Dispose();
             CliNotify.Unregister(PaneId);
@@ -2658,7 +2725,16 @@ namespace CCPad
                   // to the last-command bar here (100% accurate path).
                   setLastCmd(cmd);
                   shadowBuf = '';
-                  const submit = () => { post(cmd); setTimeout(() => post('\r'), 180); };
+                  // A long Codex composer needs time to consume the text before
+                  // the standalone Enter arrives. Scale the settle gap by the
+                  // UTF-8 payload size, with a cap so normal short prompts keep
+                  // the old fast path and very large prompts cannot stall the
+                  // staging queue indefinitely.
+                  const payloadBytes = new TextEncoder().encode(cmd).length;
+                  const settleMs = Math.min(3000, 180 + Math.floor(payloadBytes / 1024) * 100);
+                  const submit = () => window.chrome.webview.postMessage(JSON.stringify({
+                    type: 'stagedInput', data: cmd, settleMs: settleMs
+                  }));
                   if (remotePasteOn) {
                     // Remote pane = tmux. If the user is reading scrollback the
                     // pane sits in copy-mode and injected text would be eaten

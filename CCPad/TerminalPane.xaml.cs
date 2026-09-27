@@ -1502,9 +1502,11 @@ namespace CCPad
                     : "";
                 // BuildExitBanner() also sets _resumeCommand / _remoteResumeOffer
                 // as a side effect.
-                SendOutput(Encoding.UTF8.GetBytes(quickExitWarn + BuildExitBanner()));
+                var fallbackSession = _session;
+                if (fallbackSession == null) return;
+                QueueExitBannerThenSpawnShell(
+                    Encoding.UTF8.GetBytes(quickExitWarn + BuildExitBanner()), fallbackSession);
                 SendShellMode(_resumeCommand != null || _remoteResumeOffer);
-                _session?.SpawnProcess(ShellCommand, _workingDir);
             }
             else
             {
@@ -1651,6 +1653,22 @@ namespace CCPad
             string b64 = Convert.ToBase64String(data);
             string json = $"{{\"type\":\"output\",\"data\":\"{b64}\"}}";
             DispatcherQueue.TryEnqueue(() => WebView.CoreWebView2?.PostWebMessageAsString(json));
+        }
+
+        private void QueueExitBannerThenSpawnShell(byte[] banner, ConPtySession session)
+        {
+            DispatcherQueue.TryEnqueue(() => _ = SendBannerThenSpawnShellAsync(banner, session));
+        }
+
+        private async Task SendBannerThenSpawnShellAsync(byte[] banner, ConPtySession session)
+        {
+            // Queue the banner before starting cmd.exe. Otherwise cmd's first
+            // prompt can race the banner and paint its input on top of the
+            // recovery command, especially on the first exit.
+            SendOutput(banner);
+            await Task.Delay(120).ConfigureAwait(true);
+            if (_disposed || !_inShell || !ReferenceEquals(_session, session)) return;
+            session.SpawnProcess(ShellCommand, _workingDir);
         }
 
         /// <summary>Print a yellow host-side notice line into the terminal (e.g.
@@ -1901,6 +1919,11 @@ namespace CCPad
                         }
                         else if (_inShell && _resumeCommand != null)
                         {
+                            // The shell may still contain a partially typed line
+                            // (or a history recall). Clear it before injecting the
+                            // recovery command so the first ↑ press cannot join
+                            // two command strings together.
+                            _session?.WriteInput("\x15");
                             _session?.WriteInput(_resumeCommand);
                             // Seed the shell input watcher with the injected text
                             // (it bypasses the "input" path) so the user's Enter

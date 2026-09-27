@@ -40,6 +40,7 @@ namespace CCPad.Settings
     public static class RemoteDeviceConfig
     {
         public const string LegacyDeviceId = "codex-167";
+        public const string LegacyCodexCommand = "codex --yolo";
         public const string DefaultWorkingDir = "/zettos/pool/1/agents";
         public const string DefaultLaunchCommand =
             "cd {dir} && export LANG=C.UTF-8 LC_ALL=C.UTF-8 && tmux -u new -A -s {session} {codex}";
@@ -80,6 +81,7 @@ namespace CCPad.Settings
                         KeyPath = legacy.KeyPath ?? "",
                         DefaultWorkingDir = string.IsNullOrWhiteSpace(legacy.RemoteDir)
                             ? DefaultWorkingDir : legacy.RemoteDir,
+                        CodexCommand = LegacyCodexCommand,
                         LaunchCommand = string.IsNullOrWhiteSpace(legacy.RemoteCommand)
                             ? DefaultLaunchCommand : legacy.RemoteCommand,
                         SessionPrefix = legacy.SessionPrefix ?? "ccpad",
@@ -147,13 +149,13 @@ namespace CCPad.Settings
                 // The built-in 167 profile is intentionally the trusted,
                 // highest-permission device. Normalize both schema variants:
                 // newer templates use {codex}; migrated v1 templates ended in
-                // a literal `codex` and otherwise ignored CodexCommand.
+                // a literal `codex` and otherwise ignored CodexCommand. Older
+                // local edits also used `-s danger-full-access`; keep the
+                // effective behavior explicit and consistent as `--yolo`.
                 if (d.Id == LegacyDeviceId)
                 {
-                    if (string.Equals(d.CodexCommand.Trim(), "codex", StringComparison.Ordinal))
-                        d.CodexCommand = "codex --yolo";
-                    if (d.LaunchCommand.TrimEnd().EndsWith(" codex", StringComparison.Ordinal))
-                        d.LaunchCommand = d.LaunchCommand.TrimEnd() + " --yolo";
+                    d.CodexCommand = EnsureLegacyYolo(d.CodexCommand);
+                    d.LaunchCommand = NormalizeLegacyLaunchCommand(d.LaunchCommand);
                 }
                 if (string.IsNullOrWhiteSpace(d.SessionPrefix)) d.SessionPrefix = "ccpad";
                 d.SweepIdleHours = Math.Max(1, d.SweepIdleHours);
@@ -161,6 +163,41 @@ namespace CCPad.Settings
             if (doc.Devices.Count == 0) doc.SelectedDeviceId = "";
             else if (!doc.Devices.Any(d => d.Id == doc.SelectedDeviceId))
                 doc.SelectedDeviceId = doc.Devices[0].Id;
+        }
+
+        private static string EnsureLegacyYolo(string? command)
+        {
+            var normalized = string.IsNullOrWhiteSpace(command) ? "codex" : command.Trim();
+            if (normalized.Contains("--yolo", StringComparison.OrdinalIgnoreCase))
+                return normalized;
+
+            // Replace the older equivalent forms instead of leaving duplicate
+            // sandbox flags in the command line.
+            foreach (var oldFlag in new[]
+            {
+                " -s danger-full-access",
+                " --sandbox danger-full-access",
+                " -s=danger-full-access",
+                " --sandbox=danger-full-access",
+            })
+            {
+                normalized = normalized.Replace(oldFlag, "", StringComparison.OrdinalIgnoreCase);
+            }
+
+            normalized = string.Join(" ", normalized.Split(
+                (char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+            return normalized + " --yolo";
+        }
+
+        private static string NormalizeLegacyLaunchCommand(string? command)
+        {
+            var normalized = string.IsNullOrWhiteSpace(command)
+                ? DefaultLaunchCommand : command.TrimEnd();
+            if (normalized.Contains("{codex}", StringComparison.Ordinal))
+                return normalized;
+            if (normalized.EndsWith(" codex", StringComparison.OrdinalIgnoreCase))
+                return normalized + " --yolo";
+            return normalized;
         }
     }
 }

@@ -1,5 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Threading.Tasks;
+using CCPad.CodexQuota;
 using CCPad.Localization;
 using CCPad.Settings;
 using CCPad.Web;
@@ -38,6 +40,12 @@ namespace CCPad
         private Microsoft.UI.Dispatching.DispatcherQueueTimer? _resourceTimer;
         private bool _resourceWarningArmed = true;
 
+        private readonly CodexQuotaService _codexQuotaService = new();
+        private Microsoft.UI.Dispatching.DispatcherQueueTimer? _codexQuotaTimer;
+        private Microsoft.UI.Dispatching.DispatcherQueueTimer? _codexQuotaClockTimer;
+        private CodexQuotaSnapshot _codexQuotaSnapshot = CodexQuotaSnapshot.Loading();
+        private bool _codexQuotaRefreshInFlight;
+
         public MainWindow()
         {
             InitializeComponent();
@@ -60,11 +68,178 @@ namespace CCPad
             ReplyButton.IsChecked = AutoReplyManager.IsOn;
             AutoReplyManager.Changed += OnAutoReplyManagerChanged;
             SessionRecovery.MarkRunning();
+            UpdateCodexQuotaUi(_codexQuotaSnapshot);
         }
 
         // ── Theme ───────────────────────────────────────────────────────────
         // Chrome (window + tab strip) switches via XAML ThemeDictionaries keyed off
         // RootContainer.RequestedTheme; terminals listen to ThemeManager separately.
+
+        private void StartCodexQuotaMonitor()
+        {
+            if (_codexQuotaTimer != null)
+                return;
+
+            _codexQuotaTimer = DispatcherQueue.CreateTimer();
+            _codexQuotaTimer.Interval = TimeSpan.FromMinutes(5);
+            _codexQuotaTimer.IsRepeating = true;
+            _codexQuotaTimer.Tick += (_, _) => _ = RefreshCodexQuotaAsync();
+            _codexQuotaTimer.Start();
+            _codexQuotaClockTimer = DispatcherQueue.CreateTimer();
+            _codexQuotaClockTimer.Interval = TimeSpan.FromMinutes(1);
+            _codexQuotaClockTimer.IsRepeating = true;
+            _codexQuotaClockTimer.Tick += (_, _) => UpdateCodexQuotaUi(_codexQuotaSnapshot);
+            _codexQuotaClockTimer.Start();
+            _ = RefreshCodexQuotaAsync();
+        }
+
+        private async Task RefreshCodexQuotaAsync()
+        {
+            if (_codexQuotaRefreshInFlight)
+                return;
+
+            _codexQuotaRefreshInFlight = true;
+            try
+            {
+                var snapshot = await _codexQuotaService.RefreshAsync().ConfigureAwait(true);
+                if (snapshot.State == CodexQuotaState.Loading)
+                    return;
+                UpdateCodexQuotaUi(snapshot);
+            }
+            catch
+            {
+                UpdateCodexQuotaUi(CodexQuotaSnapshot.ErrorSnapshot("Could not read Codex usage"));
+            }
+            finally
+            {
+                _codexQuotaRefreshInFlight = false;
+            }
+        }
+
+        private void UpdateCodexQuotaUi(CodexQuotaSnapshot snapshot)
+        {
+            _codexQuotaSnapshot = snapshot;
+            var hasUsage = snapshot.State == CodexQuotaState.Ready && snapshot.Windows.Length > 0;
+            var percent = hasUsage ? snapshot.TightestUsedPercent : 0;
+            var soonestReset = GetSoonestReset(snapshot);
+            QuotaProgress.Value = percent;
+            QuotaFlyoutProgress.Value = percent;
+            QuotaPercentLabel.Text = hasUsage ? $"{percent:0}%" : "--";
+            QuotaResetLabel.Text = soonestReset.HasValue
+                ? FormatCountdown(soonestReset.Value - DateTimeOffset.UtcNow)
+                : "";
+            QuotaFlyoutTitle.Text = Loc.T("quota_title");
+            QuotaProviderLabel.Text = Loc.T("quota_codex");
+            QuotaFlyoutPlan.Text = hasUsage && !string.IsNullOrWhiteSpace(snapshot.PlanType)
+                ? Loc.T("quota_plan", snapshot.PlanType!)
+                : "";
+            QuotaFlyoutUpdated.Text = snapshot.UpdatedAt.HasValue
+                ? Loc.T("quota_updated", FormatClock(snapshot.UpdatedAt.Value))
+                : "";
+            QuotaCreditsLabel.Text = hasUsage
+                ? Loc.T("quota_reset_credits", snapshot.ResetCreditsAvailable)
+                : "";
+            QuotaFlyoutStatus.Text = snapshot.State switch
+            {
+                CodexQuotaState.Loading => Loc.T("quota_loading"),
+                CodexQuotaState.Unavailable => Loc.T("quota_not_signed_in"),
+                CodexQuotaState.Error => snapshot.Error ?? Loc.T("quota_unavailable"),
+                _ => ""
+            };
+            QuotaRefreshButton.Content = Loc.T("quota_refresh");
+            ToolTipService.SetToolTip(QuotaButton, hasUsage
+                ? Loc.T("quota_tooltip", percent)
+                : Loc.T("quota_tooltip_empty"));
+
+            QuotaWindowPanel.Children.Clear();
+            if (hasUsage)
+            {
+                foreach (var window in snapshot.Windows)
+                    QuotaWindowPanel.Children.Add(CreateQuotaWindowRow(window));
+            }
+        }
+
+        private static DateTimeOffset? GetSoonestReset(CodexQuotaSnapshot snapshot)
+        {
+            DateTimeOffset? soonest = null;
+            foreach (var window in snapshot.Windows)
+            {
+                if (!window.ResetsAt.HasValue ||
+                    (soonest.HasValue && window.ResetsAt.Value >= soonest.Value))
+                    continue;
+                soonest = window.ResetsAt.Value;
+            }
+            return soonest;
+        }
+
+        private UIElement CreateQuotaWindowRow(CodexQuotaWindow window)
+        {
+            var panel = new StackPanel { Spacing = 4 };
+            var header = new Grid();
+            header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var label = new TextBlock
+            {
+                Text = window.Label == "Session" ? Loc.T("quota_session") :
+                    window.Label == "Weekly" ? Loc.T("quota_weekly") : window.Label,
+                FontSize = 12,
+                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold
+            };
+            var percent = new TextBlock
+            {
+                Text = $"{window.UsedPercent:0}%",
+                FontSize = 12,
+                FontFamily = new FontFamily("Cascadia Mono, Consolas"),
+                HorizontalAlignment = HorizontalAlignment.Right
+            };
+            Grid.SetColumn(percent, 1);
+            header.Children.Add(label);
+            header.Children.Add(percent);
+            panel.Children.Add(header);
+
+            var progress = new ProgressBar
+            {
+                Minimum = 0,
+                Maximum = 100,
+                Value = window.UsedPercent,
+                Height = 6
+            };
+            panel.Children.Add(progress);
+
+            if (window.ResetsAt.HasValue)
+            {
+                panel.Children.Add(new TextBlock
+                {
+                    Text = Loc.T("quota_resets", FormatCountdown(window.ResetsAt.Value - DateTimeOffset.UtcNow)),
+                    FontSize = 11,
+                    Opacity = 0.7
+                });
+            }
+            return panel;
+        }
+
+        private static string FormatClock(DateTimeOffset value)
+            => value.ToLocalTime().ToString("HH:mm");
+
+        private static string FormatCountdown(TimeSpan remaining)
+        {
+            if (remaining <= TimeSpan.Zero)
+                return Loc.T("quota_now");
+            if (remaining.TotalDays >= 1)
+                return $"{(int)remaining.TotalDays}d {remaining.Hours}h";
+            if (remaining.TotalHours >= 1)
+                return $"{(int)remaining.TotalHours}h {remaining.Minutes}m";
+            return $"{Math.Max(1, remaining.Minutes)}m";
+        }
+
+        private void OnQuotaButtonClick(object sender, RoutedEventArgs e)
+            => _ = RefreshCodexQuotaAsync();
+
+        private void OnQuotaFlyoutOpened(object sender, object e)
+            => _ = RefreshCodexQuotaAsync();
+
+        private void OnQuotaRefreshClick(object sender, RoutedEventArgs e)
+            => _ = RefreshCodexQuotaAsync();
 
         private void ApplyThemePref()
         {
@@ -90,6 +265,7 @@ namespace CCPad
             if (_initialized) return;
             _initialized = true;
             RootGrid.Loaded -= OnRootLoaded;
+            StartCodexQuotaMonitor();
 
             // Apply the saved theme before any terminal panes are built below, so
             // their initial xterm styling matches the effective dark/light value.
@@ -1362,6 +1538,7 @@ namespace CCPad
             ReplyButtonLabel.Text = Loc.T("btn_reply");
             ToolTipService.SetToolTip(StageButton, Loc.T("tip_stage"));
             StageButtonLabel.Text = Loc.T("btn_stage");
+            UpdateCodexQuotaUi(_codexQuotaSnapshot);
         }
 
         /// <summary>Live language switch: rebuild menus + chrome in the new language.</summary>
@@ -1878,6 +2055,9 @@ namespace CCPad
             LastCmdBarManager.Changed -= OnLastCmdBarManagerChanged;
 
             _resourceTimer?.Stop();
+            _codexQuotaTimer?.Stop();
+            _codexQuotaClockTimer?.Stop();
+            _codexQuotaService.Dispose();
 
             // Snapshot for the closed-session history must be taken while the
             // panes (and their session IDs / working dirs) are still alive.

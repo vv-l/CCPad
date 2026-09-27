@@ -144,6 +144,21 @@ namespace CCPad.Localization
         // Columns, in order: zh-Hans, en, zh-Hant, de, ja, fr, ko, es, it
         private static readonly Dictionary<string, string[]> _t = new()
         {
+            ["quota_title"] = new[] { "AI 额度", "AI allowance", "AI 額度", "KI-Kontingent", "AI 使用量", "Quota IA", "AI 사용량", "Cuota de IA", "Quota IA" },
+            ["quota_refresh"] = new[] { "刷新", "Refresh", "重新整理", "Aktualisieren", "更新", "Actualiser", "새로 고침", "Actualizar", "Aggiorna" },
+            ["quota_codex"] = new[] { "Codex", "Codex", "Codex", "Codex", "Codex", "Codex", "Codex", "Codex", "Codex" },
+            ["quota_plan"] = new[] { "方案：{0}", "Plan: {0}", "方案：{0}", "Plan: {0}", "プラン: {0}", "Forfait : {0}", "플랜: {0}", "Plan: {0}", "Piano: {0}" },
+            ["quota_updated"] = new[] { "更新于 {0}", "Updated {0}", "更新於 {0}", "Aktualisiert {0}", "更新 {0}", "Mis à jour à {0}", "업데이트 {0}", "Actualizado {0}", "Aggiornato alle {0}" },
+            ["quota_loading"] = new[] { "正在刷新 Codex 额度…", "Refreshing Codex usage…", "正在重新整理 Codex 額度…", "Codex-Kontingent wird aktualisiert…", "Codex 使用量を更新中…", "Actualisation du quota Codex…", "Codex 사용량 새로 고치는 중…", "Actualizando el uso de Codex…", "Aggiornamento quota Codex…" },
+            ["quota_not_signed_in"] = new[] { "未检测到 Codex 登录，请先运行 codex login。", "Codex is not signed in. Run codex login first.", "未偵測到 Codex 登入，請先執行 codex login。", "Codex ist nicht angemeldet. Führen Sie zuerst codex login aus.", "Codex にログインしていません。先に codex login を実行してください。", "Codex n’est pas connecté. Exécutez d’abord codex login.", "Codex가 로그인되어 있지 않습니다. 먼저 codex login을 실행하세요.", "Codex no ha iniciado sesión. Ejecuta primero codex login.", "Codex non ha effettuato l'accesso. Esegui prima codex login." },
+            ["quota_unavailable"] = new[] { "暂时无法获取 Codex 额度。", "Codex usage is temporarily unavailable.", "暫時無法取得 Codex 額度。", "Codex-Kontingent ist vorübergehend nicht verfügbar.", "Codex 使用量を取得できません。", "Quota Codex temporairement indisponible.", "Codex 사용량을 일시적으로 사용할 수 없습니다.", "El uso de Codex no está disponible temporalmente.", "Quota Codex temporaneamente non disponibile." },
+            ["quota_reset_credits"] = new[] { "可用额度重置次数：{0}", "Reset credits available: {0}", "可用額度重設次數：{0}", "Verfügbare Zurücksetzungsguthaben: {0}", "利用可能なリセットクレジット: {0}", "Crédits de réinitialisation disponibles : {0}", "사용 가능한 재설정 크레딧: {0}", "Créditos de reinicio disponibles: {0}", "Crediti di reimpostazione disponibili: {0}" },
+            ["quota_session"] = new[] { "当前窗口", "Current window", "目前視窗", "Aktuelles Fenster", "現在のウィンドウ", "Fenêtre actuelle", "현재 창", "Ventana actual", "Finestra corrente" },
+            ["quota_weekly"] = new[] { "每周额度", "Weekly allowance", "每週額度", "Wöchentliches Kontingent", "週間使用量", "Quota hebdomadaire", "주간 사용량", "Cuota semanal", "Quota settimanale" },
+            ["quota_resets"] = new[] { "重置倒计时：{0}", "Resets in {0}", "重設倒數：{0}", "Wird in {0} zurückgesetzt", "リセットまで {0}", "Réinitialisation dans {0}", "{0} 후 재설정", "Se restablece en {0}", "Si reimposta tra {0}" },
+            ["quota_now"] = new[] { "现在", "now", "現在", "jetzt", "現在", "maintenant", "지금", "ahora", "ora" },
+            ["quota_tooltip"] = new[] { "Codex 已使用 {0}%，点击查看额度详情", "Codex has used {0}%; click for details", "Codex 已使用 {0}%，點擊查看額度詳細資料", "Codex zu {0} % verwendet; für Details klicken", "Codex 使用率 {0}%。クリックで詳細", "Codex utilisé à {0} % ; cliquer pour les détails", "Codex {0}% 사용됨; 세부 정보를 보려면 클릭", "Codex ha usado el {0}%; haz clic para ver detalles", "Codex utilizzato al {0}%; fai clic per i dettagli" },
+            ["quota_tooltip_empty"] = new[] { "查看 Codex AI 额度", "View Codex AI allowance", "查看 Codex AI 額度", "Codex-KI-Kontingent anzeigen", "Codex AI 使用量を表示", "Afficher le quota IA Codex", "Codex AI 사용량 보기", "Ver la cuota de IA de Codex", "Visualizza quota IA Codex" },
             // ── Common buttons ──
             ["ok"] = new[] { "确定", "OK", "確定", "OK", "OK", "OK", "확인", "Aceptar", "OK" },
             ["add"] = new[] { "添加", "Add", "新增", "Hinzufügen", "追加", "Ajouter", "추가", "Añadir", "Aggiungi" },

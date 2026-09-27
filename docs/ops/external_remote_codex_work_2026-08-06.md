@@ -1,8 +1,10 @@
 # CC Pad 外部设备与远程 Codex 改造归档
 
+- 本文是 2026-08-06 的内部实施归档，不代表当前运行版本或发布状态。
+
 - 日期：2026-08-06
 - 范围：外部项目、多 Linux SSH 设备、远程 Codex/tmux、AI 接入 Skill
-- 当前发布：`D:\CC Pad\current` → `app\v1.10.0_20260806-113918`
+- 当时的发布快照：`D:\CC Pad\current` → `app\v1.10.0_20260806-113918`
 - SSH 目标记录：内置设备 ID `codex-167`（主机与密钥信息不在本文展开）
 
 ## 最终结果
@@ -92,7 +94,7 @@ Linux SSH 外部设备
 
 ### 项目级 Skill
 
-- 位置：`D:\CC Pad\.agents\skills\ccpad-onboard-linux-device\SKILL.md`
+- 位置（仓库外的开发工作区）：`D:\CC Pad\.agents\skills\ccpad-onboard-linux-device\SKILL.md`
 - 自动配置脚本：`scripts\configure_ccpad.ps1`
 - 只读探测脚本：`scripts\probe_linux_device.sh`
 - 环境要求：`references\device-requirements.md`

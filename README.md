@@ -5,7 +5,7 @@
 <h1 align="center">CC Pad</h1>
 
 <p align="center">
-  A multi-session Claude Code workbench — run multiple Claude Code sessions in one window.
+  A multi-session AI CLI workbench — run Claude Code, Codex, and remote Codex sessions in one window.
 </p>
 
 <p align="center">
@@ -18,21 +18,33 @@
 
 ---
 
+> Current release: **v1.10.10**
+>
+> Unreleased on `master`: Codex quota indicator.
+
 ## Features
 
 - **Split Panes** — Vertical and horizontal splits with draggable dividers. Navigate between panes with `Alt+Arrow` keys.
 - **Tabs** — Multiple tabs per pane, reorderable, with tab prewarming for instant creation.
+- **Tab tags and sizing** *(fork)* — Give tabs a persistent label, resize the shared tab strip vertically, or drag an individual tab's right edge to set its width.
 - **Workspaces** — Save and restore your entire layout (splits, tabs, working directories, window state) as `.ccpad-workspace` files. Auto-detects workspace files on startup.
+- **Frozen tabs and templates** *(fork)* — Freeze idle tabs to release resources, thaw them on demand, drag live tabs between panes, and save or restore complete window layouts as `.ccpad-template` files.
+- **Resource guard** *(fork)* — Tracks physical memory and system commit pressure and shows a non-modal warning when freezing idle tabs would help.
+- **Codex quota display** *(unreleased; fork)* — The lower-left indicator shows the signed-in Codex plan, session/weekly usage, reset countdowns, and reset credits; it refreshes when opened and every five minutes.
 - **Project Quick-Access** — Pin frequently-used directories for one-click new tabs.
 - **Windows ConPTY** — Native pseudo-console integration. Runs any CLI tool — PowerShell, cmd, bash, python, node, git, etc.
 - **xterm.js Rendering** — Full terminal emulation via xterm.js hosted in WebView2, with Cascadia Code font.
 - **Mica Backdrop** — Native Windows 11 translucent material.
 - **Web Remote Terminal** — Built-in HTTP/WebSocket server lets you view and control any session from a browser on the same LAN. Optional token authentication. Touch-friendly UI with on-screen keys for mobile devices.
 - **Context Menu Integration** — Right-click any folder in Explorer to open it in CC Pad.
-- **File Association** — Double-click `.ccpad-workspace` files to open them directly.
-- **Three CLI modes (Claude + Codex + Codex@167)** *(fork)* — Run local Claude, local Codex, and Codex attached through SSH to a named tmux session. Pick any mode as the default or use it for a pinned project.
+- **File Association** — Double-click `.ccpad-workspace` or `.ccpad-template` files to open them directly.
+- **Local and remote CLI modes** *(fork)* — Run local Claude, local Codex, and remote Codex sessions through SSH and tmux. Pick a default mode or use it for a pinned project.
+- **Multi-device remote Codex** *(fork)* — Manage multiple Linux SSH devices and external projects. Each remote tab uses its own `ccpad-*` tmux session, and stale detached sessions are cleaned up automatically.
 - **Tab Status Lights** *(fork)* — Each local CLI tab shows a colored dot at a glance: **green** = the AI is working, **amber** = it's waiting for your input, **red** = the CLI has exited. Claude uses official hooks and local Codex uses its `notify` config. Codex@167 v1 has no remote-to-local hook bridge, so only its red SSH-exit state is authoritative.
+- **Last-command bar** *(fork)* — Show the most recently submitted command at the top of every terminal; click it to copy the full command or press `Alt+L` to toggle it.
 - **Background "Your Turn" Notifications** *(fork)* — When a session in a background tab starts waiting for you, CC Pad pops a Windows toast; click it to jump straight to that tab. Toggle it from the About menu.
+- **Auto-reply** *(fork)* — Configure trigger phrases that send a response automatically, with typing protection, cooldowns, retry caps, and cross-window preference sync.
+- **Auto-Enter** *(fork)* — Optionally press Enter automatically when the CLI shows a confirmation prompt.
 - **Multi-Language UI** *(fork)* — Switch the interface language live (no restart) between **English, 简体中文, 繁體中文, Deutsch, 日本語, Français, 한국어, Español, Italiano**. First run follows your Windows display language. Covers the app UI, the Explorer right-click labels, and the remote web page.
 - **One-Key Conversation Resume** *(fork)* — After Claude exits, press **↑** at the prompt to pre-fill the exact `claude --resume <id>` command (reviewed before you hit Enter), and the tab's red dot flips back to amber once the conversation is restored.
 - **Session Recovery** *(fork)* — Chrome-style crash recovery (on by default): after an unexpected exit, restore your tabs and working directories.
@@ -83,6 +95,10 @@ dotnet publish CCPad/CCPad.csproj -c Release -r win-x64
 
 Supported targets: `win-x64`, `win-x86`, `win-arm64`.
 
+### Updates
+
+CC Pad checks the fork's GitHub Releases API a few seconds after startup. When a newer release is found, the update button appears in the lower-right toolbar; the About menu also has **Check for updates**. The updater downloads the installer matching the current architecture when one is available, then exits and launches it. The release workflow currently publishes the installer and portable ZIP for **x64**; x86 and ARM64 are supported for source builds but do not currently have published release assets.
+
 ## Usage
 
 ### Launch
@@ -96,9 +112,19 @@ CCPad.exe "C:\Projects\my-app"
 
 # Open a workspace file
 CCPad.exe my-project.ccpad-workspace
+
+# Open a frozen template in a separate window
+CCPad.exe my-layout.ccpad-template
 ```
 
 When launched without arguments, CC Pad auto-detects `.ccpad-workspace` files in the current directory and enters workspace mode.
+
+To run a development or demo instance without sharing the production profile, set `CCPAD_DATA_DIR` before launching. The override moves preferences, projects, recovery snapshots, templates, hooks, logs, and lock files under that directory:
+
+```powershell
+$env:CCPAD_DATA_DIR = "$PWD\.ccpad-demo-data"
+.\CCPad.exe
+```
 
 ### Keyboard Shortcuts
 
@@ -128,6 +154,7 @@ When launched without arguments, CC Pad auto-detects `.ccpad-workspace` files in
 | Copy selection | `Ctrl+C` *(passes through to the CLI when nothing is selected)* |
 | Clear the current input line | `Alt+A` |
 | Select the whole screen (to copy) | `Alt+Shift+A` |
+| Toggle the last-command bar | `Alt+L` |
 
 **Command staging** *(fork)*
 
@@ -153,16 +180,17 @@ Right-click the terminal or a tab header for additional options.
 Access your terminal sessions from any browser on the same network:
 
 1. Click the remote terminal button in the toolbar
-2. Select your LAN address and optionally enable token authentication
-3. Open the displayed URL on another device (phone, tablet, another PC)
-4. Select a session from the sidebar to view and control it in real-time
+2. Select your LAN address, choose a port (default `9220`), and decide whether to auto-increment when that port is busy
+3. Optionally enable token authentication
+4. Open the displayed URL on another device (phone, tablet, another PC)
+5. Select a session from the sidebar to view and control it in real-time
 
 Features:
 - **Live mirroring** — See exactly what's on the desktop terminal
 - **Full keyboard input** — Type commands remotely
 - **Touch controls** — On-screen arrow keys, backspace, and enter for mobile devices
 - **Session replay** — Recent terminal output is buffered for instant display when connecting
-- **Secure** — Optional 16-byte token authentication
+- **Security** — Optional 16-byte token authentication. Without a token, anyone who can reach the listening address can control the listed sessions.
 
 ### Workspaces
 
@@ -172,7 +200,20 @@ Workspaces save your complete layout as a JSON file:
 - **Tab states** — Name and working directory for each tab
 - **Window state** — Size, position, and maximized state
 
-Use the workspace button (top-right, visible in workspace mode) or the context menu to save/load workspaces. The default filename is the current directory name.
+Use the workspace button (top-right, visible in workspace mode) or the context menu to save/load workspaces. The default filename is the current directory name. The same menu manages the frozen-template library: save a new `.ccpad-template`, open one in a new window or restore it into the current window, and import/export template files.
+
+### Session and resource controls
+
+- The **Freeze** toolbar menu can freeze idle tabs, freeze all tabs, or thaw every frozen tab. Freezing releases the tab's CLI and WebView2 resources and leaves a click-to-thaw placeholder; remote sessions detach and can be reattached later. Optional auto-freeze is off by default and can be set to 30 minutes, 1 hour, 2 hours, or 4 hours of CLI idle time.
+- **About → Restore closed session** keeps up to 12 recent layouts. Restoring replaces the current window after first archiving it, so the operation can be undone from the same menu. Session recovery can be disabled there, and **Clear recovery data** removes the saved snapshots and history.
+- Right-click a tab to set or clear a user tag. Tags, custom tab widths, remote device IDs, and frozen state are included in workspaces, templates, and recovery snapshots.
+
+### Safety and preferences
+
+- **Auto-Enter** and **Auto-reply** are separate toolbar controls. Auto-Enter presses Enter when a confirmation prompt is detected. Auto-reply matches configured phrases in pane output; left-click toggles it and right-click edits rules. Rules have a 30-second per-phrase cooldown and a retry cap.
+- **Codex quota display** reads the local `%CODEX_HOME%\auth.json` file (or `%USERPROFILE%\.codex\auth.json`) and requests usage over HTTPS. The access token is kept in memory for the request and is not written to CC Pad logs; if Codex is not signed in, the indicator remains unavailable.
+- **About → Bypass permission prompts** controls newly launched local Claude tabs and is enabled by default in this fork (`--permission-mode bypassPermissions`). Turn it off when you want Claude's normal approval prompts. Existing sessions keep their original launch mode.
+- **About → Confirm before closing** controls the close dialog and its restore-on-next-launch choice.
 
 ### Projects
 
@@ -184,11 +225,13 @@ After a device is ready, add an external project, bind it to that device, and en
 
 **New remote Codex tab** and **Recover remote Codex conversation** use the selected device's default directory. Each tab owns a private `ccpad-*` tmux session. Explicit close ends it; freeze, pane migration, recoverable window close, and SSH loss only detach it, with the remote sweeper handling stale detached sessions.
 
-The built-in `codex-167` device starts new sessions with `codex --yolo`, bypassing approvals and sandboxing; the resume picker inherits the same permission flag. Existing tmux processes keep their original launch arguments until closed and reopened.
+The built-in `codex-167` device starts new sessions with `codex --yolo`, bypassing approvals and sandboxing; the resume picker inherits the same permission flag. Legacy `codex` and `-s/--sandbox danger-full-access` forms are normalized to `codex --yolo` when the device profile is read. Existing tmux processes keep their original launch arguments until closed and reopened.
+
+In a remote Codex pane, text paste works normally. Pasting an image with `Ctrl+V` or `Alt+V` uploads it to the device under `/tmp/ccpad-images` and pastes the remote path into the CLI, so the SSH account needs write access there.
 
 ### AI-assisted onboarding
 
-The repository skill at `.agents/skills/ccpad-onboard-linux-device` supports two routes. Given an IP/SSH target, an AI can probe and prepare the Linux requirements and write the CC Pad device/project configuration directly, or return the exact readiness checks and fields for semi-manual UI entry. The skill never stores passwords, private-key contents, OpenAI keys, or Codex login credentials.
+The **External** menu can copy an onboarding prompt for an AI. The development workspace also has an optional `ccpad-onboard-linux-device` skill, but that skill is maintained outside this Git repository and is not included in release packages. It can probe Linux requirements and either write the CC Pad device/project configuration or return the exact checks and fields for semi-manual UI entry. It never stores passwords, private-key contents, OpenAI keys, or Codex login credentials.
 
 ## Architecture
 
@@ -211,6 +254,8 @@ CCPad/
 │   └── WebTerminalHtml.cs   # Embedded web UI with xterm.js
 ├── Notify/
 │   └── ToastService.cs      # Background "your turn" Windows toasts        [fork]
+├── CodexQuota/
+│   └── CodexQuotaService.cs # Local Codex auth + usage endpoint             [fork]
 ├── Localization/
 │   └── Loc.cs               # 9-language string table + live switching     [fork]
 ├── Files/
@@ -222,9 +267,16 @@ CCPad/
 │   ├── ProjectConfig.cs     # Project list persistence
 │   ├── AppConfig.cs         # App prefs (default CLI, language, toggles)  [fork]
 │   ├── CliMode.cs           # Claude/Codex resolution + cmd /c wrapping   [fork]
+│   ├── CliSessions.cs        # Conversation/session ID discovery           [fork]
+│   ├── FrozenTemplateStore.cs # .ccpad-template library                   [fork]
+│   ├── ResourceGuard.cs      # Physical memory + system commit warnings    [fork]
 │   ├── AppPaths.cs          # Data-root resolver (CCPAD_DATA_DIR override) [fork]
 │   ├── ThemeManager.cs      # Dark/Light/System theme state + events      [fork]
-│   └── SessionRecovery.cs   # Crash-recovery snapshots                    [fork]
+│   ├── SessionRecovery.cs   # Crash-recovery snapshots + closed history    [fork]
+│   ├── RemoteDeviceConfig.cs # SSH device definitions + migration          [fork]
+│   ├── RemoteDeviceConnection.cs # SSH readiness checks                    [fork]
+│   ├── RemoteProjectConfig.cs # External project persistence               [fork]
+│   └── RemoteSessions.cs    # Per-tab tmux sessions + stale sweeper        [fork]
 └── Assets/
     └── xterm/               # xterm.js terminal emulator
 ```
@@ -241,6 +293,30 @@ CCPad/
 ## Fork Changes
 
 This is a community fork of [nuomiaa/CCPad](https://github.com/nuomiaa/CCPad) (based on upstream **v1.0.2**). Changes made in this fork:
+
+### Unreleased
+
+- **Codex quota display** — Show the signed-in account's plan, session/weekly usage, reset times, and reset credits in the lower-left toolbar indicator.
+
+### v1.10.10
+
+- **Multi-device remote Codex** — Add, edit, test, and select multiple Linux SSH devices and external projects. Each remote tab gets its own `ccpad-*` tmux session; stale detached sessions are cleaned up automatically. The legacy Codex@167 profile migrates to the built-in `codex-167` device and launches new sessions with `codex --yolo`.
+- **Remote project persistence** — External device IDs and Linux project directories survive workspaces, tab freezing, and crash recovery. Remote Codex tabs can create new sessions or recover existing conversations.
+- **Auto-reply and status recovery** — Triggered replies have cooldowns, retry limits, and typing guards. Capacity stalls and incremental output update status lights without waiting for a stale hook signal.
+- **Tab and staging quality of life** — Drag the right edge of a tab to resize it (72–640 px), double-click to reset, and drag staged commands to reorder them. Widths and other tab settings persist.
+- **Localization and onboarding** — Remote-device flows and the AI onboarding copy are localized across the supported UI languages; the optional device-preparation skill remains an external workspace tool.
+
+### v1.9.0 (milestone commit; no tag)
+
+- **Frozen-template library** — Save, restore, overwrite, rename, import, and export complete window layouts as `.ccpad-template` files from the workspace menu.
+- **Commit-aware resource warnings** — Memory-pressure warnings now track system commit charge as well as physical RAM and suggest freezing idle tabs.
+- **Localization sweep** — Bottom toolbar controls, the file manager, terminal error overlays, and in-page staging UI now follow the selected language.
+
+### v1.8.0 (milestone commit; no tag)
+
+- **Session recovery rework** — Per-process snapshots, closed-session history, stronger session attribution, and clear notices for missing or fast-exiting sessions.
+- **Freeze/thaw lifecycle** — Click-to-thaw placeholders, optional automatic freezing, warm-renderer reuse, and safe recovery when thawing fails.
+- **Cross-panel tab drag** — Move live tabs between split panes without closing their sessions; cold thaw can start the CLI in parallel with renderer setup.
 
 ### v1.4.0
 

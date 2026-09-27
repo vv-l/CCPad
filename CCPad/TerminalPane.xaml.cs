@@ -534,6 +534,7 @@ namespace CCPad
             WebView.DefaultBackgroundColor = Windows.UI.Color.FromArgb(255, 12, 12, 12);
             CCPad.Settings.ThemeManager.EffectiveChanged += OnThemeEffectiveChanged;
             CCPad.Settings.LastCmdBarManager.Changed += OnLastCmdBarChanged;
+            Localization.Loc.LanguageChanged += OnLanguageChanged;
             // Stale-green watchdog. Always ticking (created once here so no
             // create/dispose race with SetStatus); the callback no-ops unless
             // the light is green. See the _workingWatchTimer field comment.
@@ -549,6 +550,40 @@ namespace CCPad
             if (_disposed) return;
             string json = $"{{\"type\":\"setLastCmdBar\",\"on\":{(on ? "true" : "false")}}}";
             DispatcherQueue.TryEnqueue(() => WebView.CoreWebView2?.PostWebMessageAsString(json));
+        }
+
+        // The terminal page has its own staging controls, so a language switch
+        // must update that page in place instead of waiting for a new WebView.
+        private void OnLanguageChanged() => SendPageLocale();
+
+        private void SendPageLocale()
+        {
+            if (_disposed) return;
+            string json = JsonSerializer.Serialize(new
+            {
+                type = "locale",
+                lastCmdTitle = Localization.Loc.T("lastcmd_title"),
+                lastCmdLabel = Localization.Loc.T("lastcmd_lbl"),
+                lastCmdCopied = Localization.Loc.T("lastcmd_copied"),
+                stageStatusWaiting = Localization.Loc.T("stage_status_waiting"),
+                stageStatusWorking = Localization.Loc.T("stage_status_working"),
+                stageStatusDisconnected = Localization.Loc.T("stage_status_disc"),
+                stageBulkToggle = Localization.Loc.T("stage_bulk_toggle"),
+                stageQueued = Localization.Loc.T("stage_queued"),
+                stageEmpty = Localization.Loc.T("stage_empty"),
+                stageInputPlaceholder = Localization.Loc.T("stage_input_ph"),
+                stageBulkPlaceholder = Localization.Loc.T("stage_bulk_ph"),
+                stageBulkImport = Localization.Loc.T("stage_bulk_import"),
+                cancel = Localization.Loc.T("cancel"),
+                stageHint = Localization.Loc.T("stage_hint"),
+                editTip = Localization.Loc.T("js_edit_tip"),
+                dragTip = Localization.Loc.T("js_drag_tip"),
+                deleteTip = Localization.Loc.T("js_del_tip"),
+                noImage = Localization.Loc.T("js_no_image"),
+                uploadingImage = Localization.Loc.T("js_img_uploading")
+            });
+            DispatcherQueue.TryEnqueue(() =>
+                WebView.CoreWebView2?.PostWebMessageAsString(json));
         }
 
         private void SendTheme(bool dark)
@@ -1568,6 +1603,7 @@ namespace CCPad
                             _pendingOutput = null;
                         }
                         _readyTcs?.TrySetResult();
+                        SendPageLocale();
                         if (_sessionPending)
                         {
                             StartSession();
@@ -1827,6 +1863,7 @@ namespace CCPad
             _disposed = true;
             CCPad.Settings.ThemeManager.EffectiveChanged -= OnThemeEffectiveChanged;
             CCPad.Settings.LastCmdBarManager.Changed -= OnLastCmdBarChanged;
+            Localization.Loc.LanguageChanged -= OnLanguageChanged;
             _loadedTcs?.TrySetCanceled();
             _readyTcs?.TrySetCanceled();
             _autoConfirmTimer?.Dispose();
@@ -2269,6 +2306,7 @@ namespace CCPad
                 let lastCmdFull = '';
                 let shadowBuf = '';
                 const lastCmdBar = document.getElementById('lastcmd');
+                const lastCmdLabel = document.querySelector('#lastcmd .lbl');
                 const lastCmdText = document.getElementById('lastcmd-text');
                 const lastCmdTime = document.getElementById('lastcmd-time');
                 let lastCmdCopyTimer = null;
@@ -2336,7 +2374,7 @@ namespace CCPad
                   if (!lastCmdFull) return;
                   window.chrome.webview.postMessage(JSON.stringify({ type: 'copy', data: lastCmdFull }));
                   const prev = lastCmdTime.textContent;
-                  lastCmdTime.textContent = '已复制 ✓';
+                  lastCmdTime.textContent = pageLocale.lastCmdCopied;
                   if (lastCmdCopyTimer) clearTimeout(lastCmdCopyTimer);
                   lastCmdCopyTimer = setTimeout(() => { lastCmdTime.textContent = prev; }, 1200);
                 });
@@ -2358,10 +2396,32 @@ namespace CCPad
                 const stageDot = document.getElementById('stage-dot');
                 const stageStatus = document.getElementById('stage-status');
 
+                let pageLocale = {
+                  lastCmdTitle: '点击复制全文 · Alt+L 关闭',
+                  lastCmdLabel: '▸ 上一条',
+                  lastCmdCopied: '已复制 ✓',
+                  stageStatusWaiting: '等待中 · 空闲时发送',
+                  stageStatusWorking: '工作中 · 等待空闲',
+                  stageStatusDisconnected: '已断开 · 暂停发送',
+                  stageBulkToggle: '＋ 批量导入',
+                  stageQueued: '待发',
+                  stageEmpty: '队列为空 · 在下方输入并按 Enter',
+                  stageInputPlaceholder: '输入命令，Enter 寄存；Shift+Enter 换行',
+                  stageBulkPlaceholder: '每行一条命令，粘贴后导入',
+                  stageBulkImport: '导入',
+                  cancel: '取消',
+                  stageHint: '空闲时自动发送 · Enter 寄存 · ✎ 编辑 · ⠿ 排序 · Alt+V 图片 · Alt+` 退出',
+                  editTip: '编辑这条(双击文字也可)',
+                  dragTip: '按住拖动排序',
+                  deleteTip: '删除这条',
+                  noImage: '没有图片',
+                  uploadingImage: '正在上传图片…'
+                };
+
                 function statusLabel(s) {
-                  if (s === 'working') return '工作中 · 等它空闲';
-                  if (s === 'disconnected') return '已断开 · 暂停发送';
-                  return '等待中 · 进入等待自动发送';
+                  if (s === 'working') return pageLocale.stageStatusWorking;
+                  if (s === 'disconnected') return pageLocale.stageStatusDisconnected;
+                  return pageLocale.stageStatusWaiting;
                 }
                 function renderStatus() {
                   stageDot.className = 'dot' + (lastStatus === 'working' ? ' working'
@@ -2379,7 +2439,7 @@ namespace CCPad
                   queue.forEach((cmd, i) => {
                     const li = document.createElement('li');
                     const grip = document.createElement('span');
-                    grip.className = 'grip'; grip.textContent = '⠿'; grip.title = '按住拖动排序';
+                    grip.className = 'grip'; grip.textContent = '⠿'; grip.title = pageLocale.dragTip;
                     grip.addEventListener('pointerdown', e => beginDrag(e, li, i));
                     const idx = document.createElement('span');
                     idx.className = 'idx'; idx.textContent = (i + 1) + '.';
@@ -2387,16 +2447,16 @@ namespace CCPad
                     txt.className = 'txt'; txt.textContent = cmd.replace(/\n/g, ' ⏎ ');
                     txt.addEventListener('dblclick', () => beginEdit(i));
                     const edit = document.createElement('span');
-                    edit.className = 'edit'; edit.textContent = '✎'; edit.title = '编辑这条(双击文字也可)';
+                    edit.className = 'edit'; edit.textContent = '✎'; edit.title = pageLocale.editTip;
                     edit.addEventListener('click', () => beginEdit(i));
                     const del = document.createElement('span');
-                    del.className = 'del'; del.textContent = '✕'; del.title = '删除这条';
+                    del.className = 'del'; del.textContent = '✕'; del.title = pageLocale.deleteTip;
                     del.addEventListener('click', () => { queue.splice(i, 1); renderQueue(); });
                     li.appendChild(grip); li.appendChild(idx); li.appendChild(txt); li.appendChild(edit); li.appendChild(del);
                     stageList.appendChild(li);
                   });
                   stageEmpty.style.display = queue.length ? 'none' : 'block';
-                  stageCount.textContent = queue.length + ' 条待发';
+                  stageCount.textContent = queue.length + ' ' + pageLocale.stageQueued;
                 }
                 // Swap item i's text span for a textarea in place. Enter saves,
                 // Esc cancels, clicking away saves (blur). Saving an emptied box
@@ -2522,8 +2582,23 @@ namespace CCPad
                 }
                 // Briefly replace the hint line with a transient message (e.g. paste errors).
                 const stageHint = document.getElementById('stage-hint');
-                const stageHintDefault = stageHint.textContent;
+                let stageHintDefault = stageHint.textContent;
                 let hintTimer = null;
+                function applyLocale(next) {
+                  pageLocale = Object.assign(pageLocale, next || {});
+                  lastCmdBar.title = pageLocale.lastCmdTitle;
+                  if (lastCmdLabel) lastCmdLabel.textContent = pageLocale.lastCmdLabel;
+                  stageEmpty.textContent = pageLocale.stageEmpty;
+                  stageInput.placeholder = pageLocale.stageInputPlaceholder;
+                  bulkInput.placeholder = pageLocale.stageBulkPlaceholder;
+                  bulkToggle.textContent = pageLocale.stageBulkToggle;
+                  bulkImport.textContent = pageLocale.stageBulkImport;
+                  bulkCancel.textContent = pageLocale.cancel;
+                  stageHintDefault = pageLocale.stageHint;
+                  if (!hintTimer) stageHint.textContent = stageHintDefault;
+                  renderQueue();
+                  renderStatus();
+                }
                 function flashHint(text) {
                   stageHint.textContent = text;
                   stageHint.style.color = '#e07a5f';
@@ -2842,17 +2917,19 @@ namespace CCPad
                   } else if (msg.type === 'stageImagePasted') {
                     hidePasteToast();
                     if (msg.path) insertAtCursor(stageInput, msg.path);
-                    else flashHint(msg.error || '没有图片');
+                    else flashHint(msg.error || pageLocale.noImage);
+                  } else if (msg.type === 'locale') {
+                    applyLocale(msg);
                   } else if (msg.type === 'setRemotePaste') {
                     remotePasteOn = !!msg.on;
                   } else if (msg.type === 'imgUploading') {
                     // Long safety auto-hide in case the host reply never arrives.
-                    showPasteToast('正在上传图片…', false, 45000);
+                    showPasteToast(pageLocale.uploadingImage, false, 45000);
                   } else if (msg.type === 'termPasted') {
                     hidePasteToast();
                     if (msg.path) { term.paste(msg.path + ' '); term.focus(); }
                     else if (typeof msg.text === 'string') { if (msg.text) term.paste(msg.text); }
-                    else showPasteToast(msg.error || '没有图片', true, 2600);
+                    else showPasteToast(msg.error || pageLocale.noImage, true, 2600);
                   } else if (msg.type === 'theme') {
                     applyCcTheme(!!msg.dark);
                   }

@@ -73,6 +73,14 @@ namespace CCPad
             ForEachPanel(_root, p => p.UpdateProjects(projects));
         }
 
+        /// <summary>Broadcast a live language switch to every pane, including
+        /// panels that were temporarily detached while a split was rebuilt.</summary>
+        public void RefreshLocalizedUi()
+        {
+            if (_root != null)
+                ForEachPanel(_root, p => p.RefreshLocalizedUi());
+        }
+
         // ── Split / Close / Navigate ────────────────────────────────────
 
         public async Task SplitPanel(TabPanel source, SplitOrientation orientation)

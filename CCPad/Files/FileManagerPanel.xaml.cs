@@ -40,15 +40,37 @@ namespace CCPad
         private readonly ObservableCollection<FileEntry> _items = new();
         private List<FileEntry> _all = new();   // unfiltered entries of the current dir
         private FileEntry? _ctx;                 // right-clicked entry for the context menu
+        private bool _locSubscriptionAttached;
 
         public FileManagerPanel()
         {
             InitializeComponent();
             EntryList.ItemsSource = _items;
             ApplyLoc();
-            Localization.Loc.LanguageChanged += ApplyLoc;
-            Unloaded += (_, _) => Localization.Loc.LanguageChanged -= ApplyLoc;
+            AttachLocSubscription();
+            Loaded += OnPanelLoaded;
+            Unloaded += OnPanelUnloaded;
         }
+
+        // The panel can be detached and reattached when the host layout changes.
+        // Keep the language subscription alive across that visual-tree cycle.
+        private void AttachLocSubscription()
+        {
+            if (_locSubscriptionAttached) return;
+            Localization.Loc.LanguageChanged += ApplyLoc;
+            _locSubscriptionAttached = true;
+        }
+
+        private void DetachLocSubscription()
+        {
+            if (!_locSubscriptionAttached) return;
+            Localization.Loc.LanguageChanged -= ApplyLoc;
+            _locSubscriptionAttached = false;
+        }
+
+        private void OnPanelLoaded(object sender, RoutedEventArgs e) => AttachLocSubscription();
+
+        private void OnPanelUnloaded(object sender, RoutedEventArgs e) => DetachLocSubscription();
 
         /// <summary>Localized chrome (tooltips/placeholder); rebuilt on language switch.</summary>
         private void ApplyLoc()

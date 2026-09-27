@@ -554,7 +554,18 @@ namespace CCPad
 
         // The terminal page has its own staging controls, so a language switch
         // must update that page in place instead of waiting for a new WebView.
-        private void OnLanguageChanged() => SendPageLocale();
+        private void OnLanguageChanged()
+        {
+            ApplyErrorOverlayLocale();
+            SendPageLocale();
+        }
+
+        private void ApplyErrorOverlayLocale()
+        {
+            if (_disposed) return;
+            ErrorTitle.Text = Localization.Loc.T("pane_error_title");
+            RetryButton.Content = Localization.Loc.T("retry");
+        }
 
         private void SendPageLocale()
         {

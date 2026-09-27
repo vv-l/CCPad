@@ -1551,6 +1551,7 @@ namespace CCPad
                 UpdateRemoteMenuItem(_webServer?.IsRunning == true);
                 RefreshWorkspaceFlyout();
                 ApplyLocalizedChrome();
+                _splitHost?.RefreshLocalizedUi();
                 App.ReRegisterContextMenu();
                 ScheduleTopRightAdjust();
             }

@@ -28,6 +28,7 @@ namespace CCPad
         private int _prewarmVersion;
         private bool _allowFrozenPrewarm = true;
         private bool _disposed;
+        private bool _globalSubscriptionsAttached;
 
         public string? DefaultWorkingDir => _defaultWorkingDir;
 
@@ -76,26 +77,56 @@ namespace CCPad
             Tabs.PointerExited += OnTabWidthPointerExited;
 
             ApplyTabHeight(TabHeightManager.Height);
+            AttachGlobalSubscriptions();
+            Loaded += OnPanelLoaded;
+            Unloaded += OnPanelUnloaded;
+        }
+
+        // SplitHost temporarily removes panels from the visual tree every time
+        // the split layout is rebuilt. Unloaded therefore does not mean that a
+        // panel is being destroyed; it must subscribe again when reattached,
+        // otherwise it stops receiving live language changes.
+        private void AttachGlobalSubscriptions()
+        {
+            if (_disposed || _globalSubscriptionsAttached) return;
             TabHeightManager.Changed += OnSharedTabHeightChanged;
             Loc.LanguageChanged += OnLanguageChanged;
             RemoteProjectConfig.Changed += OnRemoteProjectsChanged;
             RemoteDeviceConfig.Changed += OnRemoteDevicesChanged;
-            Unloaded += (_, _) =>
-            {
-                TabHeightManager.Changed -= OnSharedTabHeightChanged;
-                Loc.LanguageChanged -= OnLanguageChanged;
-                RemoteProjectConfig.Changed -= OnRemoteProjectsChanged;
-                RemoteDeviceConfig.Changed -= OnRemoteDevicesChanged;
-            };
+            _globalSubscriptionsAttached = true;
         }
+
+        private void DetachGlobalSubscriptions()
+        {
+            if (!_globalSubscriptionsAttached) return;
+            TabHeightManager.Changed -= OnSharedTabHeightChanged;
+            Loc.LanguageChanged -= OnLanguageChanged;
+            RemoteProjectConfig.Changed -= OnRemoteProjectsChanged;
+            RemoteDeviceConfig.Changed -= OnRemoteDevicesChanged;
+            _globalSubscriptionsAttached = false;
+        }
+
+        private void OnPanelLoaded(object sender, RoutedEventArgs e) => AttachGlobalSubscriptions();
+
+        private void OnPanelUnloaded(object sender, RoutedEventArgs e) => DetachGlobalSubscriptions();
 
         private void OnLanguageChanged()
         {
+            if (_disposed) return;
             try
             {
                 RefreshProjectFlyout();
                 RefreshExternalProjectFlyout();
                 ApplyLocalizedChrome();
+                foreach (var item in Tabs.TabItems.OfType<TabViewItem>())
+                {
+                    if (CtxOf(item) is not TabCtx ctx) continue;
+                    ApplyLocalizedTabContextMenu(ctx);
+                    if (ctx.FrozenHint != null)
+                        ctx.FrozenHint.Text = Loc.T(ctx.FrozenHintKey);
+                    if (ctx.FrozenTitle != null)
+                        ctx.FrozenTitle.Text = Loc.T("frozen_title");
+                }
             }
             catch { }
         }
@@ -440,6 +471,22 @@ namespace CCPad
             }
         }
 
+        /// <summary>Refresh every localized element owned by this panel.</summary>
+        public void RefreshLocalizedUi() => OnLanguageChanged();
+
+        private static void ApplyLocalizedTabContextMenu(TabCtx ctx)
+        {
+            if (ctx.SetTagItem != null) ctx.SetTagItem.Text = Loc.T("tab_tag_set");
+            if (ctx.FreezeItem != null) ctx.FreezeItem.Text = Loc.T("tab_freeze");
+            if (ctx.UnfreezeItem != null) ctx.UnfreezeItem.Text = Loc.T("tab_unfreeze");
+            if (ctx.SplitRightItem != null) ctx.SplitRightItem.Text = Loc.T("tab_split_right");
+            if (ctx.SplitDownItem != null) ctx.SplitDownItem.Text = Loc.T("tab_split_down");
+            if (ctx.CloseItem != null) ctx.CloseItem.Text = Loc.T("tab_close");
+            if (ctx.CloseOthersItem != null) ctx.CloseOthersItem.Text = Loc.T("tab_close_others");
+            if (ctx.CloseLeftItem != null) ctx.CloseLeftItem.Text = Loc.T("tab_close_left");
+            if (ctx.CloseRightItem != null) ctx.CloseRightItem.Text = Loc.T("tab_close_right");
+        }
+
         // ── Tab management ──────────────────────────────────────────────
 
         private async Task AddNewTab(string? projectName = null, string? workingDir = null,
@@ -768,8 +815,17 @@ namespace CCPad
             public Border TagBadge = null!;
             public TextBlock TagText = null!;
             public TextBlock? FrozenHint;       // placeholder status line, set while frozen
+            public string FrozenHintKey = "frozen_hint";
+            public TextBlock? FrozenTitle;
+            public MenuFlyoutItem? SetTagItem;
             public MenuFlyoutItem FreezeItem = null!;
             public MenuFlyoutItem UnfreezeItem = null!;
+            public MenuFlyoutItem? SplitRightItem;
+            public MenuFlyoutItem? SplitDownItem;
+            public MenuFlyoutItem? CloseItem;
+            public MenuFlyoutItem? CloseOthersItem;
+            public MenuFlyoutItem? CloseLeftItem;
+            public MenuFlyoutItem? CloseRightItem;
         }
 
         private static TabCtx? CtxOf(TabViewItem item) => item.Tag as TabCtx;
@@ -871,6 +927,7 @@ namespace CCPad
                 Text = Loc.T("tab_tag_set"),
                 Icon = new FontIcon { Glyph = "" }
             };
+            tabCtx.SetTagItem = setTag;
             setTag.Click += async (_, _) => await EditTagAsync(tabCtx);
 
             var freezeTab = new MenuFlyoutItem
@@ -878,16 +935,16 @@ namespace CCPad
                 Text = Loc.T("tab_freeze"),
                 Icon = new FontIcon { Glyph = "" }
             };
-            freezeTab.Click += async (_, _) => await FreezeTabAsync(item, confirmIfWorking: true);
             tabCtx.FreezeItem = freezeTab;
+            freezeTab.Click += async (_, _) => await FreezeTabAsync(item, confirmIfWorking: true);
 
             var unfreezeTab = new MenuFlyoutItem
             {
                 Text = Loc.T("tab_unfreeze"),
                 Icon = new FontIcon { Glyph = "" }
             };
-            unfreezeTab.Click += async (_, _) => await UnfreezeTabAsync(item);
             tabCtx.UnfreezeItem = unfreezeTab;
+            unfreezeTab.Click += async (_, _) => await UnfreezeTabAsync(item);
 
             var splitRight = new MenuFlyoutItem
             {
@@ -895,6 +952,7 @@ namespace CCPad
                 Icon = new FontIcon { Glyph = "\uEA61" },
                 KeyboardAcceleratorTextOverride = "Alt+Shift+="
             };
+            tabCtx.SplitRightItem = splitRight;
             splitRight.Click += (_, _) => SplitRequested?.Invoke(this, SplitOrientation.Vertical);
 
             var splitDown = new MenuFlyoutItem
@@ -903,6 +961,7 @@ namespace CCPad
                 Icon = new FontIcon { Glyph = "\uE745" },
                 KeyboardAcceleratorTextOverride = "Alt+Shift+-"
             };
+            tabCtx.SplitDownItem = splitDown;
             splitDown.Click += (_, _) => SplitRequested?.Invoke(this, SplitOrientation.Horizontal);
 
             var closeTab = new MenuFlyoutItem
@@ -911,6 +970,7 @@ namespace CCPad
                 Icon = new FontIcon { Glyph = "\uE711" },
                 KeyboardAcceleratorTextOverride = "Ctrl+W"
             };
+            tabCtx.CloseItem = closeTab;
             closeTab.Click += (_, _) => CloseTab(item);
 
             var closeOthers = new MenuFlyoutItem
@@ -919,6 +979,7 @@ namespace CCPad
                 Icon = new FontIcon { Glyph = "\uE89B" },
                 KeyboardAcceleratorTextOverride = "Ctrl+Shift+W"
             };
+            tabCtx.CloseOthersItem = closeOthers;
             closeOthers.Click += (_, _) => CloseOtherTabs(item);
 
             var closeLeft = new MenuFlyoutItem
@@ -926,6 +987,7 @@ namespace CCPad
                 Text = Loc.T("tab_close_left"),
                 Icon = new FontIcon { Glyph = "\uE746" }
             };
+            tabCtx.CloseLeftItem = closeLeft;
             closeLeft.Click += (_, _) => CloseTabsToSide(item, left: true);
 
             var closeRight = new MenuFlyoutItem
@@ -933,6 +995,7 @@ namespace CCPad
                 Text = Loc.T("tab_close_right"),
                 Icon = new FontIcon { Glyph = "\uEA61" }
             };
+            tabCtx.CloseRightItem = closeRight;
             closeRight.Click += (_, _) => CloseTabsToSide(item, left: false);
 
             ctx.Items.Add(setTag);
@@ -980,6 +1043,8 @@ namespace CCPad
             ctx.Pane = pane;
             ctx.FrozenState = null;
             ctx.FrozenHint = null;
+            ctx.FrozenHintKey = "frozen_hint";
+            ctx.FrozenTitle = null;
             ctx.FrozenShot = null;
             pane.Label = HeaderFor(ctx.HeaderBase, ctx.Mode);
             pane.TabTag = ctx.TagValue;
@@ -1308,7 +1373,11 @@ namespace CCPad
 
             var shot = ctx.FrozenShot;
             ctx.Busy = true;
-            if (ctx.FrozenHint != null) ctx.FrozenHint.Text = Loc.T("frozen_restoring");
+            if (ctx.FrozenHint != null)
+            {
+                ctx.FrozenHintKey = "frozen_restoring";
+                ctx.FrozenHint.Text = Loc.T(ctx.FrozenHintKey);
+            }
             TerminalPane? acquired = null;
             var watch = System.Diagnostics.Stopwatch.StartNew();
             try
@@ -1414,7 +1483,10 @@ namespace CCPad
                 SetTabVisual(ctx, BuildFrozenPlaceholder(item, ctx, state, shot));
                 ctx.Dot.Fill = FrozenBrush;
                 if (ctx.FrozenHint != null)
-                    ctx.FrozenHint.Text = Loc.T("frozen_thaw_failed");
+                {
+                    ctx.FrozenHintKey = "frozen_thaw_failed";
+                    ctx.FrozenHint.Text = Loc.T(ctx.FrozenHintKey);
+                }
             }
             finally { ctx.Busy = false; }
         }
@@ -1449,6 +1521,7 @@ namespace CCPad
                 HorizontalAlignment = HorizontalAlignment.Center
             };
             ctx.FrozenHint = hint;
+            ctx.FrozenHintKey = "frozen_hint";
 
             var overlay = new StackPanel
             {
@@ -1463,14 +1536,16 @@ namespace CCPad
                 Foreground = FrozenBrush,
                 HorizontalAlignment = HorizontalAlignment.Center
             });
-            overlay.Children.Add(new TextBlock
+            var title = new TextBlock
             {
                 Text = Loc.T("frozen_title"),
                 FontSize = 16,
                 FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
                 Foreground = FrozenTextBrush,
                 HorizontalAlignment = HorizontalAlignment.Center
-            });
+            };
+            ctx.FrozenTitle = title;
+            overlay.Children.Add(title);
             overlay.Children.Add(hint);
             string shownDir = !string.IsNullOrEmpty(state.RemoteWorkingDir)
                 ? state.RemoteWorkingDir
@@ -2642,6 +2717,9 @@ namespace CCPad
         {
             if (_disposed) return;
             _disposed = true;
+            Loaded -= OnPanelLoaded;
+            Unloaded -= OnPanelUnloaded;
+            DetachGlobalSubscriptions();
             ReleaseFrozenPrewarm();
             _prewarmVersion++;
             _prewarmedPane?.Dispose();

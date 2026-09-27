@@ -1471,12 +1471,10 @@ namespace CCPad
             if (string.Equals(CliMode, Settings.CliMode.Codex, StringComparison.OrdinalIgnoreCase))
             {
                 string notify = CliNotify.PrepareCodexNotify(PaneId);
-                string target = Guid.TryParse(SessionId, out _)
-                    ? " " + SessionId
-                    : "";
-                _resumeCommand = "codex resume" + target +
-                    " --no-daemon --dangerously-bypass-approvals-and-sandbox" +
-                    (notify.Length > 0 ? " " + notify : "");
+                string? target = Guid.TryParse(SessionId, out _)
+                    ? SessionId
+                    : null;
+                _resumeCommand = Settings.CliMode.BuildCodexResumeShellCommand(target, notify);
                 return head +
                     "\x1b[36mResume a Codex conversation:\x1b[0m \x1b[33m" +
                     _resumeCommand + "\x1b[0m" +

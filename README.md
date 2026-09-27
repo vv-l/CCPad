@@ -18,7 +18,7 @@
 
 ---
 
-> Current release: **v1.10.12**
+> Current release: **v1.10.13**
 >
 > Unreleased on `master`: Codex quota indicator.
 
@@ -31,6 +31,7 @@
 - **Frozen tabs and templates** *(fork)* — Freeze idle tabs to release resources, thaw them on demand, drag live tabs between panes, and save or restore complete window layouts as `.ccpad-template` files.
 - **Resource guard** *(fork)* — Tracks physical memory and system commit pressure and shows a non-modal warning when freezing idle tabs would help.
 - **Codex quota display** *(unreleased; fork)* — The lower-left indicator shows the signed-in Codex plan, session/weekly usage, reset countdowns, and reset credits; it refreshes when opened and every five minutes.
+- **Codex full-access setting** *(fork)* — The About menu can keep local Codex in dangerous/full-access mode by default, or turn it off for normal approval and sandbox prompts. New, resume, picker, fork, and post-exit recovery commands use the same setting.
 - **Project Quick-Access** — Pin frequently-used directories for one-click new tabs.
 - **Windows ConPTY** — Native pseudo-console integration. Runs any CLI tool — PowerShell, cmd, bash, python, node, git, etc.
 - **xterm.js Rendering** — Full terminal emulation via xterm.js hosted in WebView2, with Cascadia Code font.
@@ -311,6 +312,10 @@ This is a community fork of [nuomiaa/CCPad](https://github.com/nuomiaa/CCPad) (b
 - **Exact resume after exit** — Codex and Claude keep the detected session ID after exit, show a runnable resume command, and let **↑** put it back into the shell input line.
 - **Multi-process layout recovery** — When several CC Pad windows start together, each process consumes only its own recovery snapshot instead of clearing layouts still waiting for another window.
 - **CLI launch from elevated hosts** — When CC Pad is started from an administrator terminal, child CLIs use a standard-user token so a Codex daemon cannot inherit administrator privileges.
+
+### v1.10.13
+
+- **Configurable Codex dangerous mode** — Add an About-menu toggle for local Codex full-access mode. It defaults on for compatibility, applies consistently to new/resume/picker/fork and post-exit recovery commands, and keeps `--no-daemon` enabled so an elevated host cannot pass administrator privileges to the Codex daemon.
 
 ### v1.10.12
 

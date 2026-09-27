@@ -254,6 +254,7 @@ namespace CCPad.Localization
             ["theme_light"] = new[] { "浅色", "Light", "淺色", "Hell", "ライト", "Clair", "밝은 테마", "Claro", "Chiaro" },
             ["theme_system"] = new[] { "跟随系统", "Follow system", "跟隨系統", "System folgen", "システムに従う", "Suivre le système", "시스템 설정 따르기", "Seguir el sistema", "Segui il sistema" },
             ["menu_bypass_toggle"] = new[] { "跳过权限确认（危险）", "Skip permission prompts (risky)", "略過權限確認（危險）", "Berechtigungsabfragen überspringen (riskant)", "権限確認をスキップ（危険）", "Ignorer les confirmations d'autorisation (risqué)", "권한 확인 건너뛰기 (위험)", "Omitir confirmaciones de permiso (arriesgado)", "Salta le conferme di autorizzazione (rischioso)" },
+            ["menu_codex_dangerous_toggle"] = new[] { "Codex 危险模式（Full Access）", "Codex dangerous mode (full access)", "Codex 危險模式（Full Access）", "Codex-Gefahrenmodus (Full Access)", "Codex 危険モード（フルアクセス）", "Mode dangereux Codex (accès complet)", "Codex 위험 모드(전체 액세스)", "Modo peligroso de Codex (acceso total)", "Modalità pericolosa Codex (accesso completo)" },
 
             // ── Update ──
             ["update_latest"] = new[] { "当前已是最新版本 v{0}", "You're on the latest version (v{0})", "目前已是最新版本 v{0}", "Sie verwenden die neueste Version (v{0})", "最新バージョン (v{0}) を使用しています", "Vous utilisez la dernière version (v{0})", "최신 버전(v{0})을 사용 중입니다", "Estás en la última versión (v{0})", "Stai usando l'ultima versione (v{0})" },

@@ -41,7 +41,8 @@ namespace CCPad.Settings
             // Never attach a local pane to a daemon that may have been started
             // from an elevated terminal. The Codex CLI explicitly requires
             // --no-daemon for that case; each CCPad pane can run independently.
-            Codex => ResolveLaunch("codex", JoinArgs("--no-daemon --yolo", extraArgs)),
+            Codex => ResolveLaunch("codex", JoinArgs(
+                JoinArgs("--no-daemon", CodexNewSafetyArgs()), extraArgs)),
             // extraArgs is deliberately dropped: it carries local-CLI flags
             // (--settings / -c notify) that would be parsed by ssh, not codex.
             CodexRemote => BuildRemoteCommand(RemoteSessions.NewSessionName()),
@@ -63,7 +64,7 @@ namespace CCPad.Settings
             // rebooted / the sweeper already reaped it).
             CodexRemote => BuildRemoteCommand(sessionId),
             Codex => ResolveLaunch("codex", JoinArgs(
-                    $"resume {sessionId} --no-daemon --dangerously-bypass-approvals-and-sandbox",
+                    JoinArgs($"resume {sessionId} --no-daemon", CodexResumeSafetyArgs()),
                     extraArgs)),
             _ => ResolveLaunch("claude", JoinArgs(
                     JoinArgs($"--resume {sessionId}",
@@ -79,7 +80,7 @@ namespace CCPad.Settings
         public static string BuildResumePickerCommand(string mode, string extraArgs = "") => Normalize(mode) switch
         {
             Codex => ResolveLaunch("codex", JoinArgs(
-                    "resume --no-daemon --dangerously-bypass-approvals-and-sandbox", extraArgs)),
+                    JoinArgs("resume --no-daemon", CodexResumeSafetyArgs()), extraArgs)),
             _ => ResolveLaunch("claude", JoinArgs(
                     JoinArgs("--resume",
                         AppConfig.Load().BypassPermissions ? "--permission-mode bypassPermissions" : ""),
@@ -92,8 +93,27 @@ namespace CCPad.Settings
         /// processes write access to one thread.</summary>
         public static string BuildForkCommand(string sessionId, string extraArgs = "") =>
             ResolveLaunch("codex", JoinArgs(
-                $"fork {sessionId} --no-daemon --dangerously-bypass-approvals-and-sandbox",
+                JoinArgs($"fork {sessionId} --no-daemon", CodexResumeSafetyArgs()),
                 extraArgs));
+
+        /// <summary>Build the command shown after a local Codex process exits.
+        /// This path runs inside the fallback shell, so it intentionally uses the
+        /// bare <c>codex</c> launcher instead of resolving PATH to an executable.</summary>
+        public static string BuildCodexResumeShellCommand(string? sessionId, string extraArgs = "")
+        {
+            string target = string.IsNullOrWhiteSpace(sessionId) ? "" : " " + sessionId;
+            return JoinArgs(
+                JoinArgs($"codex resume{target} --no-daemon", CodexResumeSafetyArgs()),
+                extraArgs);
+        }
+
+        private static string CodexNewSafetyArgs() =>
+            AppConfig.Load().CodexDangerousMode ? "--yolo" : "";
+
+        private static string CodexResumeSafetyArgs() =>
+            AppConfig.Load().CodexDangerousMode
+                ? "--dangerously-bypass-approvals-and-sandbox"
+                : "";
 
         /// <summary>
         /// Command line for a Codex@167 pane: ssh straight into the remote tmux

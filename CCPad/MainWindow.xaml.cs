@@ -1310,6 +1310,23 @@ namespace CCPad
             };
             AboutFlyout.Items.Add(bypassToggle);
 
+            // Codex full-access mode is separate from Claude's permission mode.
+            // It defaults on for compatibility with the existing Codex launcher
+            // and affects newly launched/resumed/forked local Codex processes.
+            var codexDangerousToggle = new ToggleMenuFlyoutItem
+            {
+                Text = Loc.T("menu_codex_dangerous_toggle"),
+                Icon = new FontIcon { Glyph = "" }, // shield / security
+                IsChecked = AppConfig.Load().CodexDangerousMode
+            };
+            codexDangerousToggle.Click += (s, _) =>
+            {
+                var prefs = AppConfig.Load();
+                prefs.CodexDangerousMode = ((ToggleMenuFlyoutItem)s).IsChecked;
+                AppConfig.Save(prefs);
+            };
+            AboutFlyout.Items.Add(codexDangerousToggle);
+
             AboutFlyout.Items.Add(new MenuFlyoutSeparator());
 
             var languageItem = new MenuFlyoutSubItem

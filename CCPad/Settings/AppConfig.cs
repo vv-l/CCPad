@@ -35,6 +35,11 @@ namespace CCPad.Settings
         /// permission prompts). Default on; users can turn it off in the About menu.</summary>
         public bool BypassPermissions { get; set; } = true;
 
+        /// <summary>Launch local Codex with full access (auto-approve and no
+        /// sandbox). This preserves the historical CCPad default; turn it off
+        /// to launch Codex in its normal approval/sandbox mode.</summary>
+        public bool CodexDangerousMode { get; set; } = true;
+
         /// <summary>Show the last-command info bar (上一条命令) at the top of every pane.</summary>
         public bool LastCmdBarEnabled { get; set; } = true;
 

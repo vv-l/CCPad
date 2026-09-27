@@ -325,6 +325,8 @@ namespace CCPad.Localization
             ["proj_default"] = new[] { "默认: {0}", "Default: {0}", "預設: {0}", "Standard: {0}", "既定: {0}", "Par défaut : {0}", "기본값: {0}", "Predeterminado: {0}", "Predefinito: {0}" },
             ["proj_new_claude"] = new[] { "新建 Claude 标签", "New Claude tab", "新增 Claude 分頁", "Neuer Claude-Tab", "新しい Claude タブ", "Nouvel onglet Claude", "새 Claude 탭", "Nueva pestaña de Claude", "Nuova scheda Claude" },
             ["proj_new_codex"] = new[] { "新建 Codex 标签", "New Codex tab", "新增 Codex 分頁", "Neuer Codex-Tab", "新しい Codex タブ", "Nouvel onglet Codex", "새 Codex 탭", "Nueva pestaña de Codex", "Nuova scheda Codex" },
+            ["proj_resume_claude"] = new[] { "恢复 Claude", "Resume Claude", "恢復 Claude", "Claude fortsetzen", "Claude を再開", "Reprendre Claude", "Claude 재개", "Reanudar Claude", "Riprendi Claude" },
+            ["proj_resume_codex"] = new[] { "恢复 Codex", "Resume Codex", "恢復 Codex", "Codex fortsetzen", "Codex を再開", "Reprendre Codex", "Codex 재개", "Reanudar Codex", "Riprendi Codex" },
             ["proj_new_codex_remote"] = new[] { "新建 Codex@167 标签", "New Codex@167 tab", "新增 Codex@167 分頁", "Neuer Codex@167-Tab", "新しい Codex@167 タブ", "Nouvel onglet Codex@167", "새 Codex@167 탭", "Nueva pestaña de Codex@167", "Nuova scheda Codex@167" },
             ["proj_open_claude"] = new[] { "用 Claude 打开", "Open with Claude", "用 Claude 開啟", "Mit Claude öffnen", "Claude で開く", "Ouvrir avec Claude", "Claude로 열기", "Abrir con Claude", "Apri con Claude" },
             ["proj_open_codex"] = new[] { "用 Codex 打开", "Open with Codex", "用 Codex 開啟", "Mit Codex öffnen", "Codex で開く", "Ouvrir avec Codex", "Codex로 열기", "Abrir con Codex", "Apri con Codex" },

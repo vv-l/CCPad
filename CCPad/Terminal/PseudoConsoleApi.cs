@@ -1,12 +1,29 @@
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace CCPad.Terminal
 {
     internal static class PseudoConsoleApi
     {
         internal const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
+        internal const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
         internal static readonly IntPtr PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE = (IntPtr)0x00020016;
+
+        internal const uint TOKEN_ASSIGN_PRIMARY = 0x0001;
+        internal const uint TOKEN_DUPLICATE = 0x0002;
+        internal const uint TOKEN_QUERY = 0x0008;
+        internal const uint TOKEN_ADJUST_DEFAULT = 0x0080;
+        internal const uint TOKEN_ADJUST_SESSIONID = 0x0100;
+        internal const uint TOKEN_REQUIRED_FOR_CHILD = TOKEN_ASSIGN_PRIMARY |
+            TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT | TOKEN_ADJUST_SESSIONID;
+        internal const uint DISABLE_MAX_PRIVILEGE = 0x0001;
+        internal const uint LUA_TOKEN = 0x0004;
+
+        internal const int SecurityImpersonation = 2;
+        internal const int TokenPrimary = 1;
+        internal const int TokenElevation = 20;
+        internal const int TokenLinkedToken = 19;
 
         [DllImport("kernel32.dll", SetLastError = true)]
         internal static extern bool CreatePipe(
@@ -63,6 +80,63 @@ namespace CCPad.Terminal
             string? lpCurrentDirectory,
             ref STARTUPINFOEX lpStartupInfo,
             out PROCESS_INFORMATION lpProcessInformation);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool OpenProcessToken(
+            IntPtr processHandle,
+            uint desiredAccess,
+            out IntPtr tokenHandle);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool GetTokenInformation(
+            IntPtr tokenHandle,
+            int tokenInformationClass,
+            IntPtr tokenInformation,
+            int tokenInformationLength,
+            out int returnLength);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool DuplicateTokenEx(
+            IntPtr existingToken,
+            uint desiredAccess,
+            IntPtr tokenAttributes,
+            int impersonationLevel,
+            int tokenType,
+            out IntPtr duplicateToken);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool CreateRestrictedToken(
+            IntPtr existingToken,
+            uint flags,
+            uint disabledSidCount,
+            IntPtr sidsToDisable,
+            uint deletedPrivilegeCount,
+            IntPtr privilegesToDelete,
+            uint restrictedSidCount,
+            IntPtr sidsToRestrict,
+            out IntPtr newToken);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool CreateProcessAsUser(
+            IntPtr token,
+            string? applicationName,
+            StringBuilder commandLine,
+            IntPtr processAttributes,
+            IntPtr threadAttributes,
+            bool inheritHandles,
+            uint creationFlags,
+            IntPtr environment,
+            string? currentDirectory,
+            ref STARTUPINFOEX startupInfo,
+            out PROCESS_INFORMATION processInformation);
+
+        [DllImport("kernel32.dll")]
+        internal static extern IntPtr GetCurrentProcess();
 
         [DllImport("kernel32.dll", SetLastError = true)]
         internal static extern bool ReadFile(

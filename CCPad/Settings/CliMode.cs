@@ -68,6 +68,21 @@ namespace CCPad.Settings
                     extraArgs)),
         };
 
+        /// <summary>Launch the CLI's interactive resume picker in a new tab.
+        /// Codex uses the <c>resume</c> subcommand; Claude's <c>--resume</c>
+        /// without an id opens its picker. The picker is intentionally separate
+        /// from BuildResumeCommand because it has no conversation id to persist
+        /// until the user makes a selection.</summary>
+        public static string BuildResumePickerCommand(string mode, string extraArgs = "") => Normalize(mode) switch
+        {
+            Codex => ResolveLaunch("codex", JoinArgs(
+                    "resume --dangerously-bypass-approvals-and-sandbox", extraArgs)),
+            _ => ResolveLaunch("claude", JoinArgs(
+                    JoinArgs("--resume",
+                        AppConfig.Load().BypassPermissions ? "--permission-mode bypassPermissions" : ""),
+                    extraArgs)),
+        };
+
         /// <summary>Start an independent Codex conversation with the full
         /// history of <paramref name="sessionId"/>. Used by reusable frozen
         /// templates so opening the same template twice never gives two TUI

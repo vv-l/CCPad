@@ -285,8 +285,10 @@ namespace CCPad.Settings
         /// <summary>
         /// Pick the newest history entry flagged for auto-restore — Crashed
         /// (when crash recovery is enabled) or RestoreOnLaunch from a clean
-        /// close — and clear the pending flags on *all* entries so no other
-        /// launch restores a duplicate. Entries stay in history for the menu.
+        /// close — and clear the pending flag on that one entry only. Keeping
+        /// the other flags lets a second CC Pad process restore the next window
+        /// when several windows were closed together. Entries stay in history
+        /// for the menu.
         /// </summary>
         public static PendingRestore? TryConsumePendingRestore(bool includeCrashed) =>
             WithLock<PendingRestore?>(() =>
@@ -299,7 +301,7 @@ namespace CCPad.Settings
                     if (picked == null && pending)
                         picked = new PendingRestore { Entry = e, WasCrashed = e.Crashed };
 
-                    if (e.RestoreOnLaunch || e.Crashed)
+                    if (picked?.Entry == e && (e.RestoreOnLaunch || e.Crashed))
                     {
                         e.RestoreOnLaunch = false;
                         e.Crashed = false;

@@ -25,9 +25,9 @@ namespace CCPad
         private bool _disposed;
         private bool _awaitingRestart;
         private bool _inShell;
-        // Plain "claude --resume <id>" command for the current dropped-to-cmd
-        // state, or null when there's nothing to resume (not in shell / Codex /
-        // no session file). Used by the numpad-up recovery hotkey.
+        // Plain CLI resume command for the current dropped-to-cmd state, or null
+        // when there's nothing to resume (not in shell / no session file). Used
+        // by the numpad-up recovery hotkey.
         private string? _resumeCommand;
         // Codex@167 flavour of the ↑ recovery offer: instead of typing a
         // command, ↑ relaunches the ssh line with the tmux session command set
@@ -994,7 +994,8 @@ namespace CCPad
                     if (line.StartsWith("claude", StringComparison.OrdinalIgnoreCase) ||
                         line.StartsWith("codex", StringComparison.OrdinalIgnoreCase))
                         OnShellCliRelaunched(
-                            line.Contains("--settings", StringComparison.OrdinalIgnoreCase));
+                            line.Contains("--settings", StringComparison.OrdinalIgnoreCase),
+                            ExtractCodexResumeId(line));
                 }
                 else if (c == '\b' || c == '\x7f')
                 {
@@ -1018,7 +1019,7 @@ namespace CCPad
         // never fire for this pane again: clear the exit-red lock and hand the
         // light back to the heuristics (Enter → green, sustained output → green)
         // with the amber resting state as the starting point.
-        private void OnShellCliRelaunched(bool? hooksActive)
+        private void OnShellCliRelaunched(bool? hooksActive, string? explicitSessionId = null)
         {
             if (hooksActive.HasValue)
                 _completionHooksActive = hooksActive.Value;
@@ -1027,13 +1028,47 @@ namespace CCPad
             _recentErrScan = "";
             // May be running untracked (hand-typed, no hooks) — remember when, so
             // the snapshot fallback can scan for a conversation it started.
-            ShellRelaunchUtc = DateTime.UtcNow;
+            if (!string.IsNullOrEmpty(explicitSessionId))
+            {
+                // A hand-typed `codex resume <uuid>` already tells us exactly
+                // which conversation this pane owns. Keep that id through the
+                // next snapshot instead of letting a same-cwd disk scan choose a
+                // newer sibling session that happened to receive a later write.
+                SessionId = explicitSessionId;
+                ShellRelaunchUtc = null;
+            }
+            else
+            {
+                ShellRelaunchUtc = DateTime.UtcNow;
+            }
             // The ↑ resume offer is stale now — a later ↑ must reach the CLI
             // (prompt history), not paste a resume command into its input box.
             _resumeCommand = null;
             _remoteResumeOffer = false;
             SendShellMode(false);
             SetStatus(PaneStatus.Waiting);
+        }
+
+        private static string? ExtractCodexResumeId(string line)
+        {
+            var parts = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+            bool afterResume = false;
+            foreach (var raw in parts)
+            {
+                var part = raw.Trim('"', '\'');
+                if (!afterResume)
+                {
+                    if (string.Equals(part, "resume", StringComparison.OrdinalIgnoreCase))
+                        afterResume = true;
+                    continue;
+                }
+
+                if (Guid.TryParse(part, out _))
+                    return part;
+                if (!part.StartsWith("-", StringComparison.Ordinal))
+                    break;
+            }
+            return null;
         }
 
         // If we're showing Waiting (amber) but the CLI streams output CONTINUOUSLY
@@ -1371,8 +1406,9 @@ namespace CCPad
         {
             const string head = "\r\n\x1b[90m[CLI exited — dropped to cmd. Type 'exit' to relaunch.]\x1b[0m\r\n";
 
-            // Codex has its own resume flow ("codex resume"); don't fake a claude
-            // command. Leave _resumeCommand null so the numpad-up hotkey is inert.
+            // Codex has its own resume picker. Keep a concrete command here so
+            // the ↑ recovery hotkey can put it back at the fallback cmd prompt,
+            // just like Claude's generated --resume command.
             _resumeCommand = null;
             _remoteResumeOffer = false;
             if (string.Equals(CliMode, Settings.CliMode.CodexRemote, StringComparison.OrdinalIgnoreCase))
@@ -1387,7 +1423,19 @@ namespace CCPad
                 return "\r\n\x1b[90m[SSH exited — dropped to local cmd." + hint + "]\x1b[0m\r\n";
             }
             if (string.Equals(CliMode, Settings.CliMode.Codex, StringComparison.OrdinalIgnoreCase))
-                return head;
+            {
+                string notify = CliNotify.PrepareCodexNotify(PaneId);
+                string target = Guid.TryParse(SessionId, out _)
+                    ? " " + SessionId
+                    : "";
+                _resumeCommand = "codex resume" + target +
+                    " --dangerously-bypass-approvals-and-sandbox" +
+                    (notify.Length > 0 ? " " + notify : "");
+                return head +
+                    "\x1b[36mResume a Codex conversation:\x1b[0m \x1b[33m" +
+                    _resumeCommand + "\x1b[0m" +
+                    "  \x1b[90m(or press ↑)\x1b[0m\r\n";
+            }
 
             // Re-attach the per-pane notification hooks (incl. SessionStart) so the
             // resumed Claude — a child of the fallback cmd, invisible to our process

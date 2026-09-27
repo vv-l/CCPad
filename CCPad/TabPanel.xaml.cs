@@ -445,7 +445,7 @@ namespace CCPad
         private async Task AddNewTab(string? projectName = null, string? workingDir = null,
             string? cliMode = null, string? resumeSessionId = null, string? tag = null,
             string? remoteProfileId = null, string? remoteWorkingDir = null,
-            bool remoteResumePicker = false)
+            bool remoteResumePicker = false, bool resumePicker = false)
         {
             _tabCounter++;
             string mode = ResolveCliMode(cliMode);
@@ -474,7 +474,8 @@ namespace CCPad
             };
             pane.CompletionHooksActive = extra.Length > 0;
             var (cmd, resumed) = await BuildLaunchCommandAsync(
-                mode, extra, resumeSessionId, pane, remoteWorkingDir, remoteResumePicker);
+                mode, extra, resumeSessionId, pane, remoteWorkingDir, remoteResumePicker,
+                resumePicker: resumePicker);
 
             var item = CreateTabItem(projectName, workingDir, pane, mode, tag);
 
@@ -526,7 +527,7 @@ namespace CCPad
         private static async Task<(string Cmd, bool Resumed)> BuildLaunchCommandAsync(
             string mode, string extra, string? resumeSessionId, TerminalPane pane,
             string? remoteWorkingDir = null, bool remoteResumePicker = false,
-            bool forkCodexSession = false)
+            bool forkCodexSession = false, bool resumePicker = false)
         {
             if (mode == CliMode.CodexRemote)
             {
@@ -548,6 +549,9 @@ namespace CCPad
 
             if (mode == CliMode.Codex)
             {
+                if (resumePicker)
+                    return (CliMode.BuildResumePickerCommand(mode, extra), false);
+
                 if (resumeSessionId != null &&
                     await Task.Run(() => CliSessions.CodexSessionExists(resumeSessionId)))
                 {
@@ -562,6 +566,9 @@ namespace CCPad
                 }
                 return (CliMode.BuildCommand(mode, extra), false);
             }
+
+            if (resumePicker)
+                return (CliMode.BuildResumePickerCommand(mode, extra), false);
 
             if (resumeSessionId != null &&
                 await Task.Run(() => CliSessions.ClaudeSessionExists(resumeSessionId)))
@@ -1842,6 +1849,24 @@ namespace CCPad
             };
             newCodex.Click += async (_, _) => await AddNewTab(null, _defaultWorkingDir, CliMode.Codex);
             ProjectFlyout.Items.Add(newCodex);
+
+            var resumeClaude = new MenuFlyoutItem
+            {
+                Text = Loc.T("proj_resume_claude"),
+                Icon = new FontIcon { Glyph = "\uE8C6" }
+            };
+            resumeClaude.Click += async (_, _) => await AddNewTab(
+                null, _defaultWorkingDir, CliMode.Claude, resumePicker: true);
+            ProjectFlyout.Items.Add(resumeClaude);
+
+            var resumeCodex = new MenuFlyoutItem
+            {
+                Text = Loc.T("proj_resume_codex"),
+                Icon = new FontIcon { Glyph = "\uE8C6" }
+            };
+            resumeCodex.Click += async (_, _) => await AddNewTab(
+                null, _defaultWorkingDir, CliMode.Codex, resumePicker: true);
+            ProjectFlyout.Items.Add(resumeCodex);
 
             if (_projects.Count > 0)
                 ProjectFlyout.Items.Add(new MenuFlyoutSeparator());

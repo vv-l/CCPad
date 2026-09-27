@@ -107,28 +107,58 @@ namespace CCPad
         /// Claude Code hooks pipe a JSON payload to the hook command's stdin. Besides
         /// the real conversation ID, Stop payloads expose background_tasks and
         /// session_crons: a non-empty list means Claude is paused for work that will
-        /// wake it again, not genuinely idle. Hard timeout because Codex direct-execs
-        /// this helper without piping stdin.
+        /// wake it again, not genuinely idle. Codex calls the same helper with its
+        /// thread id under a hyphenated <c>thread-id</c> field, so that id is accepted
+        /// as well and can be persisted for the next layout restore. Hard timeout
+        /// because Codex direct-execs this helper without piping stdin.
         /// </summary>
         private readonly record struct HookPayload(
             string? SessionId, string? EventName, bool HasPendingWork);
 
-        private static HookPayload ReadHookPayload()
+        private static HookPayload ReadHookPayload(string[]? commandLine = null)
         {
             try
             {
+                // Codex appends its notify payload as the final command-line
+                // argument. Check that first so the short-lived helper never waits
+                // on a stdin handle it does not own.
+                if (commandLine != null)
+                {
+                    for (int i = commandLine.Length - 1; i >= 4; i--)
+                    {
+                        var candidate = commandLine[i]?.Trim();
+                        if (!string.IsNullOrEmpty(candidate) && candidate.StartsWith("{"))
+                            return ParseHookPayload(candidate);
+                    }
+                }
+
                 if (!Console.IsInputRedirected) return default;
                 var read = System.Threading.Tasks.Task.Run(() => Console.In.ReadToEnd());
                 if (!read.Wait(1500)) return default;
-                var json = read.Result;
+                return ParseHookPayload(read.Result);
+            }
+            catch { }
+            return default;
+        }
+
+        private static HookPayload ParseHookPayload(string? json)
+        {
+            try
+            {
                 if (string.IsNullOrWhiteSpace(json)) return default;
                 using var doc = System.Text.Json.JsonDocument.Parse(json);
                 var root = doc.RootElement;
                 string? sessionId = null;
                 string? eventName = null;
-                if (doc.RootElement.TryGetProperty("session_id", out var sid) &&
-                    Guid.TryParse(sid.GetString(), out _))
-                    sessionId = sid.GetString();
+                foreach (var name in new[] { "session_id", "session-id", "thread_id", "thread-id", "conversation_id", "conversation-id" })
+                {
+                    if (root.TryGetProperty(name, out var id) &&
+                        Guid.TryParse(id.GetString(), out _))
+                    {
+                        sessionId = id.GetString();
+                        break;
+                    }
+                }
                 if (root.TryGetProperty("hook_event_name", out var evt))
                     eventName = evt.GetString();
 
@@ -189,8 +219,8 @@ namespace CCPad
             // (notify=[...] config):
             //   CCPad.exe --notify <paneId> <evt> [<json-payload-codex-appends>]
             // Forward the status nudge to the running CCPad that owns the pane and
-            // exit before any window is created. The trailing JSON arg Codex
-            // appends is ignored.
+            // exit before any window is created. When Codex appends its JSON
+            // payload, keep the thread id so the owning tab can persist it.
             //   • <evt> is a word (waiting/working) → broadcast to whichever live
             //     process holds this pane's handler (port-agnostic; the robust path).
             //   • <evt> is a number → a port baked by an older hook/Codex config
@@ -201,7 +231,7 @@ namespace CCPad
                 {
                     string paneId = cmdArgs[2];
                     string evtOrPort = cmdArgs[3];
-                    var payload = ReadHookPayload();
+                    var payload = ReadHookPayload(cmdArgs);
                     string requested = int.TryParse(evtOrPort, out int notifyPort)
                         ? "waiting"
                         : evtOrPort;

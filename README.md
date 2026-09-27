@@ -67,6 +67,16 @@ The About menu — session recovery, background "your turn" notifications, and t
 
 ![CC Pad — About menu showing recovery, notifications, and the language switcher](CCPad/Assets/Screenshot3.png)
 
+### Multi-pane, mixed CLI, and recovery controls
+
+These examples show Codex and Claude running together in a four-pane layout, live language switching, the staging queue, and the session-recovery controls:
+
+![CC Pad — two Codex and two Claude sessions in a four-pane layout](CCPad/Assets/Screenshot4-mixed-cli.png)
+
+![CC Pad — four-pane mixed CLI layout in the English interface](CCPad/Assets/Screenshot5-mixed-cli-en.png)
+
+![CC Pad — staging queue, session recovery, language switching, and version information](CCPad/Assets/Screenshot6-recovery-staging.png)
+
 ## Installation
 
 ### Installer (Recommended)
@@ -297,6 +307,10 @@ This is a community fork of [nuomiaa/CCPad](https://github.com/nuomiaa/CCPad) (b
 ### Unreleased
 
 - **Codex quota display** — Show the signed-in account's plan, session/weekly usage, reset times, and reset credits in the lower-left toolbar indicator.
+- **Codex / Claude resume entries** — The local-project menu now offers **Resume Codex** and **Resume Claude**, opening the corresponding CLI resume picker.
+- **Exact resume after exit** — Codex and Claude keep the detected session ID after exit, show a runnable resume command, and let **↑** put it back into the shell input line.
+- **Multi-process layout recovery** — When several CC Pad windows start together, each process consumes only its own recovery snapshot instead of clearing layouts still waiting for another window.
+- **CLI launch from elevated hosts** — When CC Pad is started from an administrator terminal, child CLIs use a standard-user token so a Codex daemon cannot inherit administrator privileges.
 
 ### v1.10.10
 
@@ -317,6 +331,12 @@ This is a community fork of [nuomiaa/CCPad](https://github.com/nuomiaa/CCPad) (b
 - **Session recovery rework** — Per-process snapshots, closed-session history, stronger session attribution, and clear notices for missing or fast-exiting sessions.
 - **Freeze/thaw lifecycle** — Click-to-thaw placeholders, optional automatic freezing, warm-renderer reuse, and safe recovery when thawing fails.
 - **Cross-panel tab drag** — Move live tabs between split panes without closing their sessions; cold thaw can start the CLI in parallel with renderer setup.
+
+### v1.5.0–v1.7.x (continuous iterations; no individual tags)
+
+- **v1.5.0 last-command bar** — Show the most recently submitted command at the top of every terminal, click to copy it, and toggle it globally with `Alt+L`; the command comes from the real PTY input stream and works for Claude, Codex, and shells.
+- **v1.6–v1.7 stability iterations** — Continued work on command staging, status lights, terminal rendering, and theme behavior. These commits did not receive individual Git tags and are recorded here as one continuous iteration range.
+- **Version record** — The repository has formal tags for v1.4.0 and v1.10.10; v1.5.0–v1.9.0 are milestone commits or local release records and are now listed together in this history.
 
 ### v1.4.0
 

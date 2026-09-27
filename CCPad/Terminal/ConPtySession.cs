@@ -9,8 +9,6 @@ namespace CCPad.Terminal
 {
     internal class ConPtySession : IDisposable
     {
-        private const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
-
         private IntPtr _hPC = IntPtr.Zero;
         private IntPtr _hProcess = IntPtr.Zero;
         private IntPtr _hThread = IntPtr.Zero;
@@ -95,14 +93,39 @@ namespace CCPad.Terminal
             string dir = workingDir ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
             IntPtr envBlock = BuildUtf8EnvironmentBlock();
+            IntPtr childToken = IntPtr.Zero;
             try
             {
-                bool ok = CreateProcess(
-                    null, command,
-                    IntPtr.Zero, IntPtr.Zero, false,
-                    EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
-                    envBlock, dir,
-                    ref siEx, out var pi);
+                bool ok;
+                PROCESS_INFORMATION pi;
+
+                // An elevated CC Pad would otherwise pass its administrator token
+                // into cmd.exe and every CLI it launches. Codex deliberately rejects
+                // that shape because its shared Windows daemon must be started by a
+                // non-elevated client. Reuse the user's linked (medium-integrity)
+                // token whenever the host process is elevated; the normal path stays
+                // on CreateProcess and keeps the existing behaviour unchanged.
+                if (TryGetUnelevatedToken(out childToken))
+                {
+                    // The token gives the child the right identity and integrity.
+                    // Keep the explicit UTF-8 variables from the normal environment
+                    // block, since they are part of CC Pad's terminal contract.
+                    ok = CreateProcessAsUser(
+                        childToken, null, new StringBuilder(command),
+                        IntPtr.Zero, IntPtr.Zero, false,
+                        EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+                        envBlock, dir,
+                        ref siEx, out pi);
+                }
+                else
+                {
+                    ok = CreateProcess(
+                        null, command,
+                        IntPtr.Zero, IntPtr.Zero, false,
+                        EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+                        envBlock, dir,
+                        ref siEx, out pi);
+                }
 
                 if (!ok)
                     throw new InvalidOperationException($"CreateProcess failed: {Marshal.GetLastWin32Error()}");
@@ -115,10 +138,95 @@ namespace CCPad.Terminal
             }
             finally
             {
+                if (childToken != IntPtr.Zero)
+                    CloseHandle(childToken);
                 Marshal.FreeHGlobal(envBlock);
             }
 
             Task.Factory.StartNew(() => WaitForProcessExit(_hProcess), TaskCreationOptions.LongRunning);
+        }
+
+        /// <summary>
+        /// Returns a primary token for the current interactive user at medium
+        /// integrity when this process is elevated. Windows keeps that token as
+        /// TokenLinkedToken for UAC-split administrators. If no linked token is
+        /// available, returning false preserves the old CreateProcess path.
+        /// </summary>
+        private static bool TryGetUnelevatedToken(out IntPtr token)
+        {
+            token = IntPtr.Zero;
+            IntPtr currentToken = IntPtr.Zero;
+            IntPtr linkedToken = IntPtr.Zero;
+            IntPtr restrictedToken = IntPtr.Zero;
+            IntPtr info = IntPtr.Zero;
+            try
+            {
+                if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, out currentToken))
+                    return false;
+
+                int size = 0;
+                GetTokenInformation(currentToken, TokenElevation, IntPtr.Zero, 0, out size);
+                if (size <= 0) return false;
+                info = Marshal.AllocHGlobal(size);
+                if (!GetTokenInformation(currentToken, TokenElevation, info, size, out _))
+                    return false;
+
+                // TOKEN_ELEVATION.TokenIsElevated is the first DWORD.
+                if (Marshal.ReadInt32(info) == 0)
+                    return false;
+
+                // UAC-split administrators expose the desired medium-integrity
+                // token here. Some machines run with UAC disabled (or use a full
+                // administrator token), in which case TokenLinkedToken is absent;
+                // fall through to CreateRestrictedToken below.
+                Marshal.FreeHGlobal(info);
+                info = IntPtr.Zero;
+                size = 0;
+                GetTokenInformation(currentToken, TokenLinkedToken, IntPtr.Zero, 0, out size);
+                if (size > 0)
+                {
+                    info = Marshal.AllocHGlobal(size);
+                    if (GetTokenInformation(currentToken, TokenLinkedToken, info, size, out _))
+                    {
+                        linkedToken = Marshal.ReadIntPtr(info);
+                        if (linkedToken != IntPtr.Zero && DuplicateTokenEx(
+                                linkedToken, TOKEN_REQUIRED_FOR_CHILD,
+                                IntPtr.Zero, SecurityImpersonation, TokenPrimary,
+                                out token))
+                            return true;
+                    }
+                }
+
+                // There is no linked token on a full administrator session. Make a
+                // LUA-style restricted token instead; this removes administrator
+                // privileges and reports TokenElevation=0 to child applications.
+                if (!CreateRestrictedToken(
+                        currentToken, DISABLE_MAX_PRIVILEGE | LUA_TOKEN,
+                        0, IntPtr.Zero, 0, IntPtr.Zero, 0, IntPtr.Zero,
+                        out restrictedToken))
+                    return false;
+
+                return DuplicateTokenEx(
+                    restrictedToken, TOKEN_REQUIRED_FOR_CHILD,
+                    IntPtr.Zero, SecurityImpersonation, TokenPrimary,
+                    out token);
+            }
+            catch
+            {
+                if (token != IntPtr.Zero)
+                {
+                    CloseHandle(token);
+                    token = IntPtr.Zero;
+                }
+                return false;
+            }
+            finally
+            {
+                if (info != IntPtr.Zero) Marshal.FreeHGlobal(info);
+                if (linkedToken != IntPtr.Zero) CloseHandle(linkedToken);
+                if (restrictedToken != IntPtr.Zero) CloseHandle(restrictedToken);
+                if (currentToken != IntPtr.Zero) CloseHandle(currentToken);
+            }
         }
 
         /// <summary>

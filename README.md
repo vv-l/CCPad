@@ -18,7 +18,7 @@
 
 ---
 
-> Current release: **v1.10.16**
+> Current release: **v1.10.17**
 >
 > Unreleased on `master`: Codex quota indicator.
 
@@ -36,6 +36,7 @@
 - **Project Quick-Access** — Pin frequently-used directories for one-click new tabs.
 - **Windows ConPTY** — Native pseudo-console integration. Runs any CLI tool — PowerShell, cmd, bash, python, node, git, etc.
 - **xterm.js Rendering** — Full terminal emulation via xterm.js hosted in WebView2, with Cascadia Code font.
+- **Middle-button terminal scrolling** *(fork)* — Press and hold the mouse wheel over the terminal, then drag up or down to scroll terminal history. A circular `↕` indicator appears while active; releasing the button, changing focus, or hiding the page ends the gesture.
 - **Mica Backdrop** — Native Windows 11 translucent material.
 - **Web Remote Terminal** — Built-in HTTP/WebSocket server lets you view and control any session from a browser on the same LAN. Optional token authentication. Touch-friendly UI with on-screen keys for mobile devices.
 - **Context Menu Integration** — Right-click any folder in Explorer to open it in CC Pad.
@@ -167,6 +168,9 @@ $env:CCPAD_DATA_DIR = "$PWD\.ccpad-demo-data"
 | Clear the current input line | `Alt+A` |
 | Select the whole screen (to copy) | `Alt+Shift+A` |
 | Toggle the last-command bar | `Alt+L` |
+
+**Middle-button terminal scrolling**
+Press and hold the mouse wheel over the terminal, then drag up to see older output or drag down to return toward newer output. Release the button to finish. If the window loses focus or the page is hidden, CC Pad clears the gesture automatically. This scrolls terminal history only; it does not resize the PTY or change normal wheel scrolling, `Ctrl+Wheel` font zoom, or left-button text selection.
 
 **Command staging** *(fork)*
 
@@ -313,6 +317,10 @@ This is a community fork of [nuomiaa/CCPad](https://github.com/nuomiaa/CCPad) (b
 - **Exact resume after exit** — Codex and Claude keep the detected session ID after exit, show a runnable resume command, and let **↑** put it back into the shell input line.
 - **Multi-process layout recovery** — When several CC Pad windows start together, each process consumes only its own recovery snapshot instead of clearing layouts still waiting for another window.
 - **CLI launch from elevated hosts** — When CC Pad is started from an administrator terminal, child CLIs use a standard-user token so a Codex daemon cannot inherit administrator privileges.
+
+### v1.10.17
+
+- **Middle-button terminal scrolling** — Press and hold the mouse wheel in the terminal to drag through xterm history. The `↕` indicator, pointer capture, focus cleanup, and TUI mouse-event guard keep the gesture bounded to the terminal; normal wheel/`Ctrl+Wheel` zoom and text selection remain unchanged. Release tag: `v1.10.17` (commit `0c304a7`).
 
 ### v1.10.16
 

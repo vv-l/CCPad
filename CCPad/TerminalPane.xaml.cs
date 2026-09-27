@@ -54,8 +54,15 @@ namespace CCPad
         private TaskCompletionSource? _readyTcs;
         private TaskCompletionSource? _loadedTcs;
         private bool _autoConfirm;
-        private string _recentOutput = "";
+        // Auto-confirm is event-driven: retain only a short tail so a prompt
+        // split across PTY chunks still matches without re-scanning 8 KB on every
+        // output chunk. The Codex question and option are tracked for a short
+        // window because they are often painted in separate chunks.
+        private string _autoConfirmTail = "";
+        private DateTime _codexApprovalPromptUtc = DateTime.MinValue;
         private Timer? _autoConfirmTimer;
+        private const int AutoConfirmTailChars = 512;
+        private const int CodexApprovalWindowSeconds = 15;
         // Auto-reply (自动应答): incremental scan state — only the last
         // (longest trigger − 1) chars of stripped output are carried between
         // chunks, so a trigger split across two reads still matches while each
@@ -393,7 +400,15 @@ namespace CCPad
         public void SetAutoConfirm(bool on)
         {
             _autoConfirm = on;
-            _recentOutput = "";
+            ResetAutoConfirmState();
+        }
+
+        private void ResetAutoConfirmState()
+        {
+            _autoConfirmTail = "";
+            _codexApprovalPromptUtc = DateTime.MinValue;
+            _autoConfirmTimer?.Dispose();
+            _autoConfirmTimer = null;
         }
 
         /// <summary>Push the current pane status to the xterm front-end (for command staging).</summary>
@@ -1215,23 +1230,33 @@ namespace CCPad
 
         private void CheckAutoConfirm(string plain)
         {
-            _recentOutput += plain;
-            // Keep enough context to span the prompt, reason and a long command
-            // before Codex paints the selectable approval options.
-            if (_recentOutput.Length > 8192)
-                _recentOutput = _recentOutput[^8192..];
+            // Never press Enter in a fallback shell or a remote Codex pane. The
+            // toolbar switch is intentionally scoped to local interactive CLIs.
+            if ((_inShell && !_shellCliActive) ||
+                string.Equals(CliMode, Settings.CliMode.CodexRemote, StringComparison.OrdinalIgnoreCase))
+                return;
 
-            string lower = _recentOutput.ToLowerInvariant();
+            if (string.IsNullOrEmpty(plain)) return;
+            string lower = plain.ToLowerInvariant();
+            string scan = _autoConfirmTail + lower;
+            if (scan.Length > AutoConfirmTailChars)
+                scan = scan[^AutoConfirmTailChars..];
+            _autoConfirmTail = scan;
+
             // Codex command approval is deliberately a two-part match. Seeing the
             // question alone is not enough: Enter is safe only after the affirmative
             // option is present and selected by Codex's menu.
-            bool matched = lower.Contains(CodexCommandApprovalPrompt.ToLowerInvariant()) &&
-                           lower.Contains(CodexProceedOption.ToLowerInvariant());
+            if (scan.Contains(CodexCommandApprovalPrompt.ToLowerInvariant(), StringComparison.Ordinal))
+                _codexApprovalPromptUtc = DateTime.UtcNow;
+
+            bool matched = _codexApprovalPromptUtc != DateTime.MinValue &&
+                           (DateTime.UtcNow - _codexApprovalPromptUtc).TotalSeconds <= CodexApprovalWindowSeconds &&
+                           scan.Contains(CodexProceedOption.ToLowerInvariant(), StringComparison.Ordinal);
             if (!matched)
             {
                 foreach (var hint in ConfirmHints)
                 {
-                    if (lower.Contains(hint.ToLowerInvariant()))
+                    if (scan.Contains(hint.ToLowerInvariant(), StringComparison.Ordinal))
                     {
                         matched = true;
                         break;
@@ -1240,7 +1265,8 @@ namespace CCPad
             }
             if (!matched) return;
 
-            _recentOutput = "";
+            _autoConfirmTail = "";
+            _codexApprovalPromptUtc = DateTime.MinValue;
             _autoConfirmTimer?.Dispose();
             _autoConfirmTimer = new Timer(_ =>
             {
@@ -1637,6 +1663,8 @@ namespace CCPad
                         string data = doc.RootElement.GetProperty("data").GetString() ?? "";
                         _lastUserInputUtc = DateTime.UtcNow;
                         _lastRealInputUtc = DateTime.UtcNow;
+                        if (data.Length > 0)
+                            ResetAutoConfirmState();
                         // A real Enter means a human (or the staging queue) took
                         // over — the auto-reply retry loop starts from scratch.
                         if (data.Contains('\r'))
@@ -1820,7 +1848,7 @@ namespace CCPad
 
                     case "autoConfirm":
                         _autoConfirm = doc.RootElement.GetProperty("enabled").GetBoolean();
-                        _recentOutput = "";
+                        ResetAutoConfirmState();
                         break;
 
                 }

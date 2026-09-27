@@ -18,7 +18,7 @@
 
 ---
 
-> Current release: **v1.10.13**
+> Current release: **v1.10.14**
 >
 > Unreleased on `master`: Codex quota indicator.
 
@@ -32,6 +32,7 @@
 - **Resource guard** *(fork)* — Tracks physical memory and system commit pressure and shows a non-modal warning when freezing idle tabs would help.
 - **Codex quota display** *(unreleased; fork)* — The lower-left indicator shows the signed-in Codex plan, session/weekly usage, reset countdowns, and reset credits; it refreshes when opened and every five minutes.
 - **Codex full-access setting** *(fork)* — The About menu can keep local Codex in dangerous/full-access mode by default, or turn it off for normal approval and sandbox prompts. New, resume, picker, fork, and post-exit recovery commands use the same setting.
+- **Pane-scoped Auto-Enter** *(fork)* — The bottom Enter toggle only watches the active local Claude/Codex pane, confirms a recognized prompt once, and avoids scanning remote panes or large output buffers.
 - **Project Quick-Access** — Pin frequently-used directories for one-click new tabs.
 - **Windows ConPTY** — Native pseudo-console integration. Runs any CLI tool — PowerShell, cmd, bash, python, node, git, etc.
 - **xterm.js Rendering** — Full terminal emulation via xterm.js hosted in WebView2, with Cascadia Code font.
@@ -312,6 +313,10 @@ This is a community fork of [nuomiaa/CCPad](https://github.com/nuomiaa/CCPad) (b
 - **Exact resume after exit** — Codex and Claude keep the detected session ID after exit, show a runnable resume command, and let **↑** put it back into the shell input line.
 - **Multi-process layout recovery** — When several CC Pad windows start together, each process consumes only its own recovery snapshot instead of clearing layouts still waiting for another window.
 - **CLI launch from elevated hosts** — When CC Pad is started from an administrator terminal, child CLIs use a standard-user token so a Codex daemon cannot inherit administrator privileges.
+
+### v1.10.14
+
+- **Auto-Enter review** — Keep the bottom-bar Auto-Enter control as the explicit per-pane fallback. Clarify that the About-menu permission toggle is a launch flag, restrict automatic confirmation to local Claude/Codex sessions, and replace the repeated 8 KB scan with a short incremental matcher and one-shot timer.
 
 ### v1.10.13
 

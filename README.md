@@ -139,6 +139,20 @@ $env:CCPAD_DATA_DIR = "$PWD\.ccpad-demo-data"
 .\CCPad.exe
 ```
 
+### Recommended workflow
+
+A practical default flow for a project is:
+
+1. **Open the project first.** Start CC Pad in the project directory, or open a saved workspace. Choose Claude, local Codex, or a configured remote Codex project before creating the session.
+2. **Keep one continuous goal per tab.** Use a new tab for a separate task or conversation. Use splits when you need to compare two related sessions; use one tab per task rather than mixing unrelated work in one terminal.
+3. **Let the status lights drive attention.** Green means the AI is working, amber means it is waiting for you, and red means the CLI exited. Work in another tab while a session is green instead of interrupting it.
+4. **Queue follow-up work while the AI is busy.** Turn on Command Staging with ``Alt+` ``, enter the next prompt, and let CC Pad send it when the session is idle. This keeps a long task from being interrupted by manual input.
+5. **Review output at each checkpoint.** Use the middle mouse button to drag through terminal history, select and copy the relevant output, and check the last-command bar before deciding the next step. Keep prompts, test results, and decisions in the tab that produced them.
+6. **Save the layout at a useful milestone.** Save a workspace when the panes, tabs, and working directories are in a state you may want to reopen. Freeze idle sessions when you need to reduce resource use; thaw them when you return.
+7. **Close or recover deliberately.** Close finished sessions when their output is no longer needed. If Windows or CC Pad exits unexpectedly, use session recovery and the resume entry instead of starting a duplicate conversation. For remote work, keep the device and project association stable so the existing tmux session can be recovered.
+
+The short version is: **project → one goal per tab → split only related work → queue while busy → review output → save a milestone → close or recover**.
+
 ### Keyboard Shortcuts
 
 **Tabs & panes**

@@ -18,7 +18,7 @@
 
 ---
 
-> Current release: **v1.10.10**
+> Current release: **v1.10.11**
 >
 > Unreleased on `master`: Codex quota indicator.
 
@@ -311,6 +311,11 @@ This is a community fork of [nuomiaa/CCPad](https://github.com/nuomiaa/CCPad) (b
 - **Exact resume after exit** — Codex and Claude keep the detected session ID after exit, show a runnable resume command, and let **↑** put it back into the shell input line.
 - **Multi-process layout recovery** — When several CC Pad windows start together, each process consumes only its own recovery snapshot instead of clearing layouts still waiting for another window.
 - **CLI launch from elevated hosts** — When CC Pad is started from an administrator terminal, child CLIs use a standard-user token so a Codex daemon cannot inherit administrator privileges.
+
+### v1.10.11
+
+- **Split-pane localization refresh** — Rebuilt split layouts keep their language subscriptions, so project and external-project labels update together across all panes.
+- **Live UI refresh** — Existing tab menus, frozen placeholders, terminal error overlays, the file panel, and the staging page now use the newly selected language immediately.
 
 ### v1.10.10
 

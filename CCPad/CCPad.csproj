@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
@@ -21,9 +21,9 @@
     <Company>CCPad.dev</Company>
     <Authors>CC Pad</Authors>
     <Copyright>Copyright 漏 2026 CC Pad</Copyright>
-    <Version>1.10.10</Version>
-    <FileVersion>1.10.10.0</FileVersion>
-    <InformationalVersion>1.10.10</InformationalVersion>
+    <Version>1.10.11</Version>
+    <FileVersion>1.10.11.0</FileVersion>
+    <InformationalVersion>1.10.11</InformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>

@@ -1475,7 +1475,7 @@ namespace CCPad
                     ? " " + SessionId
                     : "";
                 _resumeCommand = "codex resume" + target +
-                    " --dangerously-bypass-approvals-and-sandbox" +
+                    " --no-daemon --dangerously-bypass-approvals-and-sandbox" +
                     (notify.Length > 0 ? " " + notify : "");
                 return head +
                     "\x1b[36mResume a Codex conversation:\x1b[0m \x1b[33m" +

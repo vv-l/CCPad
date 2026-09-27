@@ -2372,6 +2372,7 @@ namespace CCPad
                 const middleScrollIndicator = document.getElementById('middle-scroll-indicator');
                 const middleScroll = {
                   active: false,
+                  pointerId: null,
                   startY: 0,
                   currentY: 0,
                   lastLines: 0,
@@ -2391,6 +2392,10 @@ namespace CCPad
                   const computedHeight = rows ? parseFloat(getComputedStyle(rows).lineHeight) : NaN;
                   return Number.isFinite(computedHeight) && computedHeight > 0 ? computedHeight : 18;
                 }
+                function stopMiddleScrollEvent(e) {
+                  e.preventDefault();
+                  e.stopImmediatePropagation();
+                }
                 function applyMiddleScroll() {
                   middleScroll.raf = 0;
                   if (!middleScroll.active) return;
@@ -2405,36 +2410,52 @@ namespace CCPad
                 }
                 function scheduleMiddleScroll(e) {
                   if (!middleScroll.active) return;
-                  e.preventDefault();
+                  if (e.pointerId !== undefined && e.pointerId !== middleScroll.pointerId) return;
+                  stopMiddleScrollEvent(e);
                   middleScroll.currentY = e.clientY;
                   if (!middleScroll.raf) middleScroll.raf = requestAnimationFrame(applyMiddleScroll);
                 }
                 function endMiddleScroll(e) {
                   if (!middleScroll.active) return;
-                  if (e && e.type === 'mouseup' && e.button !== 1) return;
+                  if (e && e.pointerId !== undefined && e.pointerId !== middleScroll.pointerId) return;
+                  if (e && (e.type === 'pointerup' || e.type === 'mouseup') && e.button !== 1) return;
+                  const applyFinalPosition = e && e.type === 'pointerup';
+                  if (e && (e.type === 'pointerup' || e.type === 'pointercancel')) {
+                    stopMiddleScrollEvent(e);
+                    if (applyFinalPosition) middleScroll.currentY = e.clientY;
+                  }
                   if (middleScroll.raf) {
                     cancelAnimationFrame(middleScroll.raf);
                     middleScroll.raf = 0;
                   }
+                  if (applyFinalPosition) applyMiddleScroll();
+                  const pointerId = middleScroll.pointerId;
                   middleScroll.active = false;
+                  middleScroll.pointerId = null;
+                  if (pointerId !== null && terminalElement.hasPointerCapture(pointerId)) {
+                    try { terminalElement.releasePointerCapture(pointerId); } catch (_) { }
+                  }
                   terminalElement.classList.remove('middle-scroll-active');
                   middleScrollIndicator.classList.remove('active');
                 }
-                terminalElement.addEventListener('mousedown', e => {
-                  if (e.button !== 1 || !isMiddleScrollTarget(e)) return;
-                  e.preventDefault();
-                  e.stopPropagation();
+                terminalElement.addEventListener('pointerdown', e => {
+                  if (e.button !== 1 || e.pointerType === 'touch' || !isMiddleScrollTarget(e)) return;
+                  stopMiddleScrollEvent(e);
                   middleScroll.active = true;
+                  middleScroll.pointerId = e.pointerId;
                   middleScroll.startY = e.clientY;
                   middleScroll.currentY = e.clientY;
                   middleScroll.lastLines = 0;
+                  try { terminalElement.setPointerCapture(e.pointerId); } catch (_) { }
                   middleScrollIndicator.style.left = e.clientX + 'px';
                   middleScrollIndicator.style.top = e.clientY + 'px';
                   middleScrollIndicator.classList.add('active');
                   terminalElement.classList.add('middle-scroll-active');
                 }, true);
-                document.addEventListener('mousemove', scheduleMiddleScroll, true);
-                document.addEventListener('mouseup', endMiddleScroll, true);
+                document.addEventListener('pointermove', scheduleMiddleScroll, true);
+                document.addEventListener('pointerup', endMiddleScroll, true);
+                document.addEventListener('pointercancel', endMiddleScroll, true);
+                terminalElement.addEventListener('lostpointercapture', endMiddleScroll, true);
                 window.addEventListener('blur', () => endMiddleScroll());
                 document.addEventListener('visibilitychange', () => {
                   if (document.hidden) endMiddleScroll();

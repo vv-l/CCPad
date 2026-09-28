@@ -1,7 +1,9 @@
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
@@ -49,6 +51,17 @@ namespace CCPad
         // to LaunchedAtUtc which is when the pane was told to launch.
         private DateTime _cliStartedUtc;
         private bool _focusOnFirstOutput;
+        // Remote Codex sometimes reports that it opened a URL in "your
+        // browser".  The browser is the SSH host's browser (or no browser at
+        // all), while the user is looking at CC Pad on Windows.  Keep a small
+        // rolling scan so a URL split across PTY chunks can be handed back to
+        // the Windows host.  Repeated tmux redraws are deduplicated below.
+        private string _remoteBrowserOpenScan = "";
+        private string? _lastRemoteBrowserUrl;
+        private DateTime _lastRemoteBrowserLaunchUtc = DateTime.MinValue;
+        private static readonly Regex RemoteBrowserOpenPattern = new(
+            @"Opened\s+(https?://[^\s<>""']+)\s+in\s+your\s+browser",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase);
         private int _cols = 120;
         private int _rows = 30;
         private TaskCompletionSource? _readyTcs;
@@ -921,6 +934,9 @@ namespace CCPad
             _command = command;
             _workingDir = workingDir;
             CliMode = cliMode;
+            _remoteBrowserOpenScan = "";
+            _lastRemoteBrowserUrl = null;
+            _lastRemoteBrowserLaunchUtc = DateTime.MinValue;
             LaunchedAtUtc = DateTime.UtcNow;
             _sessionPending = true;
             _focusOnFirstOutput = focusOnReady;
@@ -938,6 +954,9 @@ namespace CCPad
             _command = command;
             _workingDir = workingDir;
             CliMode = cliMode;
+            _remoteBrowserOpenScan = "";
+            _lastRemoteBrowserUrl = null;
+            _lastRemoteBrowserLaunchUtc = DateTime.MinValue;
             LaunchedAtUtc = DateTime.UtcNow;
             _sessionPending = true;
             _focusOnFirstOutput = focusOnReady;
@@ -1038,6 +1057,7 @@ namespace CCPad
             string text = Encoding.UTF8.GetString(data);
             CheckShellCliBanner(text);
             CheckApiError(text);
+            CheckRemoteBrowserOpen(text);
             MaybeCorrectStaleWaiting(data);
             bool reply = Settings.AutoReplyManager.IsOn;
             if (_autoConfirm || reply)
@@ -1048,6 +1068,72 @@ namespace CCPad
                 if (reply)
                     CheckAutoReply(plain);
             }
+        }
+
+        /// <summary>
+        /// A remote Codex process can print "Opened https://... in your browser"
+        /// after running a browser-opening command.  That statement is about the
+        /// SSH host, not the Windows machine running CC Pad.  For remote panes,
+        /// bridge the explicit Codex message back to the local default browser.
+        /// This deliberately matches only the well-known sentence and only
+        /// http(s) URLs; arbitrary terminal output never becomes a launch request.
+        /// </summary>
+        private void CheckRemoteBrowserOpen(string text)
+        {
+            if (!string.Equals(CliMode, Settings.CliMode.CodexRemote,
+                    StringComparison.OrdinalIgnoreCase) || string.IsNullOrEmpty(text))
+                return;
+
+            _remoteBrowserOpenScan += StripAnsiText(text);
+            if (_remoteBrowserOpenScan.Length > 4096)
+                _remoteBrowserOpenScan = _remoteBrowserOpenScan[^4096..];
+
+            foreach (Match match in RemoteBrowserOpenPattern.Matches(_remoteBrowserOpenScan))
+            {
+                string raw = match.Groups[1].Value.TrimEnd('.', ',', ';', ':', ')', ']', '。', '，');
+                if (!Uri.TryCreate(raw, UriKind.Absolute, out var uri) ||
+                    (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+                    continue;
+
+                var now = DateTime.UtcNow;
+                if (string.Equals(raw, _lastRemoteBrowserUrl, StringComparison.Ordinal) &&
+                    (now - _lastRemoteBrowserLaunchUtc).TotalSeconds < 30)
+                    continue;
+
+                _lastRemoteBrowserUrl = raw;
+                _lastRemoteBrowserLaunchUtc = now;
+                DispatcherQueue.TryEnqueue(() => _ = OpenLocalBrowserAsync(uri));
+            }
+        }
+
+        private async Task OpenLocalBrowserAsync(Uri uri)
+        {
+            bool opened = false;
+            try
+            {
+                opened = await Windows.System.Launcher.LaunchUriAsync(uri);
+            }
+            catch { }
+
+            // Packaged WebView hosts can occasionally return false even though
+            // the normal Windows shell handler is available.  Try the shell as
+            // a second path, then leave a visible, actionable notice in the pane.
+            if (!opened)
+            {
+                try
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = uri.AbsoluteUri,
+                        UseShellExecute = true,
+                    });
+                    opened = true;
+                }
+                catch { }
+            }
+
+            if (!opened)
+                ShowNotice(Localization.Loc.T("remote_browser_local_open_failed"));
         }
 
         // Detect the CLI's own fatal API-error banner (it stays alive at the prompt
@@ -1852,11 +1938,7 @@ namespace CCPad
                             (linkUri.Scheme.Equals(Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) ||
                              linkUri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)))
                         {
-                            DispatcherQueue.TryEnqueue(async () =>
-                            {
-                                try { await Windows.System.Launcher.LaunchUriAsync(linkUri); }
-                                catch { /* browser launch failures are non-fatal to the terminal */ }
-                            });
+                            DispatcherQueue.TryEnqueue(() => _ = OpenLocalBrowserAsync(linkUri));
                         }
                         break;
 

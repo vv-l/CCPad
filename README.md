@@ -18,7 +18,7 @@
 
 ---
 
-> Current release: **v1.10.18**
+> Current release: **v1.10.19**
 >
 > Unreleased on `master`: Codex quota indicator.
 
@@ -141,7 +141,84 @@ $env:CCPAD_DATA_DIR = "$PWD\.ccpad-demo-data"
 
 ### Recommended workflow
 
-A practical default flow for a project is:
+Choose the entry point by where the work should run, then follow the cards below. A **local project** is a Windows directory on the computer running CC Pad. An **external project** is a Linux/167 directory reached over SSH. A **browser remote terminal** lets a phone or another computer view sessions running on this Windows machine.
+
+#### Choose a working mode
+
+| What you want to do | Click here | What success looks like |
+|---|---|---|
+| Run Claude or local Codex in a Windows directory | **Local projects** → choose a Windows directory → create a session | The tab shows a local path and the command runs on this Windows computer |
+| Run remote Codex on Linux/167 | **External** → add an external device → **Test device connection** → add an external project → **Open with remote Codex** | The tab is bound to the device and Linux absolute path, with its own `ccpad-*` tmux session |
+| View the current sessions from a phone or another computer | Toolbar **Remote terminal** → start → copy the LAN address/port/token | The browser opens CC Pad's web mirror and lets you choose a session |
+
+#### See the whole flow
+
+```mermaid
+flowchart TD
+    S[Start CC Pad] --> M{Choose a mode}
+    M --> L[Local project<br/>Windows directory]
+    M --> R[External device + project<br/>Linux / SSH / 167]
+    M --> B[Browser remote<br/>LAN address + token]
+    L --> C[Create session]
+    R --> T[Test device and directory<br/>Open with remote Codex]
+    B --> U[Choose a session in the browser]
+    T --> C
+    U --> C
+    C --> Q{Read the status light}
+    Q -->|Green: working| W[Wait, or stage with Alt+`]
+    Q -->|Amber: needs input| A[Answer and send]
+    Q -->|Red: exited| X[Resume or reopen the original session]
+    W --> Q
+    A --> Q
+    X --> Q
+    Q --> K[Save workspace or freeze]
+    K --> F[Finish: close, freeze, or recover]
+```
+
+If your Markdown viewer does not render Mermaid, read it as: **choose an entry point → create a session → watch the status light → answer or stage → inspect output → save a milestone → close or recover**.
+
+#### Follow the cards: six practical steps
+
+| Step | Do this | What success looks like | Next |
+|---|---|---|---|
+| 1. Choose a location | For local work choose a Windows directory; for remote work choose the device and then a Linux absolute path | The remote readiness checks for SSH, Linux, directory, tmux, Codex, and login pass | Create a session |
+| 2. Create a tab | Choose local Claude/local Codex, or click **Open with remote Codex** | A new tab appears; a remote tab shows its device and remote working directory | Send the first goal |
+| 3. State the goal | Keep one continuous goal in one tab, such as “fix login and run the tests” | The AI starts output and the tab turns green | Wait or work in another tab |
+| 4. Stage while busy | Press ``Alt+` `` and type the next prompt; do not interrupt a running terminal | The prompt appears in the staging list and sends when the session is idle | Inspect the result |
+| 5. Check evidence | Hold the middle mouse button and drag through history; click the last-command bar to copy; keep test results and decisions in this tab | Commands, output, and results remain easy to review together | Save a milestone |
+| 6. Finish safely | Save the workspace; freeze sessions when you need to release resources; use recovery after an unexpected exit | The next launch restores the layout and remote sessions reconnect to the original tmux session | Continue, close, or recover |
+
+#### Get started in three minutes
+
+- **Local coding:** Local projects → choose `D:\\project` → create local Codex → enter the goal → wait for green, then save the workspace when it is done.
+- **Remote Codex/167:** External → add or choose a device → test the connection → add `/zettos/pool/1/agents/project` → **Open with remote Codex**. Every tab owns a separate `ccpad-*` tmux session; an SSH loss or freeze only detaches it, while explicitly closing the tab ends it.
+- **Phone/browser view:** Remote terminal → start → copy the local LAN address and token → open it from the same LAN → choose a session. When remote Codex prints `Opened … in your browser`, CC Pad attempts to open that link in the Windows browser running CC Pad; you can also click the blue terminal link directly.
+
+#### What to do with each status
+
+| What you see | Do this now | Avoid this |
+|---|---|---|
+| Green: AI is working | Wait or switch tabs; stage the next prompt with ``Alt+` `` | Repeatedly press Enter or start a second copy of the conversation |
+| Amber: waiting for input | Answer directly; stage several answers if needed | Keep unrelated tasks in the same tab |
+| Red: CLI exited | Use the resume/recovery entry for the original session | Start a duplicate conversation |
+| SSH disconnected | Recover the original remote tab and keep its device/project binding | Immediately start another session on the same device |
+| Device test failed | Fix the IP, user, key, directory, or Codex login and test again | Start remote Codex before readiness checks pass |
+
+#### Useful checkpoints
+
+| Goal | Click/shortcut | Use it when |
+|---|---|---|
+| Review older output | Hold the middle mouse button and drag vertically in the terminal | Logs are long or a failed test needs context |
+| Copy the latest command | Click the last-command bar, or press `Alt+L` to show/hide it | Reusing a command or recording reproduction steps |
+| Queue follow-up work | ``Alt+` `` | The AI is busy but you already know the next step |
+| Save the layout | Workspace menu → Save | Splits, tabs, and directories are ready for the next visit |
+| Release resources | Freeze menu → freeze idle tabs | You will return later but do not need WebView/CLI resources now |
+| Find the session again | Session recovery/resume entry | Windows, CC Pad, or SSH exited unexpectedly |
+
+Remember: **choose local or remote first; keep one goal per tab; green means wait, amber means answer, red means recover; use middle-drag to review and save milestones.**
+
+<details>
+<summary>Why this flow works (long form)</summary>
 
 1. **Open the project first.** Start CC Pad in the project directory, or open a saved workspace. Choose Claude, local Codex, or a configured remote Codex project before creating the session.
 2. **Keep one continuous goal per tab.** Use a new tab for a separate task or conversation. Use splits when you need to compare two related sessions; use one tab per task rather than mixing unrelated work in one terminal.
@@ -152,6 +229,8 @@ A practical default flow for a project is:
 7. **Close or recover deliberately.** Close finished sessions when their output is no longer needed. If Windows or CC Pad exits unexpectedly, use session recovery and the resume entry instead of starting a duplicate conversation. For remote work, keep the device and project association stable so the existing tmux session can be recovered.
 
 The short version is: **project → one goal per tab → split only related work → queue while busy → review output → save a milestone → close or recover**.
+
+</details>
 
 ### Keyboard Shortcuts
 
@@ -331,6 +410,10 @@ This is a community fork of [nuomiaa/CCPad](https://github.com/nuomiaa/CCPad) (b
 - **Exact resume after exit** — Codex and Claude keep the detected session ID after exit, show a runnable resume command, and let **↑** put it back into the shell input line.
 - **Multi-process layout recovery** — When several CC Pad windows start together, each process consumes only its own recovery snapshot instead of clearing layouts still waiting for another window.
 - **CLI launch from elevated hosts** — When CC Pad is started from an administrator terminal, child CLIs use a standard-user token so a Codex daemon cannot inherit administrator privileges.
+
+### v1.10.19
+
+- **Remote browser handoff** — When remote Codex reports `Opened https://… in your browser`, CC Pad now opens the URL in the Windows browser running CC Pad. Clicking a terminal link uses the same local-browser fallback and shows a notice if Windows cannot launch it.
 
 ### v1.10.18
 

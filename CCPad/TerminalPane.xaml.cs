@@ -1920,10 +1920,11 @@ namespace CCPad
                         else if (_inShell && _resumeCommand != null)
                         {
                             // The shell may still contain a partially typed line
-                            // (or a history recall). Clear it before injecting the
-                            // recovery command so the first ↑ press cannot join
-                            // two command strings together.
-                            _session?.WriteInput("\x15");
+                            // (or a history recall). Windows cmd clears its input
+                            // line with Escape; Ctrl+U is a Unix readline shortcut
+                            // and is echoed by cmd as ^U, which would corrupt the
+                            // injected command into something like ^Ucodex.
+                            _session?.WriteInput("\x1b");
                             _session?.WriteInput(_resumeCommand);
                             // Seed the shell input watcher with the injected text
                             // (it bypasses the "input" path) so the user's Enter

@@ -19,8 +19,6 @@
 ---
 
 > Current release: **v1.10.20**
->
-> Unreleased on `master`: Codex quota indicator.
 
 ## Features
 
@@ -30,7 +28,7 @@
 - **Workspaces** — Save and restore your entire layout (splits, tabs, working directories, window state) as `.ccpad-workspace` files. Auto-detects workspace files on startup.
 - **Frozen tabs and templates** *(fork)* — Freeze idle tabs to release resources, thaw them on demand, drag live tabs between panes, and save or restore complete window layouts as `.ccpad-template` files.
 - **Resource guard** *(fork)* — Tracks physical memory and system commit pressure and shows a non-modal warning when freezing idle tabs would help.
-- **Codex quota display** *(unreleased; fork)* — The lower-left indicator shows the signed-in Codex plan, session/weekly usage, reset countdowns, and reset credits; it refreshes when opened and every five minutes.
+- **Codex quota display** *(fork)* — The lower-left indicator shows the signed-in Codex plan, session/weekly usage, reset countdowns, and reset credits; it refreshes when opened and every five minutes.
 - **Codex full-access setting** *(fork)* — The About menu can keep local Codex in dangerous/full-access mode by default, or turn it off for normal approval and sandbox prompts. New, resume, picker, fork, and post-exit recovery commands use the same setting.
 - **Pane-scoped Auto-Enter** *(fork)* — The bottom Enter toggle only watches the active local Claude/Codex pane, confirms a recognized prompt once, and avoids scanning remote panes or large output buffers.
 - **Project Quick-Access** — Pin frequently-used directories for one-click new tabs.
@@ -403,14 +401,6 @@ CCPad/
 
 This is a community fork of [nuomiaa/CCPad](https://github.com/nuomiaa/CCPad) (based on upstream **v1.0.2**). Changes made in this fork:
 
-### Unreleased
-
-- **Codex quota display** — Show the signed-in account's plan, session/weekly usage, reset times, and reset credits in the lower-left toolbar indicator.
-- **Codex / Claude resume entries** — The local-project menu now offers **Resume Codex** and **Resume Claude**, opening the corresponding CLI resume picker.
-- **Exact resume after exit** — Codex and Claude keep the detected session ID after exit, show a runnable resume command, and let **↑** put it back into the shell input line.
-- **Multi-process layout recovery** — When several CC Pad windows start together, each process consumes only its own recovery snapshot instead of clearing layouts still waiting for another window.
-- **CLI launch from elevated hosts** — When CC Pad is started from an administrator terminal, child CLIs use a standard-user token so a Codex daemon cannot inherit administrator privileges.
-
 ### v1.10.20
 
 - **Remote browser bridge review fix** — Consume handled browser-open messages from the remote output scan so an old URL cannot be opened again after unrelated output arrives.
@@ -449,6 +439,11 @@ This is a community fork of [nuomiaa/CCPad](https://github.com/nuomiaa/CCPad) (b
 
 ### v1.10.11
 
+- **Codex quota display** — Show the signed-in account's plan, session/weekly usage, reset times, and reset credits in the lower-left toolbar indicator.
+- **Codex / Claude resume entries** — The local-project menu offers **Resume Codex** and **Resume Claude**, opening the corresponding CLI resume picker.
+- **Exact resume after exit** — Codex and Claude keep the detected session ID after exit, show a runnable resume command, and let **↑** put it back into the shell input line.
+- **Multi-process layout recovery** — When several CC Pad windows start together, each process consumes only its own recovery snapshot instead of clearing layouts still waiting for another window.
+- **CLI launch from elevated hosts** — When CC Pad is started from an administrator terminal, child CLIs use a standard-user token so a Codex daemon cannot inherit administrator privileges.
 - **Split-pane localization refresh** — Rebuilt split layouts keep their language subscriptions, so project and external-project labels update together across all panes.
 - **Live UI refresh** — Existing tab menus, frozen placeholders, terminal error overlays, the file panel, and the staging page now use the newly selected language immediately.
 

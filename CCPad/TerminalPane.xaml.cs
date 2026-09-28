@@ -1088,8 +1088,10 @@ namespace CCPad
             if (_remoteBrowserOpenScan.Length > 4096)
                 _remoteBrowserOpenScan = _remoteBrowserOpenScan[^4096..];
 
+            int consumedThrough = 0;
             foreach (Match match in RemoteBrowserOpenPattern.Matches(_remoteBrowserOpenScan))
             {
+                consumedThrough = Math.Max(consumedThrough, match.Index + match.Length);
                 string raw = match.Groups[1].Value.TrimEnd('.', ',', ';', ':', ')', ']', '。', '，');
                 if (!Uri.TryCreate(raw, UriKind.Absolute, out var uri) ||
                     (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
@@ -1104,6 +1106,12 @@ namespace CCPad
                 _lastRemoteBrowserLaunchUtc = now;
                 DispatcherQueue.TryEnqueue(() => _ = OpenLocalBrowserAsync(uri));
             }
+
+            // Keep only text after the most recent complete match. This both
+            // preserves an incomplete URL split across PTY chunks and prevents
+            // a stale match from being reopened when unrelated output arrives.
+            if (consumedThrough > 0)
+                _remoteBrowserOpenScan = _remoteBrowserOpenScan[consumedThrough..];
         }
 
         private async Task OpenLocalBrowserAsync(Uri uri)

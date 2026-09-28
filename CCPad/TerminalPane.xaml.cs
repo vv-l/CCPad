@@ -67,13 +67,16 @@ namespace CCPad
         private TaskCompletionSource? _readyTcs;
         private TaskCompletionSource? _loadedTcs;
         private bool _autoConfirm;
-        // Auto-confirm is event-driven: retain only a short tail so a prompt
-        // split across PTY chunks still matches without re-scanning 8 KB on every
-        // output chunk. The Codex question and option are tracked for a short
-        // window because they are often painted in separate chunks.
+        // Auto-confirm keeps a short, ANSI-free tail even while the switch is off.
+        // This lets enabling the switch act on a confirmation prompt that is
+        // already visible instead of waiting for Codex to repaint it.
         private string _autoConfirmTail = "";
         private DateTime _codexApprovalPromptUtc = DateTime.MinValue;
         private Timer? _autoConfirmTimer;
+        // A timer is only one part of an automated send. Keep a separate in-flight
+        // flag so command staging remains blocked during the actual PTY write and
+        // the short remote F12/reply delays as well.
+        private bool _automationSendInFlight;
         private CancellationTokenSource? _stagedSubmitCts;
         private const int AutoConfirmTailChars = 512;
         private const int CodexApprovalWindowSeconds = 15;
@@ -413,8 +416,17 @@ namespace CCPad
         /// <summary>Turn auto-confirm on/off from the host (the WinUI toolbar button).</summary>
         public void SetAutoConfirm(bool on)
         {
+            if (_autoConfirm == on) return;
             _autoConfirm = on;
-            ResetAutoConfirmState();
+            if (!on)
+            {
+                ResetAutoConfirmState();
+                return;
+            }
+
+            // Keep the retained terminal tail when enabling. A prompt may already
+            // be painted by the time the user turns the switch on.
+            TryScheduleAutoConfirmFromTail(allowRetainedPrompt: true);
         }
 
         private void ResetAutoConfirmState()
@@ -423,6 +435,7 @@ namespace CCPad
             _codexApprovalPromptUtc = DateTime.MinValue;
             _autoConfirmTimer?.Dispose();
             _autoConfirmTimer = null;
+            SendPaneStatus(_status);
         }
 
         /// <summary>Write a staged command first, then submit it only after the
@@ -488,7 +501,10 @@ namespace CCPad
                 PaneStatus.Waiting => "waiting",
                 _ => "disconnected"
             };
-            string json = $"{{\"type\":\"paneStatus\",\"status\":\"{s}\"}}";
+            bool automationPending = _automationSendInFlight ||
+                                     _autoConfirmTimer != null ||
+                                     _autoReplyPending != null;
+            string json = $"{{\"type\":\"paneStatus\",\"status\":\"{s}\",\"automationPending\":{(automationPending ? "true" : "false")}}}";
             DispatcherQueue.TryEnqueue(() => WebView.CoreWebView2?.PostWebMessageAsString(json));
         }
 
@@ -993,6 +1009,13 @@ namespace CCPad
         private void StartSession()
         {
             _sessionPending = false;
+            OnRealSubmitResetAutoReply();
+            _autoConfirmTail = "";
+            _codexApprovalPromptUtc = DateTime.MinValue;
+            _autoConfirmTimer?.Dispose();
+            _autoConfirmTimer = null;
+            _automationSendInFlight = false;
+            SendPaneStatus(_status);
             _session?.Dispose();
             _session = null;
             _awaitingRestart = false;
@@ -1060,14 +1083,15 @@ namespace CCPad
             CheckRemoteBrowserOpen(text);
             MaybeCorrectStaleWaiting(data);
             bool reply = Settings.AutoReplyManager.IsOn;
-            if (_autoConfirm || reply)
-            {
-                string plain = StripAnsiText(text);
-                if (_autoConfirm)
-                    CheckAutoConfirm(plain);
-                if (reply)
-                    CheckAutoReply(plain);
-            }
+            // Keep the approval tail regardless of the toggle. This is cheap (the
+            // tail is capped at 512 chars) and makes a later toggle useful for a
+            // prompt that is already on screen.
+            string plain = StripAnsiText(text);
+            ObserveAutoConfirmOutput(plain);
+            if (_autoConfirm)
+                CheckAutoConfirm();
+            if (reply)
+                CheckAutoReply(plain);
         }
 
         /// <summary>
@@ -1376,31 +1400,36 @@ namespace CCPad
             return sb.ToString();
         }
 
-        private void CheckAutoConfirm(string plain)
+        private void ObserveAutoConfirmOutput(string plain)
         {
-            // Never press Enter in a fallback shell or a remote Codex pane. The
-            // toolbar switch is intentionally scoped to local interactive CLIs.
-            if ((_inShell && !_shellCliActive) ||
-                string.Equals(CliMode, Settings.CliMode.CodexRemote, StringComparison.OrdinalIgnoreCase))
-                return;
-
             if (string.IsNullOrEmpty(plain)) return;
-            string lower = plain.ToLowerInvariant();
-            string scan = _autoConfirmTail + lower;
+            string scan = _autoConfirmTail + plain.ToLowerInvariant();
             if (scan.Length > AutoConfirmTailChars)
                 scan = scan[^AutoConfirmTailChars..];
             _autoConfirmTail = scan;
 
-            // Codex command approval is deliberately a two-part match. Seeing the
-            // question alone is not enough: Enter is safe only after the affirmative
-            // option is present and selected by Codex's menu.
             if (scan.Contains(CodexCommandApprovalPrompt.ToLowerInvariant(), StringComparison.Ordinal))
                 _codexApprovalPromptUtc = DateTime.UtcNow;
+        }
 
-            bool matched = _codexApprovalPromptUtc != DateTime.MinValue &&
-                           (DateTime.UtcNow - _codexApprovalPromptUtc).TotalSeconds <= CodexApprovalWindowSeconds &&
+        private bool TryScheduleAutoConfirmFromTail(bool allowRetainedPrompt)
+        {
+            // Never press Enter in a fallback shell or a remote Codex pane. The
+            // toolbar switch is intentionally scoped to local interactive CLIs.
+            if (!_autoConfirm || (_inShell && !_shellCliActive) ||
+                string.Equals(CliMode, Settings.CliMode.CodexRemote, StringComparison.OrdinalIgnoreCase))
+                return false;
+            if (_autoConfirmTimer != null || _autoReplyPending != null || _automationSendInFlight)
+                return false;
+
+            string scan = _autoConfirmTail;
+            bool hasCodexPrompt = scan.Contains(CodexCommandApprovalPrompt.ToLowerInvariant(), StringComparison.Ordinal);
+            bool matched = hasCodexPrompt &&
+                           (allowRetainedPrompt ||
+                            (_codexApprovalPromptUtc != DateTime.MinValue &&
+                             (DateTime.UtcNow - _codexApprovalPromptUtc).TotalSeconds <= CodexApprovalWindowSeconds)) &&
                            scan.Contains(CodexProceedOption.ToLowerInvariant(), StringComparison.Ordinal);
-            if (!matched)
+            if (!matched && !allowRetainedPrompt)
             {
                 foreach (var hint in ConfirmHints)
                 {
@@ -1411,17 +1440,51 @@ namespace CCPad
                     }
                 }
             }
-            if (!matched) return;
+            if (!matched) return false;
 
             _autoConfirmTail = "";
             _codexApprovalPromptUtc = DateTime.MinValue;
             _autoConfirmTimer?.Dispose();
-            _autoConfirmTimer = new Timer(_ =>
+            _autoConfirmTimer = new Timer(_ => FireAutoConfirmNow(), null, 300, Timeout.Infinite);
+            // A prompt is an input boundary. Mark it waiting while the automatic
+            // Enter is pending, and publish the pending flag so staging cannot
+            // submit another command beside the confirmation.
+            if (_status == PaneStatus.Working)
+                SetStatus(PaneStatus.Waiting);
+            else
+                SendPaneStatus(_status);
+            return true;
+        }
+
+        private void CheckAutoConfirm()
+        {
+            TryScheduleAutoConfirmFromTail(allowRetainedPrompt: false);
+        }
+
+        private void FireAutoConfirmNow()
+        {
+            _automationSendInFlight = true;
+            try
             {
-                if (_autoConfirm && _session != null)
+                if (_autoConfirm && _session != null && !_disposed)
+                {
+                    // Flip green before writing so command staging cannot enter
+                    // during the confirmation's short settle window.
+                    if (_status == PaneStatus.Waiting)
+                        SetStatus(PaneStatus.Working);
+                    else
+                        SendPaneStatus(_status);
                     _session.WriteInput("\r");
+                    _lastUserInputUtc = DateTime.UtcNow;
+                }
+            }
+            catch { }
+            finally
+            {
                 _autoConfirmTimer = null;
-            }, null, 300, Timeout.Infinite);
+                _automationSendInFlight = false;
+                SendPaneStatus(_status);
+            }
         }
 
         // Auto-reply (自动应答): match the user's custom trigger phrases against
@@ -1454,6 +1517,11 @@ namespace CCPad
                     continue;
 
                 _replyScanCarry = "";
+                // Only one automated input may own the pane at a time. An
+                // approval confirmation has priority over a custom reply, and
+                // the staging queue is held by the same paneStatus barrier.
+                if (_autoConfirmTimer != null || _automationSendInFlight)
+                    return;
                 // The banner IS the proof the turn halted — codex emits no
                 // notify event for an errored turn, so nothing else would ever
                 // take the light off green. Show amber right away; the fire
@@ -1477,6 +1545,9 @@ namespace CCPad
             _autoReplyPending = rule;
             _autoReplyTimer?.Dispose();
             _autoReplyTimer = new Timer(_ => FireAutoReplyNow(rule), null, delayMs, Timeout.Infinite);
+            // Keep command staging behind the reply timer. The timer and the
+            // actual PTY write are both represented by paneStatus's pending flag.
+            SendPaneStatus(_status);
         }
 
         /// <summary>Cancel a scheduled auto-send and reset the consecutive-retry
@@ -1485,12 +1556,15 @@ namespace CCPad
         {
             _autoReplyFireCount.Clear();
             _autoReplyCapNoticeShown = false;
+            bool hadPending = _autoReplyPending != null || _autoReplyTimer != null;
             if (_autoReplyPending != null)
             {
                 _autoReplyPending = null;
                 _autoReplyTimer?.Dispose();
                 _autoReplyTimer = null;
             }
+            if (hadPending)
+                SendPaneStatus(_status);
         }
 
         // Send the reply the same way the staging queue does: text first, Enter
@@ -1499,9 +1573,12 @@ namespace CCPad
         private void FireAutoReplyNow(Settings.AutoReplyRule rule)
         {
             var session = _session;
-            if (session == null || _disposed || !Settings.AutoReplyManager.IsOn)
+            if (session == null || _disposed || _inShell || _awaitingRestart ||
+                !Settings.AutoReplyManager.IsOn)
             {
                 _autoReplyPending = null;
+                _autoReplyTimer = null;
+                SendPaneStatus(_status);
                 return;
             }
 
@@ -1512,11 +1589,13 @@ namespace CCPad
                 _autoReplyFireCount.TryGetValue(rule.Trigger, out var fired) && fired >= rule.MaxRetries)
             {
                 _autoReplyPending = null;
+                _autoReplyTimer = null;
                 if (!_autoReplyCapNoticeShown)
                 {
                     _autoReplyCapNoticeShown = true;
                     ShowNotice(Localization.Loc.T("reply_cap_hit", rule.MaxRetries));
                 }
+                SendPaneStatus(_status);
                 return;
             }
 
@@ -1533,8 +1612,15 @@ namespace CCPad
                 return;
             }
 
+            _automationSendInFlight = true;
             try
             {
+                // Claim the pane before any text, F12, or settle delay is sent.
+                // This closes the old 400ms/450ms race with command staging.
+                if (_status == PaneStatus.Waiting)
+                    SetStatus(PaneStatus.Working);
+                else
+                    SendPaneStatus(_status);
                 if (string.Equals(CliMode, Settings.CliMode.CodexRemote, StringComparison.OrdinalIgnoreCase))
                 {
                     session.WriteInput("\x1b[24~");
@@ -1559,8 +1645,13 @@ namespace CCPad
                     SetStatus(PaneStatus.Working);
             }
             catch { }
-            _autoReplyPending = null;
-            _autoReplyTimer = null;
+            finally
+            {
+                _autoReplyPending = null;
+                _autoReplyTimer = null;
+                _automationSendInFlight = false;
+                SendPaneStatus(_status);
+            }
         }
 
         private void OnProcessExited()
@@ -2027,8 +2118,7 @@ namespace CCPad
                         break;
 
                     case "autoConfirm":
-                        _autoConfirm = doc.RootElement.GetProperty("enabled").GetBoolean();
-                        ResetAutoConfirmState();
+                        SetAutoConfirm(doc.RootElement.GetProperty("enabled").GetBoolean());
                         break;
 
                 }
@@ -2724,6 +2814,7 @@ namespace CCPad
                 let stagingOn = false;
                 let queue = [];
                 let lastStatus = 'waiting';   // resting state of a fresh CLI
+                let pendingAutomation = false; // host-side auto-enter/reply owns the input
                 let flushTimer = null;
                 let stageWatchdog = null;     // re-polls real status so a missed
                                               // working→waiting transition can't
@@ -3002,12 +3093,13 @@ namespace CCPad
                   ensureWatchdog();
                   if (editingIdx !== null) return;   // paused while an item is being edited
                   if (dragActive) return;            // paused while a row is being dragged
+                  if (pendingAutomation) return;     // auto-enter/reply has the input gate
                   if (lastStatus !== 'waiting') return;
                   if (flushTimer) return;
                   // Small settle delay so the CLI prompt is ready to receive input.
                   flushTimer = setTimeout(() => {
                     flushTimer = null;
-                    if (!stagingOn || queue.length === 0 || lastStatus !== 'waiting') return;
+                    if (!stagingOn || queue.length === 0 || lastStatus !== 'waiting' || pendingAutomation) return;
                     if (editingIdx !== null) return; // edit opened during the settle delay
                     if (dragActive) return;          // drag started during the settle delay
                     const cmd = queue.shift();
@@ -3256,9 +3348,14 @@ namespace CCPad
                   } else if (msg.type === 'shellMode') {
                     shellResumeAvailable = !!msg.resume;
                   } else if (msg.type === 'paneStatus') {
+                    const wasPending = pendingAutomation;
                     lastStatus = msg.status;
+                    pendingAutomation = !!msg.automationPending;
+                    if (pendingAutomation && flushTimer) {
+                      clearTimeout(flushTimer); flushTimer = null;
+                    }
                     renderStatus();
-                    if (lastStatus === 'waiting') maybeFlush();
+                    if (lastStatus === 'waiting' && (!pendingAutomation || wasPending)) maybeFlush();
                   } else if (msg.type === 'setStaging') {
                     applyStaging(!!msg.on);
                   } else if (msg.type === 'setLastCmdBar') {

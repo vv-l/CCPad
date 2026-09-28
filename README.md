@@ -401,6 +401,11 @@ CCPad/
 
 This is a community fork of [nuomiaa/CCPad](https://github.com/nuomiaa/CCPad) (based on upstream **v1.0.2**). Changes made in this fork:
 
+### v1.10.21
+
+- **Automation handoff fix** — Auto-Enter keeps a short prompt tail and can confirm a Codex approval prompt that was already visible when the switch is enabled. Auto-Enter and Auto-reply claim an input gate while they send, so queued commands cannot race their text or Enter key. Command staging resumes only after the pane reports idle again.
+- **Clearer automation roles** — Auto-Enter handles confirmation prompts in the current local pane; Auto-reply still matches only configured output phrases; Command Staging queues prompts for the same pane and sends them when idle. These controls can be enabled together without merging their inputs.
+
 ### v1.10.20
 
 - **Remote browser bridge review fix** — Consume handled browser-open messages from the remote output scan so an old URL cannot be opened again after unrelated output arrives.

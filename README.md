@@ -28,7 +28,7 @@
 - **Workspaces** — Save and restore your entire layout (splits, tabs, working directories, window state) as `.ccpad-workspace` files. Auto-detects workspace files on startup.
 - **Frozen tabs and templates** *(fork)* — Freeze idle tabs to release resources, thaw them on demand, drag live tabs between panes, and save or restore complete window layouts as `.ccpad-template` files.
 - **Resource guard** *(fork)* — Tracks physical memory and system commit pressure and shows a non-modal warning when freezing idle tabs would help.
-- **Codex quota display** *(fork)* — The lower-left indicator shows the signed-in Codex plan, session/weekly usage, reset countdowns, and reset credits; it refreshes when opened and every five minutes.
+- **Codex and Claude quota display** *(fork)* — Separate lower-left indicators show each provider's available usage and reset countdown. Each refreshes on launch and every five minutes; an unreadable Claude subscription shows `--`.
 - **Codex full-access setting** *(fork)* — The About menu can keep local Codex in dangerous/full-access mode by default, or turn it off for normal approval and sandbox prompts. New, resume, picker, fork, and post-exit recovery commands use the same setting.
 - **Pane-scoped Auto-Enter** *(fork)* — The bottom Enter toggle only watches the active local Claude/Codex pane, confirms a recognized prompt once, and avoids scanning remote panes or large output buffers.
 - **Project Quick-Access** — Pin frequently-used directories for one-click new tabs.
@@ -318,7 +318,7 @@ Use the workspace button (top-right, visible in workspace mode) or the context m
 ### Safety and preferences
 
 - **Auto-Enter** and **Auto-reply** are separate toolbar controls. Auto-Enter presses Enter when a confirmation prompt is detected. Auto-reply matches configured phrases in pane output; left-click toggles it and right-click edits rules. Rules have a 30-second per-phrase cooldown and a retry cap.
-- **Codex quota display** reads the local `%CODEX_HOME%\auth.json` file (or `%USERPROFILE%\.codex\auth.json`) and requests usage over HTTPS. The access token is kept in memory for the request and is not written to CC Pad logs; if Codex is not signed in, the indicator remains unavailable.
+- **Quota indicators** show Codex and Claude separately. Codex reads `%CODEX_HOME%\auth.json` (or `%USERPROFILE%\.codex\auth.json`); Claude reads the local Claude Code OAuth profile. Tokens are kept in memory for HTTPS requests and are not written to CC Pad logs. API-billed Claude Code or a Free web account without a readable subscription quota shows `--`.
 - **About → Bypass permission prompts** controls newly launched local Claude tabs and is enabled by default in this fork (`--permission-mode bypassPermissions`). Turn it off when you want Claude's normal approval prompts. Existing sessions keep their original launch mode.
 - **About → Confirm before closing** controls the close dialog and its restore-on-next-launch choice.
 
@@ -400,6 +400,10 @@ CCPad/
 ## Fork Changes
 
 This is a community fork of [nuomiaa/CCPad](https://github.com/nuomiaa/CCPad) (based on upstream **v1.0.2**). Changes made in this fork:
+
+### v1.10.22
+
+- **Terminal environment fix** — All ConPTY child processes now receive `TERM=xterm-256color`, including new tabs, restored sessions, fallback shells and SSH reconnects. Launching CC Pad from an environment with `TERM=dumb` no longer makes local Codex prompt about an unsupported terminal or remote tmux fail with `terminal does not support clear`.
 
 ### v1.10.21
 

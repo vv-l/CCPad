@@ -27,9 +27,11 @@
         <local:FileManagerPanel x:Name="FilePanel" Grid.Row="0" Grid.RowSpan="2"
                                 Grid.Column="1" Visibility="Collapsed"/>
 
-        <Button x:Name="QuotaButton" Grid.Row="1" Grid.Column="0"
-                HorizontalAlignment="Left" VerticalAlignment="Bottom"
-                Margin="8,0,0,8" Padding="7,3"
+        <StackPanel Grid.Row="1" Grid.Column="0"
+                    Orientation="Horizontal" Spacing="6"
+                    HorizontalAlignment="Left" VerticalAlignment="Bottom"
+                    Margin="8,0,0,8">
+        <Button x:Name="QuotaButton" Padding="7,3"
                 ToolTipService.ToolTip="Codex usage"
                 Click="OnQuotaButtonClick">
             <StackPanel Orientation="Horizontal" Spacing="6">
@@ -53,6 +55,14 @@
                             BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
                             BorderThickness="1" CornerRadius="8" Padding="14">
                         <StackPanel Width="320" Spacing="9">
+                            <ComboBox x:Name="QuotaProviderSelector"
+                                      Width="120"
+                                      HorizontalAlignment="Left"
+                                      SelectedIndex="0"
+                                      SelectionChanged="OnQuotaProviderChanged">
+                                <ComboBoxItem x:Name="QuotaCodexItem" Content="Codex"/>
+                                <ComboBoxItem x:Name="QuotaClaudeItem" Content="Claude"/>
+                            </ComboBox>
                             <Grid>
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*"/>
@@ -83,6 +93,23 @@
                 </Flyout>
             </Button.Flyout>
         </Button>
+        <Button x:Name="ClaudeQuotaButton" Padding="7,3"
+                ToolTipService.ToolTip="Claude usage"
+                Click="OnClaudeQuotaButtonClick">
+            <StackPanel Orientation="Horizontal" Spacing="6">
+                <TextBlock x:Name="ClaudeQuotaProviderLabel" Text="Claude"
+                           FontSize="12" VerticalAlignment="Center"/>
+                <ProgressBar x:Name="ClaudeQuotaProgress" Width="54" Height="5"
+                             Minimum="0" Maximum="100" Value="0"
+                             VerticalAlignment="Center"/>
+                <TextBlock x:Name="ClaudeQuotaPercentLabel" Text="--"
+                           FontSize="11" VerticalAlignment="Center"
+                           FontFamily="Cascadia Mono, Consolas"/>
+                <TextBlock x:Name="ClaudeQuotaResetLabel" Text=""
+                           FontSize="11" Opacity="0.7" VerticalAlignment="Center"/>
+            </StackPanel>
+        </Button>
+        </StackPanel>
 
         <!-- Update button — global, bottom-right, left of the toggle cluster -->
         <Button x:Name="UpdateButton" Grid.Row="1" Grid.Column="0"

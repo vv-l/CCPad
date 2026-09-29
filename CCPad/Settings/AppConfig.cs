@@ -62,16 +62,23 @@ namespace CCPad.Settings
         public bool AutoReplyEnabled { get; set; }
 
         /// <summary>Auto-reply rule list. Seeded with the Codex capacity banner
-        /// so the feature works out of the box; users edit via the 应答 button.</summary>
+        /// so the feature works out of the box; Codex exposes retry as the single
+        /// <c>r</c> shortcut (it is not a text prompt). Users edit via the 应答 button.</summary>
         public List<AutoReplyRule> AutoReplyRules { get; set; } = new()
         {
-            new AutoReplyRule { Trigger = "Selected model is at capacity", Reply = "重试" },
+            new AutoReplyRule
+            {
+                Trigger = "Selected model is at capacity. Please try a different model.",
+                Reply = "r"
+            },
         };
     }
 
     /// <summary>One auto-reply rule: when <see cref="Trigger"/> appears in a
     /// pane's output (case-insensitive, ANSI-stripped), send <see cref="Reply"/>
-    /// followed by Enter. An empty Reply sends Enter alone.</summary>
+    /// followed by Enter. A Codex capacity rule omits Enter only when the user
+    /// explicitly configures the single-key <c>r</c> shortcut. An empty Reply
+    /// sends Enter alone.</summary>
     public class AutoReplyRule
     {
         public string Trigger { get; set; } = "";
@@ -288,11 +295,23 @@ namespace CCPad.Settings
                 .Select(r => new AutoReplyRule
                 {
                     Trigger = r.Trigger.Trim(),
-                    Reply = r.Reply,
+                    // Trim the trigger and preserve the user's configured reply.
+                    // The built-in default is `r`, but saved custom replies are
+                    // intentionally not replaced.
+                    Reply = NormalizeReply(r),
                     Enabled = true,
                     MaxRetries = Math.Max(0, r.MaxRetries),
                 })
                 .ToArray();
+        }
+
+        private static string NormalizeReply(AutoReplyRule rule)
+        {
+            // Keep the user's reply verbatim apart from surrounding whitespace.
+            // The built-in Codex rule defaults to the `r` shortcut, but a user may
+            // deliberately configure another reply (for example, a localized
+            // command) and that choice must survive load/save and reload.
+            return rule.Reply?.Trim() ?? "";
         }
 
         public static bool IsOn
@@ -332,7 +351,7 @@ namespace CCPad.Settings
                 .Select(r => new AutoReplyRule
                 {
                     Trigger = r.Trigger,
-                    Reply = r.Reply,
+                    Reply = NormalizeReply(r),
                     Enabled = r.Enabled,
                     MaxRetries = r.MaxRetries,
                 })
@@ -343,9 +362,17 @@ namespace CCPad.Settings
         {
             EnsureLoaded();
             var prefs = AppConfig.Load();
-            prefs.AutoReplyRules = rules;
+            prefs.AutoReplyRules = rules
+                .Select(r => new AutoReplyRule
+                {
+                    Trigger = r.Trigger?.Trim() ?? "",
+                    Reply = NormalizeReply(r),
+                    Enabled = r.Enabled,
+                    MaxRetries = Math.Max(0, r.MaxRetries),
+                })
+                .ToList();
             AppConfig.Save(prefs);
-            RebuildActive(rules);
+            RebuildActive(prefs.AutoReplyRules);
         }
     }
 

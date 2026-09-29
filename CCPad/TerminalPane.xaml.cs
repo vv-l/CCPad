@@ -80,18 +80,24 @@ namespace CCPad
         private CancellationTokenSource? _stagedSubmitCts;
         private const int AutoConfirmTailChars = 512;
         private const int CodexApprovalWindowSeconds = 15;
-        // Auto-reply (自动应答): incremental scan state — only the last
-        // (longest trigger − 1) chars of stripped output are carried between
-        // chunks, so a trigger split across two reads still matches while each
-        // chunk is scanned exactly once (the old 8 KB rolling buffer re-scanned
-        // and re-allocated itself on every chunk — visible GC churn at 4-6
-        // streaming panes). A per-trigger cooldown keeps a TUI repainting the
-        // same banner from machine-gunning the reply.
+        // Auto-reply (自动应答): incremental scan state. Keep only a bounded
+        // suffix so a trigger split across two PTY reads still matches without
+        // rescanning the whole terminal history. A per-trigger cooldown keeps a
+        // TUI repainting the same banner from machine-gunning the reply.
         private string _replyScanCarry = "";
         private Timer? _autoReplyTimer;
         private readonly System.Collections.Generic.Dictionary<string, DateTime> _autoReplyLastFire =
             new(StringComparer.OrdinalIgnoreCase);
         private const int AutoReplyCooldownSeconds = 30;
+        private const int AutoReplyInitialDelayMs = 400;
+        private const int CapacityRetryDelayMs = 800;
+        private const int AutoReplyMinimumCarryChars = 256;
+        private const string CodexCapacityTrigger = "Selected model is at capacity";
+        private const string CodexCapacityBanner =
+            "Selected model is at capacity. Please try a different model.";
+        private static readonly Regex CodexCapacityBannerPattern = new(
+            @"(?:^|[\r\n])\s*(?:(?:ERROR|WARN(?:ING)?)\s*:\s*)?[^\r\n]{0,8}?Selected model is at capacity\.\s*Please try a different model\.\s*(?=$|[\r\n])",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
         // Retry driver state: one pending send at a time. The consecutive-fire
         // count per trigger enforces the rule's MaxRetries; a real user submit
         // (\r on the input channel) resets counts and cancels a pending send.
@@ -632,6 +638,7 @@ namespace CCPad
             WebView.DefaultBackgroundColor = Windows.UI.Color.FromArgb(255, 12, 12, 12);
             CCPad.Settings.ThemeManager.EffectiveChanged += OnThemeEffectiveChanged;
             CCPad.Settings.LastCmdBarManager.Changed += OnLastCmdBarChanged;
+            CCPad.Settings.AutoReplyManager.Changed += OnAutoReplyChanged;
             Localization.Loc.LanguageChanged += OnLanguageChanged;
             // Stale-green watchdog. Always ticking (created once here so no
             // create/dispose race with SetStatus); the callback no-ops unless
@@ -648,6 +655,16 @@ namespace CCPad
             if (_disposed) return;
             string json = $"{{\"type\":\"setLastCmdBar\",\"on\":{(on ? "true" : "false")}}}";
             DispatcherQueue.TryEnqueue(() => WebView.CoreWebView2?.PostWebMessageAsString(json));
+        }
+
+        // Turning the switch off cancels any pending retry. Turning it on only
+        // arms future output; old text already in the terminal must not cause a
+        // retry just because the toolbar was toggled.
+        private void OnAutoReplyChanged(bool on)
+        {
+            if (_disposed) return;
+            if (!on)
+                OnRealSubmitResetAutoReply();
         }
 
         // The terminal page has its own staging controls, so a language switch
@@ -1010,6 +1027,7 @@ namespace CCPad
         {
             _sessionPending = false;
             OnRealSubmitResetAutoReply();
+            _replyScanCarry = "";
             _autoConfirmTail = "";
             _codexApprovalPromptUtc = DateTime.MinValue;
             _autoConfirmTimer?.Dispose();
@@ -1506,15 +1524,28 @@ namespace CCPad
 
             int maxLen = 1;
             foreach (var r in rules)
+            {
                 if (r.Trigger.Length > maxLen) maxLen = r.Trigger.Length;
+                if (IsCodexCapacityRule(r))
+                    maxLen = Math.Max(maxLen, CodexCapacityBanner.Length);
+            }
             string scan = _replyScanCarry.Length == 0 ? plain : _replyScanCarry + plain;
-            int keep = Math.Min(maxLen - 1, scan.Length);
+            int keep = Math.Min(Math.Max(maxLen - 1, AutoReplyMinimumCarryChars), scan.Length);
             _replyScanCarry = keep == 0 ? "" : scan[^keep..];
 
             foreach (var rule in rules)
             {
-                if (scan.IndexOf(rule.Trigger, StringComparison.OrdinalIgnoreCase) < 0)
+                if (!MatchesAutoReplyRule(rule, scan))
                     continue;
+
+                // A user can type the same sentence into the composer. The
+                // built-in capacity banner is only actionable while the pane
+                // is processing a turn; an idle prompt is ordinary user text.
+                if (IsCodexCapacityRule(rule) && _status != PaneStatus.Working)
+                {
+                    _replyScanCarry = "";
+                    continue;
+                }
 
                 _replyScanCarry = "";
                 // Only one automated input may own the pane at a time. An
@@ -1529,7 +1560,9 @@ namespace CCPad
                 if (_status == PaneStatus.Working)
                     SetStatus(PaneStatus.Waiting);
                 if (_autoReplyPending != null) return;   // a send is already scheduled
-                double delayMs = 400;
+                double delayMs = IsCodexCapacityRule(rule)
+                    ? CapacityRetryDelayMs
+                    : AutoReplyInitialDelayMs;
                 if (_autoReplyLastFire.TryGetValue(rule.Trigger, out var last))
                 {
                     double remain = AutoReplyCooldownSeconds - (DateTime.UtcNow - last).TotalSeconds;
@@ -1538,6 +1571,26 @@ namespace CCPad
                 ScheduleAutoReply(rule, (int)delayMs);
                 return;
             }
+        }
+
+        private static bool IsCodexCapacityRule(Settings.AutoReplyRule rule)
+        {
+            var trigger = rule.Trigger?.Trim() ?? "";
+            return string.Equals(trigger, CodexCapacityTrigger, StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(trigger, CodexCapacityBanner, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool MatchesAutoReplyRule(Settings.AutoReplyRule rule, string scan)
+        {
+            if (IsCodexCapacityRule(rule))
+            {
+                // PTY output uses carriage returns for TUI redraws. Treat them
+                // as line boundaries before applying the full-banner expression.
+                string normalized = scan.Replace("\r\n", "\n").Replace('\r', '\n');
+                return CodexCapacityBannerPattern.IsMatch(normalized);
+            }
+
+            return scan.IndexOf(rule.Trigger, StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private void ScheduleAutoReply(Settings.AutoReplyRule rule, int delayMs)
@@ -1556,6 +1609,7 @@ namespace CCPad
         {
             _autoReplyFireCount.Clear();
             _autoReplyCapNoticeShown = false;
+            _replyScanCarry = "";
             bool hadPending = _autoReplyPending != null || _autoReplyTimer != null;
             if (_autoReplyPending != null)
             {
@@ -1629,9 +1683,15 @@ namespace CCPad
                 if (rule.Reply.Length > 0)
                 {
                     session.WriteInput(rule.Reply);
-                    Thread.Sleep(180);
+                    if (!IsCodexCapacityRetryShortcut(rule))
+                        Thread.Sleep(180);
                 }
-                session.WriteInput("\r");
+                // The Codex capacity screen handles a user-configured single `r`
+                // key itself; appending Enter would submit an unintended empty
+                // prompt after the retry transition. Other configured replies,
+                // including localized text, remain text + Enter.
+                if (!IsCodexCapacityRetryShortcut(rule))
+                    session.WriteInput("\r");
                 _autoReplyLastFire[rule.Trigger] = DateTime.UtcNow;
                 _autoReplyFireCount[rule.Trigger] =
                     _autoReplyFireCount.TryGetValue(rule.Trigger, out var n) ? n + 1 : 1;
@@ -1653,6 +1713,13 @@ namespace CCPad
                 SendPaneStatus(_status);
             }
         }
+
+        private static bool IsCodexCapacityRetryShortcut(Settings.AutoReplyRule rule)
+            // Only a user-configured single `r` is the Codex menu shortcut. Any
+            // other configured reply remains ordinary text and is submitted with
+            // Enter, just like every other auto-reply rule.
+            => IsCodexCapacityRule(rule) &&
+               string.Equals(rule.Reply?.Trim(), "r", StringComparison.Ordinal);
 
         private void OnProcessExited()
         {
@@ -1927,17 +1994,25 @@ namespace CCPad
 
                     case "input":
                         string data = doc.RootElement.GetProperty("data").GetString() ?? "";
-                        // A real keystroke takes precedence over a staged submit
-                        // that is still waiting for its final Enter.
-                        CancelStagedSubmit();
-                        _lastUserInputUtc = DateTime.UtcNow;
-                        _lastRealInputUtc = DateTime.UtcNow;
-                        if (data.Length > 0)
-                            ResetAutoConfirmState();
-                        // A real Enter means a human (or the staging queue) took
-                        // over — the auto-reply retry loop starts from scratch.
-                        if (data.Contains('\r'))
-                            OnRealSubmitResetAutoReply();
+                        bool scrollNavigationInput =
+                            doc.RootElement.TryGetProperty("source", out var inputSource) &&
+                            inputSource.ValueKind == JsonValueKind.String &&
+                            inputSource.GetString() is ("middle-scroll" or "wheel-scroll");
+                        if (!scrollNavigationInput)
+                        {
+                            // Mouse navigation must not cancel the Enter that
+                            // submits an already written staged command, or
+                            // count as typing for the auto-reply guard.
+                            CancelStagedSubmit();
+                            _lastUserInputUtc = DateTime.UtcNow;
+                            _lastRealInputUtc = DateTime.UtcNow;
+                            if (data.Length > 0)
+                                ResetAutoConfirmState();
+                            // A real Enter means a human (or the staging queue)
+                            // took over: reset the auto-reply retry budget.
+                            if (data.Contains('\r'))
+                                OnRealSubmitResetAutoReply();
+                        }
                         if (_awaitingRestart && data == "\r")
                             StartSession();
                         else if (_inShell &&
@@ -2170,6 +2245,7 @@ namespace CCPad
             _disposed = true;
             CCPad.Settings.ThemeManager.EffectiveChanged -= OnThemeEffectiveChanged;
             CCPad.Settings.LastCmdBarManager.Changed -= OnLastCmdBarChanged;
+            CCPad.Settings.AutoReplyManager.Changed -= OnAutoReplyChanged;
             Localization.Loc.LanguageChanged -= OnLanguageChanged;
             _loadedTcs?.TrySetCanceled();
             _readyTcs?.TrySetCanceled();
@@ -2554,9 +2630,13 @@ namespace CCPad
                 const middleScroll = {
                   active: false,
                   pointerId: null,
+                  consumeMiddleRelease: false,
+                  consumeMiddleAuxclick: false,
+                  startX: 0,
                   startY: 0,
                   currentY: 0,
-                  lastLines: 0,
+                  lastFrameAt: 0,
+                  partialLines: 0,
                   raf: 0
                 };
                 function isMiddleScrollTarget(e) {
@@ -2573,6 +2653,51 @@ namespace CCPad
                   const computedHeight = rows ? parseFloat(getComputedStyle(rows).lineHeight) : NaN;
                   return Number.isFinite(computedHeight) && computedHeight > 0 ? computedHeight : 18;
                 }
+                // Full-screen CLIs use the alternate buffer, where scrollLines is
+                // a no-op. Route each synthetic wheel step through xterm so its
+                // mouse protocol (or alternate-screen arrow fallback) reaches the
+                // CLI. Mouse reports need real screen coordinates: a WheelEvent
+                // without clientX/clientY is interpreted at the top-left cell.
+                const middleScrollWheelTarget =
+                  terminalElement.querySelector('.xterm-screen') || terminalElement;
+                let dispatchingMiddleScrollWheel = false;
+                let terminalWheelEventsInFlight = 0;
+                terminalElement.addEventListener('wheel', () => {
+                  // xterm emits mouse reports or alternate-screen arrows during
+                  // wheel dispatch. Mark those onData callbacks as navigation.
+                  terminalWheelEventsInFlight++;
+                  queueMicrotask(() => terminalWheelEventsInFlight--);
+                }, true);
+                function dispatchMiddleScrollWheel(deltaLines) {
+                  if (!deltaLines) return;
+                  if (term.buffer.active.type === 'normal' &&
+                      term.modes.mouseTrackingMode === 'none') {
+                    term.scrollLines(deltaLines);
+                    return;
+                  }
+                  const rect = middleScrollWheelTarget.getBoundingClientRect();
+                  // Keep the report over the content where the gesture began.
+                  // Dragging up across a header should still scroll that content.
+                  const clientX = Math.min(Math.max(middleScroll.startX, rect.left + 1), rect.right - 1);
+                  const clientY = Math.min(Math.max(middleScroll.startY, rect.top + 1), rect.bottom - 1);
+                  const direction = Math.sign(deltaLines);
+                  // xterm's mouse protocol sends one wheel report per event even
+                  // when deltaY is large, so emit one event for each line.
+                  for (let line = 0; line < Math.abs(deltaLines); line++) {
+                    dispatchingMiddleScrollWheel = true;
+                    try {
+                      middleScrollWheelTarget.dispatchEvent(new WheelEvent('wheel', {
+                        clientX, clientY,
+                        deltaY: direction,
+                        deltaMode: WheelEvent.DOM_DELTA_LINE,
+                        bubbles: true,
+                        cancelable: true
+                      }));
+                    } finally {
+                      dispatchingMiddleScrollWheel = false;
+                    }
+                  }
+                }
                 function stopMiddleScrollEvent(e) {
                   e.preventDefault();
                   e.stopImmediatePropagation();
@@ -2580,53 +2705,75 @@ namespace CCPad
                 function applyMiddleScroll() {
                   middleScroll.raf = 0;
                   if (!middleScroll.active) return;
-                  const totalLines = Math.trunc(
-                    (middleScroll.currentY - middleScroll.startY) / middleScrollLineHeight()
-                  );
-                  const delta = totalLines - middleScroll.lastLines;
-                  if (delta !== 0) {
-                    term.scrollLines(delta);
-                    middleScroll.lastLines = totalLines;
+                  const now = performance.now();
+                  const seconds = Math.min((now - middleScroll.lastFrameAt) / 1000, 0.1);
+                  middleScroll.lastFrameAt = now;
+                  const distance = middleScroll.currentY - middleScroll.startY;
+                  const deadZone = 8;
+                  const direction = Math.sign(distance);
+                  if (Math.abs(distance) <= deadZone) {
+                    middleScroll.partialLines = 0;
+                  } else {
+                    if (Math.sign(middleScroll.partialLines) !== direction)
+                      middleScroll.partialLines = 0;
+                    const linesPerSecond = Math.min(
+                      80, (Math.abs(distance) - deadZone) / middleScrollLineHeight() * 5
+                    );
+                    middleScroll.partialLines += direction * linesPerSecond * seconds;
+                    const lines = Math.trunc(middleScroll.partialLines);
+                    if (lines !== 0) {
+                      middleScroll.partialLines -= lines;
+                      dispatchMiddleScrollWheel(lines);
+                    }
                   }
+                  middleScroll.raf = requestAnimationFrame(applyMiddleScroll);
                 }
                 function scheduleMiddleScroll(e) {
                   if (!middleScroll.active) return;
-                  if (e.pointerId !== undefined && e.pointerId !== middleScroll.pointerId) return;
+                  if (e.pointerType && e.pointerType !== 'mouse') return;
                   stopMiddleScrollEvent(e);
                   middleScroll.currentY = e.clientY;
-                  if (!middleScroll.raf) middleScroll.raf = requestAnimationFrame(applyMiddleScroll);
                 }
                 function endMiddleScroll(e) {
                   if (!middleScroll.active) return;
-                  if (e && e.pointerId !== undefined && e.pointerId !== middleScroll.pointerId) return;
-                  if (e && (e.type === 'pointerup' || e.type === 'mouseup') && e.button !== 1) return;
-                  const applyFinalPosition = e && e.type === 'pointerup';
-                  if (e && (e.type === 'pointerup' || e.type === 'pointercancel')) {
-                    stopMiddleScrollEvent(e);
-                    if (applyFinalPosition) middleScroll.currentY = e.clientY;
-                  }
                   if (middleScroll.raf) {
                     cancelAnimationFrame(middleScroll.raf);
                     middleScroll.raf = 0;
                   }
-                  if (applyFinalPosition) applyMiddleScroll();
                   const pointerId = middleScroll.pointerId;
                   middleScroll.active = false;
                   middleScroll.pointerId = null;
+                  middleScroll.consumeMiddleRelease = false;
+                  middleScroll.consumeMiddleAuxclick = false;
+                  middleScroll.partialLines = 0;
                   if (pointerId !== null && terminalElement.hasPointerCapture(pointerId)) {
                     try { terminalElement.releasePointerCapture(pointerId); } catch (_) { }
                   }
                   terminalElement.classList.remove('middle-scroll-active');
                   middleScrollIndicator.classList.remove('active');
                 }
-                terminalElement.addEventListener('pointerdown', e => {
+                document.addEventListener('pointerdown', e => {
+                  if (middleScroll.active) {
+                    endMiddleScroll();
+                    if (e.button === 1) {
+                      middleScroll.consumeMiddleRelease = true;
+                      middleScroll.consumeMiddleAuxclick = true;
+                      stopMiddleScrollEvent(e);
+                    }
+                    return;
+                  }
                   if (e.button !== 1 || e.pointerType === 'touch' || !isMiddleScrollTarget(e)) return;
                   stopMiddleScrollEvent(e);
+                  middleScroll.consumeMiddleRelease = true;
+                  middleScroll.consumeMiddleAuxclick = true;
                   middleScroll.active = true;
                   middleScroll.pointerId = e.pointerId;
+                  middleScroll.startX = e.clientX;
                   middleScroll.startY = e.clientY;
                   middleScroll.currentY = e.clientY;
-                  middleScroll.lastLines = 0;
+                  middleScroll.lastFrameAt = performance.now();
+                  middleScroll.partialLines = 0;
+                  middleScroll.raf = requestAnimationFrame(applyMiddleScroll);
                   try { terminalElement.setPointerCapture(e.pointerId); } catch (_) { }
                   middleScrollIndicator.style.left = e.clientX + 'px';
                   middleScrollIndicator.style.top = e.clientY + 'px';
@@ -2634,9 +2781,25 @@ namespace CCPad
                   terminalElement.classList.add('middle-scroll-active');
                 }, true);
                 document.addEventListener('pointermove', scheduleMiddleScroll, true);
-                document.addEventListener('pointerup', endMiddleScroll, true);
-                document.addEventListener('pointercancel', endMiddleScroll, true);
-                terminalElement.addEventListener('lostpointercapture', endMiddleScroll, true);
+                document.addEventListener('pointerup', e => {
+                  if (e.button !== 1 || !middleScroll.consumeMiddleRelease) return;
+                  stopMiddleScrollEvent(e);
+                  middleScroll.consumeMiddleRelease = false;
+                  if (!middleScroll.active) return;
+                  // Browser-style autoscroll continues after the middle button is
+                  // released. Only the capture used during a held drag ends here.
+                  if (middleScroll.pointerId !== null &&
+                      terminalElement.hasPointerCapture(middleScroll.pointerId)) {
+                    try { terminalElement.releasePointerCapture(middleScroll.pointerId); } catch (_) { }
+                  }
+                  middleScroll.pointerId = null;
+                }, true);
+                document.addEventListener('auxclick', e => {
+                  if (e.button !== 1 || !middleScroll.consumeMiddleAuxclick) return;
+                  stopMiddleScrollEvent(e);
+                  middleScroll.consumeMiddleAuxclick = false;
+                }, true);
+                document.addEventListener('pointercancel', () => endMiddleScroll(), true);
                 window.addEventListener('blur', () => endMiddleScroll());
                 document.addEventListener('visibilitychange', () => {
                   if (document.hidden) endMiddleScroll();
@@ -3330,8 +3493,14 @@ namespace CCPad
                 }));
 
                 term.onData(data => {
-                  shadowFeed(data);   // mirror typed input for the last-command bar
-                  window.chrome.webview.postMessage(JSON.stringify({ type: 'input', data }));
+                  const scrollInput = dispatchingMiddleScrollWheel || terminalWheelEventsInFlight > 0;
+                  if (!scrollInput)
+                    shadowFeed(data);   // mouse scroll is navigation, not typed text
+                  window.chrome.webview.postMessage(JSON.stringify({
+                    type: 'input', data,
+                    source: dispatchingMiddleScrollWheel ? 'middle-scroll' :
+                            scrollInput ? 'wheel-scroll' : 'user'
+                  }));
                 });
 
                 term.onResize(({ cols, rows }) => {

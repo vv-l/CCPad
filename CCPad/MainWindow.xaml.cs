@@ -40,11 +40,23 @@ namespace CCPad
         private Microsoft.UI.Dispatching.DispatcherQueueTimer? _resourceTimer;
         private bool _resourceWarningArmed = true;
 
+        private enum QuotaProvider
+        {
+            Codex,
+            Claude,
+        }
+
         private readonly CodexQuotaService _codexQuotaService = new();
-        private Microsoft.UI.Dispatching.DispatcherQueueTimer? _codexQuotaTimer;
-        private Microsoft.UI.Dispatching.DispatcherQueueTimer? _codexQuotaClockTimer;
+        private readonly ClaudeQuotaService _claudeQuotaService = new();
+        private readonly System.Threading.CancellationTokenSource _quotaRefreshCts = new();
+        private Microsoft.UI.Dispatching.DispatcherQueueTimer? _quotaTimer;
+        private Microsoft.UI.Dispatching.DispatcherQueueTimer? _quotaClockTimer;
         private CodexQuotaSnapshot _codexQuotaSnapshot = CodexQuotaSnapshot.Loading();
+        private ClaudeQuotaSnapshot _claudeQuotaSnapshot = ClaudeQuotaSnapshot.Loading();
+        private QuotaProvider _quotaProvider = QuotaProvider.Codex;
+        private QuotaProvider _quotaFlyoutRequestedProvider = QuotaProvider.Codex;
         private bool _codexQuotaRefreshInFlight;
+        private bool _claudeQuotaRefreshInFlight;
 
         public MainWindow()
         {
@@ -68,52 +80,114 @@ namespace CCPad
             ReplyButton.IsChecked = AutoReplyManager.IsOn;
             AutoReplyManager.Changed += OnAutoReplyManagerChanged;
             SessionRecovery.MarkRunning();
-            UpdateCodexQuotaUi(_codexQuotaSnapshot);
+            UpdateQuotaUi();
         }
 
         // ── Theme ───────────────────────────────────────────────────────────
         // Chrome (window + tab strip) switches via XAML ThemeDictionaries keyed off
         // RootContainer.RequestedTheme; terminals listen to ThemeManager separately.
 
-        private void StartCodexQuotaMonitor()
+        private void StartQuotaMonitor()
         {
-            if (_codexQuotaTimer != null)
+            if (_quotaTimer != null)
                 return;
 
-            _codexQuotaTimer = DispatcherQueue.CreateTimer();
-            _codexQuotaTimer.Interval = TimeSpan.FromMinutes(5);
-            _codexQuotaTimer.IsRepeating = true;
-            _codexQuotaTimer.Tick += (_, _) => _ = RefreshCodexQuotaAsync();
-            _codexQuotaTimer.Start();
-            _codexQuotaClockTimer = DispatcherQueue.CreateTimer();
-            _codexQuotaClockTimer.Interval = TimeSpan.FromMinutes(1);
-            _codexQuotaClockTimer.IsRepeating = true;
-            _codexQuotaClockTimer.Tick += (_, _) => UpdateCodexQuotaUi(_codexQuotaSnapshot);
-            _codexQuotaClockTimer.Start();
-            _ = RefreshCodexQuotaAsync();
+            _quotaTimer = DispatcherQueue.CreateTimer();
+            _quotaTimer.Interval = TimeSpan.FromMinutes(5);
+            _quotaTimer.IsRepeating = true;
+            _quotaTimer.Tick += (_, _) => RefreshAllQuotas();
+            _quotaTimer.Start();
+            _quotaClockTimer = DispatcherQueue.CreateTimer();
+            _quotaClockTimer.Interval = TimeSpan.FromMinutes(1);
+            _quotaClockTimer.IsRepeating = true;
+            _quotaClockTimer.Tick += (_, _) => UpdateQuotaUi();
+            _quotaClockTimer.Start();
+            RefreshAllQuotas();
         }
 
-        private async Task RefreshCodexQuotaAsync()
+        private void RefreshAllQuotas()
         {
+            _ = RefreshQuotaAsync(QuotaProvider.Codex);
+            _ = RefreshQuotaAsync(QuotaProvider.Claude);
+        }
+
+        private Task RefreshSelectedQuotaAsync() => RefreshQuotaAsync(_quotaProvider);
+
+        private async Task RefreshQuotaAsync(QuotaProvider provider)
+        {
+            if (_quotaRefreshCts.IsCancellationRequested)
+                return;
+            if (provider == QuotaProvider.Claude)
+            {
+                if (_claudeQuotaRefreshInFlight)
+                    return;
+                _claudeQuotaRefreshInFlight = true;
+                try
+                {
+                    var snapshot = await _claudeQuotaService.RefreshAsync(_quotaRefreshCts.Token).ConfigureAwait(true);
+                    if (!_quotaRefreshCts.IsCancellationRequested && snapshot.State != ClaudeQuotaState.Loading)
+                        UpdateClaudeQuotaUi(snapshot);
+                }
+                catch
+                {
+                    if (!_quotaRefreshCts.IsCancellationRequested)
+                        UpdateClaudeQuotaUi(ClaudeQuotaSnapshot.Unavailable(
+                            Loc.T("quota_claude_unavailable")));
+                }
+                finally
+                {
+                    _claudeQuotaRefreshInFlight = false;
+                }
+                return;
+            }
+
             if (_codexQuotaRefreshInFlight)
                 return;
-
             _codexQuotaRefreshInFlight = true;
             try
             {
-                var snapshot = await _codexQuotaService.RefreshAsync().ConfigureAwait(true);
-                if (snapshot.State == CodexQuotaState.Loading)
-                    return;
-                UpdateCodexQuotaUi(snapshot);
+                var snapshot = await _codexQuotaService.RefreshAsync(_quotaRefreshCts.Token).ConfigureAwait(true);
+                if (!_quotaRefreshCts.IsCancellationRequested && snapshot.State != CodexQuotaState.Loading)
+                    UpdateCodexQuotaUi(snapshot);
             }
             catch
             {
-                UpdateCodexQuotaUi(CodexQuotaSnapshot.ErrorSnapshot("Could not read Codex usage"));
+                if (!_quotaRefreshCts.IsCancellationRequested)
+                    UpdateCodexQuotaUi(CodexQuotaSnapshot.ErrorSnapshot(
+                        "Could not read Codex usage"));
             }
             finally
             {
                 _codexQuotaRefreshInFlight = false;
             }
+        }
+
+        private void OnQuotaProviderChanged(object sender, SelectionChangedEventArgs e)
+        {
+            // SelectedIndex can raise this event while InitializeComponent is still
+            // creating the XAML tree, before the quota badges exist.
+            if (!_initialized)
+                return;
+
+            var provider = QuotaProviderSelector.SelectedIndex == 1
+                ? QuotaProvider.Claude
+                : QuotaProvider.Codex;
+            if (_quotaProvider == provider)
+            {
+                UpdateQuotaUi();
+                return;
+            }
+
+            _quotaProvider = provider;
+            UpdateQuotaUi();
+            if (_initialized)
+                _ = RefreshSelectedQuotaAsync();
+        }
+
+        private void UpdateQuotaUi()
+        {
+            UpdateCodexQuotaUi(_codexQuotaSnapshot);
+            UpdateClaudeQuotaUi(_claudeQuotaSnapshot);
         }
 
         private void UpdateCodexQuotaUi(CodexQuotaSnapshot snapshot)
@@ -123,13 +197,34 @@ namespace CCPad
             var percent = hasUsage ? snapshot.TightestUsedPercent : 0;
             var soonestReset = GetSoonestReset(snapshot);
             QuotaProgress.Value = percent;
-            QuotaFlyoutProgress.Value = percent;
             QuotaPercentLabel.Text = hasUsage ? $"{percent:0}%" : "--";
             QuotaResetLabel.Text = soonestReset.HasValue
                 ? FormatCountdown(soonestReset.Value - DateTimeOffset.UtcNow)
                 : "";
-            QuotaFlyoutTitle.Text = Loc.T("quota_title");
             QuotaProviderLabel.Text = Loc.T("quota_codex");
+            ToolTipService.SetToolTip(QuotaButton, hasUsage
+                ? Loc.T("quota_tooltip", percent)
+                : Loc.T("quota_tooltip_empty"));
+
+            if (_quotaProvider != QuotaProvider.Codex)
+                return;
+
+            // The contents of a Flyout are created lazily by WinUI. During the
+            // MainWindow constructor (and during early language/theme updates)
+            // these named elements can still be null. Keep the always-visible
+            // quota button usable and finish the flyout UI when it is opened.
+            if (QuotaFlyoutProgress is null ||
+                QuotaFlyoutTitle is null ||
+                QuotaFlyoutPlan is null ||
+                QuotaFlyoutUpdated is null ||
+                QuotaCreditsLabel is null ||
+                QuotaFlyoutStatus is null ||
+                QuotaRefreshButton is null ||
+                QuotaWindowPanel is null)
+                return;
+
+            QuotaFlyoutProgress.Value = percent;
+            QuotaFlyoutTitle.Text = Loc.T("quota_title");
             QuotaFlyoutPlan.Text = hasUsage && !string.IsNullOrWhiteSpace(snapshot.PlanType)
                 ? Loc.T("quota_plan", snapshot.PlanType!)
                 : "";
@@ -147,10 +242,65 @@ namespace CCPad
                 _ => ""
             };
             QuotaRefreshButton.Content = Loc.T("quota_refresh");
-            ToolTipService.SetToolTip(QuotaButton, hasUsage
-                ? Loc.T("quota_tooltip", percent)
-                : Loc.T("quota_tooltip_empty"));
+            QuotaWindowPanel.Children.Clear();
+            if (hasUsage)
+            {
+                foreach (var window in snapshot.Windows)
+                    QuotaWindowPanel.Children.Add(CreateQuotaWindowRow(window));
+            }
+        }
 
+        private void UpdateClaudeQuotaUi(ClaudeQuotaSnapshot snapshot)
+        {
+            _claudeQuotaSnapshot = snapshot;
+            var hasUsage = snapshot.State == ClaudeQuotaState.Ready && snapshot.Windows.Length > 0;
+            var hasPlan = !string.IsNullOrWhiteSpace(snapshot.PlanLabel);
+            var percent = hasUsage ? snapshot.TightestUsedPercent : 0;
+            var soonestReset = GetSoonestReset(snapshot);
+            ClaudeQuotaProgress.Value = percent;
+            ClaudeQuotaPercentLabel.Text = hasUsage ? $"{percent:0}%" : "--";
+            ClaudeQuotaResetLabel.Text = soonestReset.HasValue
+                ? FormatCountdown(soonestReset.Value - DateTimeOffset.UtcNow)
+                : "";
+            ClaudeQuotaProviderLabel.Text = Loc.T("quota_claude");
+            ToolTipService.SetToolTip(ClaudeQuotaButton,
+                snapshot.State == ClaudeQuotaState.Unavailable
+                    ? Loc.T("quota_claude_not_signed_in")
+                    : hasUsage
+                        ? Loc.T("quota_claude_tooltip", percent)
+                        : Loc.T("quota_claude_tooltip_empty"));
+
+            if (_quotaProvider != QuotaProvider.Claude)
+                return;
+
+            if (QuotaFlyoutProgress is null ||
+                QuotaFlyoutTitle is null ||
+                QuotaFlyoutPlan is null ||
+                QuotaFlyoutUpdated is null ||
+                QuotaCreditsLabel is null ||
+                QuotaFlyoutStatus is null ||
+                QuotaRefreshButton is null ||
+                QuotaWindowPanel is null)
+                return;
+
+            QuotaFlyoutProgress.Value = percent;
+            QuotaFlyoutTitle.Text = Loc.T("quota_title");
+            QuotaFlyoutPlan.Text = hasPlan
+                ? Loc.T("quota_plan", snapshot.PlanLabel!)
+                : "";
+            QuotaFlyoutUpdated.Text = snapshot.UpdatedAt.HasValue
+                ? Loc.T("quota_updated", FormatClock(snapshot.UpdatedAt.Value))
+                : "";
+            QuotaCreditsLabel.Text = "";
+            QuotaFlyoutStatus.Text = snapshot.State switch
+            {
+                ClaudeQuotaState.Loading => Loc.T("quota_claude_loading"),
+                ClaudeQuotaState.Unavailable => Loc.T("quota_claude_not_signed_in"),
+                ClaudeQuotaState.ProfileOnly => snapshot.Error ?? Loc.T("quota_claude_unavailable"),
+                ClaudeQuotaState.Error => snapshot.Error ?? Loc.T("quota_claude_unavailable"),
+                _ => snapshot.Error ?? ""
+            };
+            QuotaRefreshButton.Content = Loc.T("quota_refresh");
             QuotaWindowPanel.Children.Clear();
             if (hasUsage)
             {
@@ -172,7 +322,29 @@ namespace CCPad
             return soonest;
         }
 
+        private static DateTimeOffset? GetSoonestReset(ClaudeQuotaSnapshot snapshot)
+        {
+            DateTimeOffset? soonest = null;
+            foreach (var window in snapshot.Windows)
+            {
+                if (!window.ResetsAt.HasValue ||
+                    (soonest.HasValue && window.ResetsAt.Value >= soonest.Value))
+                    continue;
+                soonest = window.ResetsAt.Value;
+            }
+            return soonest;
+        }
+
         private UIElement CreateQuotaWindowRow(CodexQuotaWindow window)
+            => CreateQuotaWindowRow(window.Label, window.UsedPercent, window.ResetsAt);
+
+        private UIElement CreateQuotaWindowRow(ClaudeQuotaWindow window)
+            => CreateQuotaWindowRow(window.Label, window.UsedPercent, window.ResetsAt);
+
+        private UIElement CreateQuotaWindowRow(
+            string windowLabel,
+            double usedPercent,
+            DateTimeOffset? resetsAt)
         {
             var panel = new StackPanel { Spacing = 4 };
             var header = new Grid();
@@ -180,14 +352,15 @@ namespace CCPad
             header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             var label = new TextBlock
             {
-                Text = window.Label == "Session" ? Loc.T("quota_session") :
-                    window.Label == "Weekly" ? Loc.T("quota_weekly") : window.Label,
+                Text = windowLabel == "Session" || windowLabel == "5h" ? Loc.T("quota_session") :
+                    windowLabel == "Weekly" || windowLabel == "7d" ? Loc.T("quota_weekly") :
+                    windowLabel == "7d Sonnet" ? Loc.T("quota_weekly_sonnet") : windowLabel,
                 FontSize = 12,
                 FontWeight = Microsoft.UI.Text.FontWeights.SemiBold
             };
             var percent = new TextBlock
             {
-                Text = $"{window.UsedPercent:0}%",
+                Text = $"{usedPercent:0}%",
                 FontSize = 12,
                 FontFamily = new FontFamily("Cascadia Mono, Consolas"),
                 HorizontalAlignment = HorizontalAlignment.Right
@@ -201,16 +374,16 @@ namespace CCPad
             {
                 Minimum = 0,
                 Maximum = 100,
-                Value = window.UsedPercent,
+                Value = usedPercent,
                 Height = 6
             };
             panel.Children.Add(progress);
 
-            if (window.ResetsAt.HasValue)
+            if (resetsAt.HasValue)
             {
                 panel.Children.Add(new TextBlock
                 {
-                    Text = Loc.T("quota_resets", FormatCountdown(window.ResetsAt.Value - DateTimeOffset.UtcNow)),
+                    Text = Loc.T("quota_resets", FormatCountdown(resetsAt.Value - DateTimeOffset.UtcNow)),
                     FontSize = 11,
                     Opacity = 0.7
                 });
@@ -233,13 +406,35 @@ namespace CCPad
         }
 
         private void OnQuotaButtonClick(object sender, RoutedEventArgs e)
-            => _ = RefreshCodexQuotaAsync();
+            => ShowQuotaDetails(QuotaProvider.Codex, openFlyout: false);
+
+        private void OnClaudeQuotaButtonClick(object sender, RoutedEventArgs e)
+            => ShowQuotaDetails(QuotaProvider.Claude, openFlyout: true);
+
+        private void ShowQuotaDetails(QuotaProvider provider, bool openFlyout)
+        {
+            _quotaFlyoutRequestedProvider = provider;
+            _quotaProvider = provider;
+            if (QuotaProviderSelector is not null)
+                QuotaProviderSelector.SelectedIndex = provider == QuotaProvider.Claude ? 1 : 0;
+            UpdateQuotaUi();
+            if (openFlyout)
+                QuotaFlyout.ShowAt(ClaudeQuotaButton);
+            _ = RefreshSelectedQuotaAsync();
+        }
 
         private void OnQuotaFlyoutOpened(object sender, object e)
-            => _ = RefreshCodexQuotaAsync();
+        {
+            // Flyout contents are created lazily. Their initial selector event
+            // may fire before Opened and must not override the clicked badge.
+            _quotaProvider = _quotaFlyoutRequestedProvider;
+            QuotaProviderSelector.SelectedIndex = _quotaProvider == QuotaProvider.Claude ? 1 : 0;
+            UpdateQuotaUi();
+            _ = RefreshSelectedQuotaAsync();
+        }
 
         private void OnQuotaRefreshClick(object sender, RoutedEventArgs e)
-            => _ = RefreshCodexQuotaAsync();
+            => _ = RefreshSelectedQuotaAsync();
 
         private void ApplyThemePref()
         {
@@ -265,7 +460,7 @@ namespace CCPad
             if (_initialized) return;
             _initialized = true;
             RootGrid.Loaded -= OnRootLoaded;
-            StartCodexQuotaMonitor();
+            StartQuotaMonitor();
 
             // Apply the saved theme before any terminal panes are built below, so
             // their initial xterm styling matches the effective dark/light value.
@@ -1555,7 +1750,11 @@ namespace CCPad
             ReplyButtonLabel.Text = Loc.T("btn_reply");
             ToolTipService.SetToolTip(StageButton, Loc.T("tip_stage"));
             StageButtonLabel.Text = Loc.T("btn_stage");
-            UpdateCodexQuotaUi(_codexQuotaSnapshot);
+            if (QuotaCodexItem is not null)
+                QuotaCodexItem.Content = Loc.T("quota_codex");
+            if (QuotaClaudeItem is not null)
+                QuotaClaudeItem.Content = Loc.T("quota_claude");
+            UpdateQuotaUi();
         }
 
         /// <summary>Live language switch: rebuild menus + chrome in the new language.</summary>
@@ -2073,9 +2272,11 @@ namespace CCPad
             LastCmdBarManager.Changed -= OnLastCmdBarManagerChanged;
 
             _resourceTimer?.Stop();
-            _codexQuotaTimer?.Stop();
-            _codexQuotaClockTimer?.Stop();
+            _quotaTimer?.Stop();
+            _quotaClockTimer?.Stop();
+            _quotaRefreshCts.Cancel();
             _codexQuotaService.Dispose();
+            _claudeQuotaService.Dispose();
 
             // Snapshot for the closed-session history must be taken while the
             // panes (and their session IDs / working dirs) are still alive.

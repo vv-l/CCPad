@@ -311,11 +311,16 @@ namespace CCPad.Terminal
 
         /// <summary>
         /// Build a Unicode environment block that inherits the current process's
-        /// environment and forces UTF-8 locale variables.
+        /// environment and declares this terminal's capabilities and UTF-8 locale.
         /// </summary>
         private static IntPtr BuildUtf8EnvironmentBlock()
         {
             var env = Environment.GetEnvironmentVariables();
+            // Every child is attached to ConPTY rendered by xterm.js. A launcher
+            // can supply TERM=dumb (or another terminal's type); forwarding that
+            // makes local Codex warn and remote tmux reject the SSH terminal.
+            // Set it for every spawn, including fallback shells and reconnects.
+            env["TERM"] = "xterm-256color";
             // Force UTF-8 locale for child processes (git, node, bash, etc.)
             env["LANG"] = "en_US.UTF-8";
             env["LC_ALL"] = "en_US.UTF-8";

@@ -1,0 +1,55 @@
+﻿1
+00:00:00,400 --> 00:00:03,379
+Two independent CCPad windows.
+
+2
+00:00:03,389 --> 00:00:07,932
+On the left, a travel story; on the right, sample sales data.
+
+3
+00:00:09,200 --> 00:00:11,794
+I submit a task in each window.
+
+4
+00:00:11,804 --> 00:00:16,191
+Both Codex sessions run at once, and both lights turn green.
+
+5
+00:00:17,467 --> 00:00:20,386
+The last instruction stays visible here.
+
+6
+00:00:20,396 --> 00:00:23,965
+Click to copy it, and quickly recall what you asked.
+
+7
+00:00:25,233 --> 00:00:29,030
+One session writes the story while the other totals sales.
+
+8
+00:00:29,040 --> 00:00:32,573
+Both tasks progress together in this real recording.
+
+9
+00:00:33,833 --> 00:00:37,630
+Yellow means the tasks are finished and waiting for input.
+
+10
+00:00:37,640 --> 00:00:40,608
+The story and sales summary are saved.
+
+11
+00:00:41,900 --> 00:00:44,590
+Now I exit Codex on the right.
+
+12
+00:00:44,600 --> 00:00:48,747
+Red means it's closed; the left session remains available.
+
+13
+00:00:50,033 --> 00:00:54,214
+See each task, its status, and its last instruction.
+
+14
+00:00:54,224 --> 00:00:58,191
+CCPad makes parallel AI work easy to follow.

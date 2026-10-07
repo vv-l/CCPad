@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> · <a href="LICENSE">许可证 (GPL-3.0)</a>
+  <a href="README.md">English</a> · <a href="#演示视频">演示视频</a> · <a href="LICENSE">许可证 (GPL-3.0)</a>
 </p>
 
 <p align="center">
@@ -19,6 +19,17 @@
 ---
 
 > 当前版本：**v1.10.20**
+
+## 演示视频
+
+用一分钟看两个真实 Codex 会话并行工作：左边写游记，右边汇总虚构销售 CSV。视频展示双绿灯运行、完整上一条指令与点击复制、任务完成后的黄灯，以及正常退出后的红灯。
+
+| 简体中文 · 61 秒 | English · 59 seconds |
+| --- | --- |
+| [![观看 CCPad 中文演示](docs/demos/ccpad-parallel-demo-zh-CN.jpg)](docs/demos/ccpad-parallel-demo-zh-CN.mp4) | [![Watch the English CCPad demo](docs/demos/ccpad-parallel-demo-en.jpg)](docs/demos/ccpad-parallel-demo-en.mp4) |
+| [观看 / 下载 MP4](docs/demos/ccpad-parallel-demo-zh-CN.mp4) · 中文界面、配音和字幕 | [Watch / download MP4](docs/demos/ccpad-parallel-demo-en.mp4) · 英文界面、配音和字幕 |
+
+[演示说明与字幕文件](docs/demos/README.zh-CN.md) · [English demo guide](docs/demos/README.md)
 
 ## 功能特性
 

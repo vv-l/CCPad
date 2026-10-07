@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="README.zh-CN.md">中文文档</a> · <a href="LICENSE">License (GPL-3.0)</a>
+  <a href="README.zh-CN.md">中文文档</a> · <a href="#demo-videos">Demo videos</a> · <a href="LICENSE">License (GPL-3.0)</a>
 </p>
 
 <p align="center">
@@ -19,6 +19,17 @@
 ---
 
 > Current release: **v1.10.20**
+
+## Demo videos
+
+See two real Codex sessions work in parallel: one writes a travel story while the other summarizes a fictional sales CSV. Follow the green working lights, copy the full last instruction, then see amber when the tasks finish and red when Codex exits.
+
+| English · 59 seconds | 简体中文 · 61 秒 |
+| --- | --- |
+| [![Watch the English CCPad demo](docs/demos/ccpad-parallel-demo-en.jpg)](docs/demos/ccpad-parallel-demo-en.mp4) | [![观看 CCPad 中文演示](docs/demos/ccpad-parallel-demo-zh-CN.jpg)](docs/demos/ccpad-parallel-demo-zh-CN.mp4) |
+| [Watch / download MP4](docs/demos/ccpad-parallel-demo-en.mp4) · English UI, narration and subtitles | [观看 / 下载 MP4](docs/demos/ccpad-parallel-demo-zh-CN.mp4) · 中文界面、配音和字幕 |
+
+[Demo guide and subtitles](docs/demos/README.md) · [中文演示说明](docs/demos/README.zh-CN.md)
 
 ## Features
 

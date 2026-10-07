@@ -26,8 +26,10 @@
 
 | 简体中文 · 61 秒 | English · 59 seconds |
 | --- | --- |
-| [![观看 CCPad 中文演示](docs/demos/ccpad-parallel-demo-zh-CN.jpg)](docs/demos/ccpad-parallel-demo-zh-CN.mp4) | [![Watch the English CCPad demo](docs/demos/ccpad-parallel-demo-en.jpg)](docs/demos/ccpad-parallel-demo-en.mp4) |
-| [观看 / 下载 MP4](docs/demos/ccpad-parallel-demo-zh-CN.mp4) · 中文界面、配音和字幕 | [Watch / download MP4](docs/demos/ccpad-parallel-demo-en.mp4) · 英文界面、配音和字幕 |
+| [![观看 CCPad 中文演示](docs/demos/ccpad-parallel-demo-zh-CN.jpg)](https://raw.githubusercontent.com/vv-l/CCPad/master/docs/demos/ccpad-parallel-demo-zh-CN.mp4) | [![Watch the English CCPad demo](docs/demos/ccpad-parallel-demo-en.jpg)](https://raw.githubusercontent.com/vv-l/CCPad/master/docs/demos/ccpad-parallel-demo-en.mp4) |
+| [下载 MP4](https://raw.githubusercontent.com/vv-l/CCPad/master/docs/demos/ccpad-parallel-demo-zh-CN.mp4) · 中文界面、配音和字幕 | [Download MP4](https://raw.githubusercontent.com/vv-l/CCPad/master/docs/demos/ccpad-parallel-demo-en.mp4) · 英文界面、配音和字幕 |
+
+点击任一封面即可下载视频，在本地播放器中观看。
 
 [演示说明与字幕文件](docs/demos/README.zh-CN.md) · [English demo guide](docs/demos/README.md)
 

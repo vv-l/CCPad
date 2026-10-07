@@ -26,8 +26,10 @@ See two real Codex sessions work in parallel: one writes a travel story while th
 
 | English · 59 seconds | 简体中文 · 61 秒 |
 | --- | --- |
-| [![Watch the English CCPad demo](docs/demos/ccpad-parallel-demo-en.jpg)](docs/demos/ccpad-parallel-demo-en.mp4) | [![观看 CCPad 中文演示](docs/demos/ccpad-parallel-demo-zh-CN.jpg)](docs/demos/ccpad-parallel-demo-zh-CN.mp4) |
-| [Watch / download MP4](docs/demos/ccpad-parallel-demo-en.mp4) · English UI, narration and subtitles | [观看 / 下载 MP4](docs/demos/ccpad-parallel-demo-zh-CN.mp4) · 中文界面、配音和字幕 |
+| [![Watch the English CCPad demo](docs/demos/ccpad-parallel-demo-en.jpg)](https://raw.githubusercontent.com/vv-l/CCPad/master/docs/demos/ccpad-parallel-demo-en.mp4) | [![观看 CCPad 中文演示](docs/demos/ccpad-parallel-demo-zh-CN.jpg)](https://raw.githubusercontent.com/vv-l/CCPad/master/docs/demos/ccpad-parallel-demo-zh-CN.mp4) |
+| [Download MP4](https://raw.githubusercontent.com/vv-l/CCPad/master/docs/demos/ccpad-parallel-demo-en.mp4) · English UI, narration and subtitles | [下载 MP4](https://raw.githubusercontent.com/vv-l/CCPad/master/docs/demos/ccpad-parallel-demo-zh-CN.mp4) · 中文界面、配音和字幕 |
+
+Click either cover to download the video for local playback.
 
 [Demo guide and subtitles](docs/demos/README.md) · [中文演示说明](docs/demos/README.zh-CN.md)
 

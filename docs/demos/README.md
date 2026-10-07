@@ -8,11 +8,11 @@ Two independent CCPad windows run real local Codex sessions at the same time. Th
 
 | English · 59 seconds | 简体中文 · 61 秒 |
 | --- | --- |
-| [![Watch the English demo](ccpad-parallel-demo-en.jpg)](ccpad-parallel-demo-en.mp4) | [![观看中文演示](ccpad-parallel-demo-zh-CN.jpg)](ccpad-parallel-demo-zh-CN.mp4) |
-| [Watch / download MP4](ccpad-parallel-demo-en.mp4) · [English subtitles (SRT)](ccpad-parallel-demo-en.srt) | [观看 / 下载 MP4](ccpad-parallel-demo-zh-CN.mp4) · [中文字幕（SRT）](ccpad-parallel-demo-zh-CN.srt) |
+| [![Watch the English demo](ccpad-parallel-demo-en.jpg)](https://raw.githubusercontent.com/vv-l/CCPad/master/docs/demos/ccpad-parallel-demo-en.mp4) | [![观看中文演示](ccpad-parallel-demo-zh-CN.jpg)](https://raw.githubusercontent.com/vv-l/CCPad/master/docs/demos/ccpad-parallel-demo-zh-CN.mp4) |
+| [Download MP4](https://raw.githubusercontent.com/vv-l/CCPad/master/docs/demos/ccpad-parallel-demo-en.mp4) · [English subtitles (SRT)](ccpad-parallel-demo-en.srt) | [下载 MP4](https://raw.githubusercontent.com/vv-l/CCPad/master/docs/demos/ccpad-parallel-demo-zh-CN.mp4) · [中文字幕（SRT）](ccpad-parallel-demo-zh-CN.srt) |
 | English interface, task prompts, narration and subtitles | Chinese interface, task prompts, narration and subtitles |
 
-Click a preview to open the video, or download the MP4 for local playback. Both videos are 1080p at 30 fps, with narration and visible subtitles included.
+Click either preview to download the original MP4, then open it in your video player. Both videos are 1080p at 30 fps, with narration and visible subtitles included.
 
 ## What the demo shows
 
@@ -37,7 +37,7 @@ The English edition was recorded again with the English CCPad interface and Engl
 
 | Edition | Video | Subtitles | Preview |
 | --- | --- | --- | --- |
-| English | [MP4](ccpad-parallel-demo-en.mp4) | [SRT](ccpad-parallel-demo-en.srt) | [JPG](ccpad-parallel-demo-en.jpg) |
-| 简体中文 | [MP4](ccpad-parallel-demo-zh-CN.mp4) | [SRT](ccpad-parallel-demo-zh-CN.srt) | [JPG](ccpad-parallel-demo-zh-CN.jpg) |
+| English | [MP4](https://raw.githubusercontent.com/vv-l/CCPad/master/docs/demos/ccpad-parallel-demo-en.mp4) | [SRT](ccpad-parallel-demo-en.srt) | [JPG](ccpad-parallel-demo-en.jpg) |
+| 简体中文 | [MP4](https://raw.githubusercontent.com/vv-l/CCPad/master/docs/demos/ccpad-parallel-demo-zh-CN.mp4) | [SRT](ccpad-parallel-demo-zh-CN.srt) | [JPG](ccpad-parallel-demo-zh-CN.jpg) |
 
 For installation and the full feature guide, return to the [project README](../../README.md).

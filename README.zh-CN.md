@@ -51,7 +51,7 @@
   </tbody>
 </table>
 
-点击任一封面即可在浏览器中直接播放视频；如需保存原文件，请使用下方 MP4 链接。
+使用任一播放器即可在浏览器中直接播放视频；如需保存原文件，请使用下方 MP4 链接。
 
 [演示说明与字幕文件](docs/demos/README.zh-CN.md) · [English demo guide](docs/demos/README.md)
 

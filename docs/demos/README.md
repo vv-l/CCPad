@@ -37,7 +37,7 @@ Two independent CCPad windows run real local Codex sessions at the same time. Th
   </tbody>
 </table>
 
-Click either preview to play the video directly in your browser. Use the Download original MP4 link to save the original MP4. Both videos are 1080p at 30 fps, with narration and visible subtitles included.
+Use either player to play the video directly in your browser. Use the Download original MP4 link to save the original MP4. Both videos are 1080p at 30 fps, with narration and visible subtitles included.
 
 ## What the demo shows
 
@@ -62,7 +62,7 @@ The English edition was recorded again with the English CCPad interface and Engl
 
 | Edition | Video | Subtitles | Preview |
 | --- | --- | --- | --- |
-| English | [Play MP4 in browser](https://cdn.jsdelivr.net/gh/vv-l/CCPad@master/docs/demos/ccpad-parallel-demo-en.mp4) | [SRT](ccpad-parallel-demo-en.srt) | [JPG](ccpad-parallel-demo-en.jpg) |
-| 简体中文 | [Play MP4 in browser](https://cdn.jsdelivr.net/gh/vv-l/CCPad@master/docs/demos/ccpad-parallel-demo-zh-CN.mp4) | [SRT](ccpad-parallel-demo-zh-CN.srt) | [JPG](ccpad-parallel-demo-zh-CN.jpg) |
+| English | [Play MP4 in browser](https://github.com/user-attachments/assets/aae4439c-ddb0-4666-ae2b-1210359cd976) | [SRT](ccpad-parallel-demo-en.srt) | [JPG](ccpad-parallel-demo-en.jpg) |
+| 简体中文 | [Play MP4 in browser](https://github.com/user-attachments/assets/0049b6ca-a5b9-4272-adfb-1df13a599a81) | [SRT](ccpad-parallel-demo-zh-CN.srt) | [JPG](ccpad-parallel-demo-zh-CN.jpg) |
 
 For installation and the full feature guide, return to the [project README](../../README.md).

@@ -37,7 +37,7 @@
   </tbody>
 </table>
 
-点击封面即可在浏览器中直接播放视频；如需保存原版 MP4，请使用下方链接。两个版本均为 1080p、30 fps，视频已包含配音和画面字幕。
+使用播放器即可在浏览器中直接播放视频；如需保存原版 MP4，请使用下方链接。两个版本均为 1080p、30 fps，视频已包含配音和画面字幕。
 
 ## 重点看什么
 
@@ -62,7 +62,7 @@
 
 | 版本 | 视频 | 字幕 | 封面 |
 | --- | --- | --- | --- |
-| 简体中文 | [在浏览器播放 MP4](https://cdn.jsdelivr.net/gh/vv-l/CCPad@master/docs/demos/ccpad-parallel-demo-zh-CN.mp4) | [SRT](ccpad-parallel-demo-zh-CN.srt) | [JPG](ccpad-parallel-demo-zh-CN.jpg) |
-| English | [在浏览器播放 MP4](https://cdn.jsdelivr.net/gh/vv-l/CCPad@master/docs/demos/ccpad-parallel-demo-en.mp4) | [SRT](ccpad-parallel-demo-en.srt) | [JPG](ccpad-parallel-demo-en.jpg) |
+| 简体中文 | [在浏览器播放 MP4](https://github.com/user-attachments/assets/0049b6ca-a5b9-4272-adfb-1df13a599a81) | [SRT](ccpad-parallel-demo-zh-CN.srt) | [JPG](ccpad-parallel-demo-zh-CN.jpg) |
+| English | [在浏览器播放 MP4](https://github.com/user-attachments/assets/aae4439c-ddb0-4666-ae2b-1210359cd976) | [SRT](ccpad-parallel-demo-en.srt) | [JPG](ccpad-parallel-demo-en.jpg) |
 
 安装方法与完整功能说明见[项目 README](../../README.zh-CN.md)。

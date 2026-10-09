@@ -51,7 +51,7 @@ See two real Codex sessions work in parallel: one writes a travel story while th
   </tbody>
 </table>
 
-Click either cover to play the video directly in your browser. Use the Download original MP4 link to save the original file.
+Use either player to play the video directly in your browser. Use the Download original MP4 link to save the original file.
 
 [Demo guide and subtitles](docs/demos/README.md) · [中文演示说明](docs/demos/README.zh-CN.md)
 

@@ -8,11 +8,11 @@
 
 | 简体中文 · 61 秒 | English · 59 seconds |
 | --- | --- |
-| [![观看中文演示](ccpad-parallel-demo-zh-CN.jpg)](https://raw.githubusercontent.com/vv-l/CCPad/master/docs/demos/ccpad-parallel-demo-zh-CN.mp4) | [![Watch the English demo](ccpad-parallel-demo-en.jpg)](https://raw.githubusercontent.com/vv-l/CCPad/master/docs/demos/ccpad-parallel-demo-en.mp4) |
-| [下载 MP4](https://raw.githubusercontent.com/vv-l/CCPad/master/docs/demos/ccpad-parallel-demo-zh-CN.mp4) · [中文字幕（SRT）](ccpad-parallel-demo-zh-CN.srt) | [Download MP4](https://raw.githubusercontent.com/vv-l/CCPad/master/docs/demos/ccpad-parallel-demo-en.mp4) · [English subtitles (SRT)](ccpad-parallel-demo-en.srt) |
+| [![观看中文演示](ccpad-parallel-demo-zh-CN.jpg)](https://cdn.jsdelivr.net/gh/vv-l/CCPad@master/docs/demos/ccpad-parallel-demo-zh-CN.mp4) | [![Watch the English demo](ccpad-parallel-demo-en.jpg)](https://cdn.jsdelivr.net/gh/vv-l/CCPad@master/docs/demos/ccpad-parallel-demo-en.mp4) |
+| [在浏览器播放 MP4](https://cdn.jsdelivr.net/gh/vv-l/CCPad@master/docs/demos/ccpad-parallel-demo-zh-CN.mp4) · [下载原版 MP4](https://raw.githubusercontent.com/vv-l/CCPad/master/docs/demos/ccpad-parallel-demo-zh-CN.mp4) · [中文字幕（SRT）](ccpad-parallel-demo-zh-CN.srt) | [Play MP4 in browser](https://cdn.jsdelivr.net/gh/vv-l/CCPad@master/docs/demos/ccpad-parallel-demo-en.mp4) · [Download original MP4](https://raw.githubusercontent.com/vv-l/CCPad/master/docs/demos/ccpad-parallel-demo-en.mp4) · [English subtitles (SRT)](ccpad-parallel-demo-en.srt) |
 | 中文界面、任务指令、配音和字幕 | 英文界面、任务指令、配音和字幕 |
 
-点击封面即可下载原版 MP4，再用本地播放器观看。两个版本均为 1080p、30 fps，视频已包含配音和画面字幕。
+点击封面即可在浏览器中直接播放视频；如需保存原版 MP4，请使用下方链接。两个版本均为 1080p、30 fps，视频已包含配音和画面字幕。
 
 ## 重点看什么
 
@@ -37,7 +37,7 @@
 
 | 版本 | 视频 | 字幕 | 封面 |
 | --- | --- | --- | --- |
-| 简体中文 | [MP4](https://raw.githubusercontent.com/vv-l/CCPad/master/docs/demos/ccpad-parallel-demo-zh-CN.mp4) | [SRT](ccpad-parallel-demo-zh-CN.srt) | [JPG](ccpad-parallel-demo-zh-CN.jpg) |
-| English | [MP4](https://raw.githubusercontent.com/vv-l/CCPad/master/docs/demos/ccpad-parallel-demo-en.mp4) | [SRT](ccpad-parallel-demo-en.srt) | [JPG](ccpad-parallel-demo-en.jpg) |
+| 简体中文 | [在浏览器播放 MP4](https://cdn.jsdelivr.net/gh/vv-l/CCPad@master/docs/demos/ccpad-parallel-demo-zh-CN.mp4) | [SRT](ccpad-parallel-demo-zh-CN.srt) | [JPG](ccpad-parallel-demo-zh-CN.jpg) |
+| English | [在浏览器播放 MP4](https://cdn.jsdelivr.net/gh/vv-l/CCPad@master/docs/demos/ccpad-parallel-demo-en.mp4) | [SRT](ccpad-parallel-demo-en.srt) | [JPG](ccpad-parallel-demo-en.jpg) |
 
 安装方法与完整功能说明见[项目 README](../../README.zh-CN.md)。

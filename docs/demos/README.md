@@ -6,11 +6,36 @@ Two independent CCPad windows run real local Codex sessions at the same time. Th
 
 ## Choose a language
 
-| English · 59 seconds | 简体中文 · 61 秒 |
-| --- | --- |
-| [![Watch the English demo](ccpad-parallel-demo-en.jpg)](https://cdn.jsdelivr.net/gh/vv-l/CCPad@master/docs/demos/ccpad-parallel-demo-en.mp4) | [![观看中文演示](ccpad-parallel-demo-zh-CN.jpg)](https://cdn.jsdelivr.net/gh/vv-l/CCPad@master/docs/demos/ccpad-parallel-demo-zh-CN.mp4) |
-| [Play MP4 in browser](https://cdn.jsdelivr.net/gh/vv-l/CCPad@master/docs/demos/ccpad-parallel-demo-en.mp4) · [Download original MP4](https://raw.githubusercontent.com/vv-l/CCPad/master/docs/demos/ccpad-parallel-demo-en.mp4) · [English subtitles (SRT)](ccpad-parallel-demo-en.srt) | [在浏览器播放 MP4](https://cdn.jsdelivr.net/gh/vv-l/CCPad@master/docs/demos/ccpad-parallel-demo-zh-CN.mp4) · [下载原版 MP4](https://raw.githubusercontent.com/vv-l/CCPad/master/docs/demos/ccpad-parallel-demo-zh-CN.mp4) · [中文字幕（SRT）](ccpad-parallel-demo-zh-CN.srt) |
-| English interface, task prompts, narration and subtitles | Chinese interface, task prompts, narration and subtitles |
+<table>
+  <thead>
+    <tr>
+      <th>English · 59 seconds</th>
+      <th>简体中文 · 61 秒</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>
+        <video controls preload="metadata" poster="ccpad-parallel-demo-en.jpg" width="100%" src="https://github.com/user-attachments/assets/aae4439c-ddb0-4666-ae2b-1210359cd976">
+          <a href="https://github.com/user-attachments/assets/aae4439c-ddb0-4666-ae2b-1210359cd976">Play the English demo</a>
+        </video>
+      </td>
+      <td>
+        <video controls preload="metadata" poster="ccpad-parallel-demo-zh-CN.jpg" width="100%" src="https://github.com/user-attachments/assets/0049b6ca-a5b9-4272-adfb-1df13a599a81">
+          <a href="https://github.com/user-attachments/assets/0049b6ca-a5b9-4272-adfb-1df13a599a81">观看中文演示</a>
+        </video>
+      </td>
+    </tr>
+    <tr>
+      <td><a href="https://raw.githubusercontent.com/vv-l/CCPad/master/docs/demos/ccpad-parallel-demo-en.mp4">Download original MP4</a> · <a href="ccpad-parallel-demo-en.srt">English subtitles (SRT)</a></td>
+      <td><a href="https://raw.githubusercontent.com/vv-l/CCPad/master/docs/demos/ccpad-parallel-demo-zh-CN.mp4">下载原版 MP4</a> · <a href="ccpad-parallel-demo-zh-CN.srt">中文字幕（SRT）</a></td>
+    </tr>
+    <tr>
+      <td>English interface, task prompts, narration and subtitles</td>
+      <td>Chinese interface, task prompts, narration and subtitles</td>
+    </tr>
+  </tbody>
+</table>
 
 Click either preview to play the video directly in your browser. Use the Download original MP4 link to save the original MP4. Both videos are 1080p at 30 fps, with narration and visible subtitles included.
 

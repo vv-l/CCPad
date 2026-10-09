@@ -6,11 +6,36 @@
 
 ## 选择语言
 
-| 简体中文 · 61 秒 | English · 59 seconds |
-| --- | --- |
-| [![观看中文演示](ccpad-parallel-demo-zh-CN.jpg)](https://cdn.jsdelivr.net/gh/vv-l/CCPad@master/docs/demos/ccpad-parallel-demo-zh-CN.mp4) | [![Watch the English demo](ccpad-parallel-demo-en.jpg)](https://cdn.jsdelivr.net/gh/vv-l/CCPad@master/docs/demos/ccpad-parallel-demo-en.mp4) |
-| [在浏览器播放 MP4](https://cdn.jsdelivr.net/gh/vv-l/CCPad@master/docs/demos/ccpad-parallel-demo-zh-CN.mp4) · [下载原版 MP4](https://raw.githubusercontent.com/vv-l/CCPad/master/docs/demos/ccpad-parallel-demo-zh-CN.mp4) · [中文字幕（SRT）](ccpad-parallel-demo-zh-CN.srt) | [Play MP4 in browser](https://cdn.jsdelivr.net/gh/vv-l/CCPad@master/docs/demos/ccpad-parallel-demo-en.mp4) · [Download original MP4](https://raw.githubusercontent.com/vv-l/CCPad/master/docs/demos/ccpad-parallel-demo-en.mp4) · [English subtitles (SRT)](ccpad-parallel-demo-en.srt) |
-| 中文界面、任务指令、配音和字幕 | 英文界面、任务指令、配音和字幕 |
+<table>
+  <thead>
+    <tr>
+      <th>简体中文 · 61 秒</th>
+      <th>English · 59 seconds</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>
+        <video controls preload="metadata" poster="ccpad-parallel-demo-zh-CN.jpg" width="100%" src="https://github.com/user-attachments/assets/0049b6ca-a5b9-4272-adfb-1df13a599a81">
+          <a href="https://github.com/user-attachments/assets/0049b6ca-a5b9-4272-adfb-1df13a599a81">观看中文演示</a>
+        </video>
+      </td>
+      <td>
+        <video controls preload="metadata" poster="ccpad-parallel-demo-en.jpg" width="100%" src="https://github.com/user-attachments/assets/aae4439c-ddb0-4666-ae2b-1210359cd976">
+          <a href="https://github.com/user-attachments/assets/aae4439c-ddb0-4666-ae2b-1210359cd976">Watch the English demo</a>
+        </video>
+      </td>
+    </tr>
+    <tr>
+      <td><a href="https://raw.githubusercontent.com/vv-l/CCPad/master/docs/demos/ccpad-parallel-demo-zh-CN.mp4">下载原版 MP4</a> · <a href="ccpad-parallel-demo-zh-CN.srt">中文字幕（SRT）</a></td>
+      <td><a href="https://raw.githubusercontent.com/vv-l/CCPad/master/docs/demos/ccpad-parallel-demo-en.mp4">Download original MP4</a> · <a href="ccpad-parallel-demo-en.srt">English subtitles (SRT)</a></td>
+    </tr>
+    <tr>
+      <td>中文界面、任务指令、配音和字幕</td>
+      <td>英文界面、任务指令、配音和字幕</td>
+    </tr>
+  </tbody>
+</table>
 
 点击封面即可在浏览器中直接播放视频；如需保存原版 MP4，请使用下方链接。两个版本均为 1080p、30 fps，视频已包含配音和画面字幕。
 

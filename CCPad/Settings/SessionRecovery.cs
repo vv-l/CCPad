@@ -124,7 +124,7 @@ namespace CCPad.Settings
 
         // ── Live snapshot (this instance only) ────────────────────────
 
-        public static void SaveSnapshot(WorkspaceEntry entry)
+        public static bool SaveSnapshot(WorkspaceEntry entry)
         {
             try
             {
@@ -139,8 +139,9 @@ namespace CCPad.Settings
                     File.Replace(tmp, target, null);
                 else
                     File.Move(tmp, target);
+                return true;
             }
-            catch { }
+            catch { return false; }
         }
 
         public static void DeleteOwnSnapshot()

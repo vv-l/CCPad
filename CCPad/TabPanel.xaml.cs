@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using CCPad.CodexQuota;
 using CCPad.Localization;
 using CCPad.Settings;
 using CCPad.Terminal;
@@ -42,10 +43,20 @@ namespace CCPad
         private static string ResolveCliMode(string? requested)
             => CliMode.Normalize(requested ?? CliMode.LoadDefault());
 
+        private readonly record struct CodexLaunchSelection(
+            string Id, string Home, bool Available, string Name)
+        {
+            public static CodexLaunchSelection Default => new(
+                CodexQuotaProfileStore.DefaultId,
+                CodexQuotaProfileStore.ResolveHome(), true, "Default account");
+        }
+
         public TabPanel(List<ProjectEntry> projects)
         {
             InitializeComponent();
             _projects = projects;
+            // Another window can queue or cancel the next account.
+            ProjectFlyout.Opening += (_, _) => RefreshProjectFlyout();
             _remoteProjects = RemoteProjectConfig.Load();
             _remoteDevices = RemoteDeviceConfig.Load();
             RefreshProjectFlyout();
@@ -443,12 +454,13 @@ namespace CCPad
 
         public async Task AddFirstTab(string? projectName = null, string? workingDir = null,
             string? cliMode = null, string? resumeSessionId = null, string? tag = null,
-            string? remoteProfileId = null, string? remoteWorkingDir = null)
+            string? remoteProfileId = null, string? remoteWorkingDir = null,
+            string? codexAccountId = null, StagingState? staging = null)
         {
             if (workingDir != null)
                 _defaultWorkingDir = workingDir;
             await AddNewTab(projectName, workingDir, cliMode, resumeSessionId, tag,
-                remoteProfileId, remoteWorkingDir);
+                remoteProfileId, remoteWorkingDir, codexAccountId: codexAccountId, staging: staging);
         }
 
         public void FocusCurrentTab()
@@ -492,7 +504,8 @@ namespace CCPad
         private async Task AddNewTab(string? projectName = null, string? workingDir = null,
             string? cliMode = null, string? resumeSessionId = null, string? tag = null,
             string? remoteProfileId = null, string? remoteWorkingDir = null,
-            bool remoteResumePicker = false, bool resumePicker = false)
+            bool remoteResumePicker = false, bool resumePicker = false,
+            string? codexAccountId = null, StagingState? staging = null)
         {
             _tabCounter++;
             string mode = ResolveCliMode(cliMode);
@@ -501,7 +514,11 @@ namespace CCPad
             if (mode == CliMode.CodexRemote)
                 workingDir = null;
 
+            // Saved account IDs never redirect a thread to a different history.
+            var codexAccount = CodexLaunchSelection.Default;
+
             var (pane, prewarmed) = await AcquirePaneAsync();
+            pane.RestoreStaging(staging);
             if (mode == CliMode.CodexRemote)
             {
                 pane.RemoteProfileId = string.IsNullOrEmpty(remoteProfileId)
@@ -520,9 +537,21 @@ namespace CCPad
                 _ => CliNotify.PrepareClaudeHooks(pane.PaneId),
             };
             pane.CompletionHooksActive = extra.Length > 0;
-            var (cmd, resumed) = await BuildLaunchCommandAsync(
-                mode, extra, resumeSessionId, pane, remoteWorkingDir, remoteResumePicker,
-                resumePicker: resumePicker);
+            string cmd;
+            bool resumed;
+            try
+            {
+                (cmd, resumed) = await BuildLaunchCommandAsync(
+                    mode, extra, resumeSessionId, pane, remoteWorkingDir, remoteResumePicker,
+                    resumePicker: resumePicker, codexHome: codexAccount.Home,
+                    codexAccountId: codexAccount.Id,
+                    codexAccountAvailable: codexAccount.Available);
+            }
+            catch
+            {
+                pane.Dispose();
+                throw;
+            }
 
             var item = CreateTabItem(projectName, workingDir, pane, mode, tag);
 
@@ -531,7 +560,9 @@ namespace CCPad
 
             if (prewarmed)
             {
-                pane.LaunchSession(cmd, workingDir, focusOnReady: true, cliMode: mode);
+                pane.LaunchSession(cmd, workingDir, focusOnReady: true, cliMode: mode,
+                    codexHome: codexAccount.Home, codexAccountId: codexAccount.Id,
+                    codexAccountAvailable: codexAccount.Available);
                 // May be a pane re-homed from another panel (shared warm pool) —
                 // force a recompose so it can't sit on its default background.
                 DispatcherQueue.TryEnqueue(
@@ -540,7 +571,9 @@ namespace CCPad
             }
             else
             {
-                await pane.InitializeAsync(cmd, workingDir, focusOnReady: true, cliMode: mode);
+                await pane.InitializeAsync(cmd, workingDir, focusOnReady: true, cliMode: mode,
+                    codexHome: codexAccount.Home, codexAccountId: codexAccount.Id,
+                    codexAccountAvailable: codexAccount.Available);
                 // A fresh WebView2's first composited frame can race with a
                 // concurrent split-tree layout pass (SplitHost.Rebuild()),
                 // leaving the pane visually stuck at its initial paint even
@@ -555,6 +588,8 @@ namespace CCPad
             // not LOOK like a successful resume.
             if (resumeSessionId != null && !resumed)
                 pane.ShowNotice(Loc.T("resume_session_missing", resumeSessionId));
+            else if (mode == CliMode.Codex && !codexAccount.Available)
+                pane.ShowNotice(Loc.T("codex_account_missing", codexAccount.Id));
 
             PrewarmNextPane();
             TabsChanged?.Invoke();
@@ -574,7 +609,9 @@ namespace CCPad
         private static async Task<(string Cmd, bool Resumed)> BuildLaunchCommandAsync(
             string mode, string extra, string? resumeSessionId, TerminalPane pane,
             string? remoteWorkingDir = null, bool remoteResumePicker = false,
-            bool forkCodexSession = false, bool resumePicker = false)
+            bool forkCodexSession = false, bool resumePicker = false,
+            string? codexHome = null, string? codexAccountId = null,
+            bool codexAccountAvailable = true)
         {
             if (mode == CliMode.CodexRemote)
             {
@@ -596,17 +633,30 @@ namespace CCPad
 
             if (mode == CliMode.Codex)
             {
+                // A profile that disappeared after the snapshot must never use
+                // another account's same-named session. Start fresh under the
+                // default environment and surface the missing-profile notice.
+                if (!codexAccountAvailable)
+                    return (CliMode.BuildCommand(mode, extra), false);
+
                 if (resumePicker)
                     return (CliMode.BuildResumePickerCommand(mode, extra), false);
 
-                if (resumeSessionId != null &&
-                    await Task.Run(() => CliSessions.CodexSessionExists(resumeSessionId)))
+                if (resumeSessionId != null)
                 {
+                    resumeSessionId = await Task.Run(() =>
+                        CliSessions.ResolveCodexResumeSessionId(resumeSessionId, codexHome));
+                    if (resumeSessionId == null)
+                        throw new InvalidOperationException(Loc.T("account_resume_missing"));
                     // A fork receives a new ID from Codex's notify event. Do not
                     // seed the pane with the source ID or a snapshot taken during
                     // startup could later try to resume the shared source thread.
                     if (!forkCodexSession)
+                    {
+                        if (!pane.TryClaimCodexSession(codexHome!, resumeSessionId))
+                            throw new InvalidOperationException(Loc.T("account_resume_busy"));
                         pane.SessionId = resumeSessionId;
+                    }
                     return (forkCodexSession
                         ? CliMode.BuildForkCommand(resumeSessionId, extra)
                         : CliMode.BuildResumeCommand(mode, resumeSessionId, extra), true);
@@ -675,6 +725,10 @@ namespace CCPad
             Action staging = () => StagingChanged?.Invoke();
             pane.StagingChanged += staging;
             unhook.Add(() => pane.StagingChanged -= staging);
+
+            Action stagingState = () => TabsChanged?.Invoke();
+            pane.StagingStateChanged += stagingState;
+            unhook.Add(() => pane.StagingStateChanged -= stagingState);
 
             Action focused = () => Focused?.Invoke(this);
             pane.PaneFocused += focused;
@@ -1163,6 +1217,7 @@ namespace CCPad
             foreach (var t in toClose)
             {
                 var ctx = CtxOf(t);
+                if (ctx?.Busy == true) continue;
                 KillRemoteSession(ctx);
                 if (ctx?.Pane is TerminalPane pane)
                     pane.Dispose();
@@ -1178,6 +1233,7 @@ namespace CCPad
             foreach (var t in toClose)
             {
                 var ctx = CtxOf(t);
+                if (ctx?.Busy == true) continue;
                 KillRemoteSession(ctx);
                 if (ctx?.Pane is TerminalPane pane)
                     pane.Dispose();
@@ -1187,6 +1243,7 @@ namespace CCPad
 
         private void CloseTab(TabViewItem item)
         {
+            if (CtxOf(item)?.Busy == true) return;
             if (Tabs.TabItems.Count <= 1)
             {
                 // Last tab — close the whole panel
@@ -1220,7 +1277,7 @@ namespace CCPad
         /// caught by the remote cron sweeper.</summary>
         private static void KillRemoteSession(TabCtx? ctx)
         {
-            if (RemoteNameOf(ctx) is string name)
+            if (ctx?.Busy != true && RemoteNameOf(ctx) is string name)
                 RemoteSessions.KillSessionFireAndForget(name,
                     ctx?.Pane?.RemoteProfileId ?? ctx?.FrozenState?.RemoteProfileId);
         }
@@ -1284,6 +1341,10 @@ namespace CCPad
             return n;
         }
 
+        internal bool HasLiveLocalCodexTab()
+            => Tabs.TabItems.OfType<TabViewItem>()
+                .Any(t => CtxOf(t)?.Pane?.CliMode == CliMode.Codex);
+
         public int CountFrozen()
         {
             int n = 0;
@@ -1307,16 +1368,19 @@ namespace CCPad
             ctx.Busy = true;
             try
             {
+                await pane.CaptureStagingAsync(suspend: true);
                 var dir = pane.CliMode == CliMode.CodexRemote
                     ? null
                     : pane.WorkingDir ?? _defaultWorkingDir;
                 var state = new TabState
                 {
                     Name = ctx.HeaderBase,
+                    Staging = pane.SavedStaging,
                     WorkingDir = string.IsNullOrEmpty(dir) ? "" : dir,
                     RemoteProfileId = pane.RemoteProfileId ?? "",
                     RemoteWorkingDir = pane.RemoteWorkingDir ?? "",
                     CliMode = string.IsNullOrEmpty(pane.CliMode) ? ctx.Mode : pane.CliMode,
+                    CodexAccountId = pane.CliMode == CliMode.Codex ? pane.CodexAccountId : "",
                     // Exclude IDs owned by every other tab in the window, so two
                     // same-cwd tabs can't freeze onto the same conversation.
                     SessionId = ResolveSessionId(pane, dir, ClaimedFor(item)),
@@ -1359,6 +1423,7 @@ namespace CCPad
                 // Freeze failed mid-flight — the tab stays live (worst case the
                 // pane is already half torn down and shows its own error overlay).
                 // Log it: a silent failure here reads as "freeze did nothing".
+                pane.ResumeStagingAfterCapture();
                 App.LogStartupError("FreezeTab", ex);
                 return false;
             }
@@ -1387,9 +1452,11 @@ namespace CCPad
                     ? null
                     : string.IsNullOrEmpty(state.WorkingDir) ? _defaultWorkingDir : state.WorkingDir;
                 string? session = string.IsNullOrEmpty(state.SessionId) ? null : state.SessionId;
+                var codexAccount = CodexLaunchSelection.Default;
 
                 var (pane, prewarmed) = await AcquirePaneAsync();
                 acquired = pane;
+                pane.RestoreStaging(state.Staging);
                 pane.RemoteProfileId = string.IsNullOrEmpty(state.RemoteProfileId)
                     ? RemoteDeviceConfig.Load().SelectedDeviceId
                     : state.RemoteProfileId;
@@ -1405,7 +1472,10 @@ namespace CCPad
                 pane.CompletionHooksActive = extra.Length > 0;
                 var (cmd, resumed) = await BuildLaunchCommandAsync(
                     mode, extra, session, pane, pane.RemoteWorkingDir,
-                    forkCodexSession: state.ForkOnThaw);
+                    forkCodexSession: state.ForkOnThaw,
+                    codexHome: codexAccount.Home,
+                    codexAccountId: codexAccount.Id,
+                    codexAccountAvailable: codexAccount.Available);
                 long tCmd = watch.ElapsedMilliseconds;
 
                 // Don't steal focus when thawing a background tab (batch unfreeze).
@@ -1418,7 +1488,9 @@ namespace CCPad
                     AttachPane(item, ctx, pane);
                     SetTabVisual(ctx, pane);
                     ctx.Dot.Fill = StatusBrush(PaneStatus.Waiting);
-                    pane.LaunchSession(cmd, dir, focusOnReady: focus, cliMode: mode);
+                    pane.LaunchSession(cmd, dir, focusOnReady: focus, cliMode: mode,
+                        codexHome: codexAccount.Home, codexAccountId: codexAccount.Id,
+                        codexAccountAvailable: codexAccount.Available);
                     // The warm pane may have been re-homed from another panel's
                     // PrewarmHost — recompose after the layout pass or it can
                     // sit on its default background despite being alive.
@@ -1435,7 +1507,9 @@ namespace CCPad
                     PrewarmHost.Children.Add(pane);
                     try
                     {
-                        await pane.InitializeAsync(cmd, dir, focusOnReady: false, cliMode: mode);
+                        await pane.InitializeAsync(cmd, dir, focusOnReady: false, cliMode: mode,
+                            codexHome: codexAccount.Home, codexAccountId: codexAccount.Id,
+                            codexAccountAvailable: codexAccount.Available);
                     }
                     finally
                     {
@@ -1462,6 +1536,8 @@ namespace CCPad
                 // LOOK like a successful resume.
                 if (session != null && !resumed)
                     pane.ShowNotice(Loc.T("resume_session_missing", session));
+                else if (mode == CliMode.Codex && !codexAccount.Available)
+                    pane.ShowNotice(Loc.T("codex_account_missing", codexAccount.Id));
 
                 PrewarmNextPane();
                 TabsChanged?.Invoke();
@@ -1485,7 +1561,7 @@ namespace CCPad
                 if (ctx.FrozenHint != null)
                 {
                     ctx.FrozenHintKey = "frozen_thaw_failed";
-                    ctx.FrozenHint.Text = Loc.T(ctx.FrozenHintKey);
+                    ctx.FrozenHint.Text = ex is InvalidOperationException ? ex.Message : Loc.T(ctx.FrozenHintKey);
                 }
             }
             finally { ctx.Busy = false; }
@@ -1580,11 +1656,13 @@ namespace CCPad
             ctx.FrozenState = new TabState
             {
                 Name = baseHeader,
+                Staging = state.Staging,
                 WorkingDir = state.WorkingDir,
                 RemoteProfileId = state.RemoteProfileId,
                 RemoteWorkingDir = state.RemoteWorkingDir,
                 CliMode = mode,
                 SessionId = state.SessionId,
+                CodexAccountId = mode == CliMode.Codex ? state.CodexAccountId : "",
                 Tag = ctx.TagValue,
                 Frozen = true,
                 ForkOnThaw = state.ForkOnThaw
@@ -1675,16 +1753,14 @@ namespace CCPad
         }
 
         // ── Cross-panel tab drag ────────────────────────────────────────
-        // Tabs can be dragged between split panels in the same window. The live
-        // TerminalPane (WebView2 + CLI) is re-homed without a restart; only the
-        // tab chrome is rebuilt, because header widgets and menu handlers close
-        // over their owning panel. WebView2 cannot re-parent across windows, so
-        // drops are same-XamlRoot only. The payload travels in statics (same
-        // process, single drag at a time) — the DataPackage just carries a marker.
+        // Same-window moves re-home the live pane. Separate windows exchange
+        // session metadata: remote tmux stays alive, local tabs must be frozen.
 
         private const string TabDragMarker = "ccpad/tab";
         private static TabPanel? s_dragSourcePanel;
         private static TabViewItem? s_dragItem;
+        private TabTransfer? _tabTransfer;
+        public int TabCount => Tabs.TabItems.Count;
 
         private void OnTabDragStarting(TabView sender, TabViewTabDragStartingEventArgs args)
         {
@@ -1698,12 +1774,96 @@ namespace CCPad
             s_dragItem = args.Tab;
             args.Data.Properties.Add(TabDragMarker, true);
             args.Data.RequestedOperation = Windows.ApplicationModel.DataTransfer.DataPackageOperation.Move;
+            _tabTransfer?.Dispose();
+            _tabTransfer = null;
+            if (ctx.FrozenState != null || ctx.Pane?.CliMode == CliMode.CodexRemote)
+            {
+                var state = GetTabStates()[Tabs.TabItems.IndexOf(args.Tab)];
+                if (string.IsNullOrEmpty(state.SessionId)) return;
+                var item = args.Tab;
+                var payload = new TabTransferPayload(state,
+                    ctx.Pane?.CodexHome ?? CodexQuotaProfileStore.ResolveHome(),
+                    ctx.FrozenState?.ForkOnThaw == true);
+                try
+                {
+                    _tabTransfer = new TabTransfer(payload, cancellation => CommitTransferredTabAsync(item, ctx, cancellation),
+                        () => CaptureTransferPayloadAsync(item, payload));
+                    args.Data.SetData(TabTransfer.Format, _tabTransfer.Token);
+                }
+                catch (Exception ex)
+                {
+                    _tabTransfer?.Dispose();
+                    _tabTransfer = null;
+                    App.LogDiag("tab-transfer-offer " + ex.GetType().Name);
+                    ctx.Pane?.ShowNotice(Loc.T("tab_merge_failed"));
+                }
+            }
+            else
+            {
+                ctx.Pane?.ShowNotice(Loc.T("tab_merge_freeze_local"));
+            }
+        }
+
+        private Task<TabTransferPayload> CaptureTransferPayloadAsync(TabViewItem item, TabTransferPayload original)
+        {
+            var completion = new TaskCompletionSource<TabTransferPayload>(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (!DispatcherQueue.TryEnqueue(async () =>
+            {
+                try
+                {
+                    if (CtxOf(item)?.Pane is TerminalPane pane)
+                        await pane.CaptureStagingAsync(suspend: true);
+                    if (_disposed || _tabTransfer == null || !Tabs.TabItems.Contains(item))
+                    {
+                        CtxOf(item)?.Pane?.ResumeStagingAfterCapture();
+                        throw new System.IO.IOException("Source tab closed");
+                    }
+                    completion.SetResult(original with { State = GetTabStates()[Tabs.TabItems.IndexOf(item)] });
+                }
+                catch { completion.SetException(new System.IO.IOException("Source tab unavailable")); }
+            })) completion.SetException(new System.IO.IOException("Source window unavailable"));
+            return completion.Task;
+        }
+
+        private Task<bool> CommitTransferredTabAsync(TabViewItem item, TabCtx expected,
+            System.Threading.CancellationToken cancellation)
+        {
+            var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (!DispatcherQueue.TryEnqueue(() =>
+            {
+                bool removed = false;
+                try
+                {
+                    if (cancellation.IsCancellationRequested || _disposed || !Tabs.TabItems.Contains(item) ||
+                        !ReferenceEquals(CtxOf(item), expected) || expected.Busy) return;
+                    var pane = expected.Pane;
+                    Tabs.TabItems.Remove(item);
+                    removed = true;
+                    DetachPaneHooks(expected);
+                    expected.ContentHost.Children.Clear();
+                    // Detach the SSH client only. CloseTab would kill the remote task.
+                    pane?.Dispose();
+                    TabsChanged?.Invoke();
+                    ((Application.Current as App)?.MainWnd as MainWindow)?.SaveTabTransferSnapshot();
+                }
+                catch (Exception ex) { App.LogDiag("tab-transfer-commit " + ex.GetType().Name); }
+                finally { completion.SetResult(removed); }
+            })) completion.SetResult(false);
+            return completion.Task;
         }
 
         private void OnTabDragCompleted(TabView sender, TabViewTabDragCompletedEventArgs args)
         {
+            if (Tabs.TabItems.Contains(args.Tab)) CtxOf(args.Tab)?.Pane?.ResumeStagingAfterCapture();
+            _tabTransfer?.Dispose();
+            _tabTransfer = null;
             s_dragSourcePanel = null;
             s_dragItem = null;
+            if (!_disposed && Tabs.TabItems.Count == 0)
+            {
+                CloseRequested?.Invoke(this);
+                ((Application.Current as App)?.MainWnd as MainWindow)?.CloseAfterTabTransfer();
+            }
         }
 
         private bool IsForeignTabDrag(DragEventArgs e)
@@ -1714,13 +1874,15 @@ namespace CCPad
 
         private void OnTabStripDragOver(object sender, DragEventArgs e)
         {
-            if (IsForeignTabDrag(e))
+            if (IsForeignTabDrag(e) ||
+                (s_dragSourcePanel == null && e.DataView.Contains(TabTransfer.Format)))
                 e.AcceptedOperation = Windows.ApplicationModel.DataTransfer.DataPackageOperation.Move;
         }
 
-        private void OnTabStripDrop(object sender, DragEventArgs e)
+        private async void OnTabStripDrop(object sender, DragEventArgs e)
         {
-            if (!IsForeignTabDrag(e)) return;
+            bool inWindow = IsForeignTabDrag(e);
+            if (!inWindow && (s_dragSourcePanel != null || !e.DataView.Contains(TabTransfer.Format))) return;
 
             // Insert before the first tab whose right edge the pointer hasn't passed.
             int index = Tabs.TabItems.Count;
@@ -1733,7 +1895,81 @@ namespace CCPad
                     break;
                 }
             }
-            MoveTabHere(s_dragSourcePanel!, s_dragItem!, index);
+            if (inWindow)
+            {
+                MoveTabHere(s_dragSourcePanel!, s_dragItem!, index);
+                return;
+            }
+
+            var deferral = e.GetDeferral();
+            TabViewItem? staged = null;
+            TabTransferPayload? incoming = null;
+            var result = TabTransferResult.Failed;
+            try
+            {
+                var token = await e.DataView.GetDataAsync(TabTransfer.Format) as string;
+                if (token == null) return;
+                result = await TabTransfer.ReceiveAsync(token, payload =>
+                {
+                    var state = payload.State;
+                    if (_disposed || state == null || string.IsNullOrEmpty(state.SessionId) ||
+                        (state.CliMode != CliMode.CodexRemote &&
+                            (!state.Frozen || !Guid.TryParse(state.SessionId, out _) ||
+                             (state.CliMode != CliMode.Codex && state.CliMode != CliMode.Claude))) ||
+                        (state.CliMode == CliMode.CodexRemote &&
+                            (string.IsNullOrEmpty(state.RemoteProfileId) ||
+                             !System.Text.RegularExpressions.Regex.IsMatch(state.SessionId, @"\A[a-zA-Z0-9_-]+\z"))) ||
+                        (state.CliMode == CliMode.CodexRemote && RemoteDeviceConfig.Find(state.RemoteProfileId) == null) ||
+                        (state.CliMode == CliMode.Codex && !string.Equals(payload.CodexHome,
+                            CodexQuotaProfileStore.ResolveHome(), StringComparison.OrdinalIgnoreCase)))
+                        return Task.FromResult(false);
+                    state.ForkOnThaw = payload.ForkOnThaw;
+                    AddFrozenTab(state);
+                    staged = (TabViewItem)Tabs.TabItems[Tabs.TabItems.Count - 1];
+                    CtxOf(staged)!.Busy = true;
+                    Tabs.TabItems.Remove(staged);
+                    Tabs.TabItems.Insert(Math.Clamp(index, 0, Tabs.TabItems.Count), staged);
+                    Tabs.SelectedItem = staged;
+                    incoming = payload;
+                    TabsChanged?.Invoke();
+                    return Task.FromResult(((Application.Current as App)?.MainWnd as MainWindow)?
+                        .SaveTabTransferSnapshot() == true);
+                });
+            }
+            catch (Exception ex)
+            {
+                App.LogDiag("tab-transfer " + ex.GetType().Name);
+            }
+            finally
+            {
+                if (staged != null)
+                {
+                    CtxOf(staged)!.Busy = false;
+                    if (result == TabTransferResult.Failed)
+                        Tabs.TabItems.Remove(staged);
+                    TabsChanged?.Invoke();
+                    ((Application.Current as App)?.MainWnd as MainWindow)?.SaveTabTransferSnapshot();
+                }
+                e.AcceptedOperation = result == TabTransferResult.Committed
+                    ? Windows.ApplicationModel.DataTransfer.DataPackageOperation.Move
+                    : Windows.ApplicationModel.DataTransfer.DataPackageOperation.None;
+                deferral.Complete();
+            }
+            if (result == TabTransferResult.Committed && staged != null && incoming?.State.Frozen == false && !_disposed)
+                await UnfreezeTabAsync(staged);
+            else if (result != TabTransferResult.Committed && !_disposed && XamlRoot != null)
+            {
+                try
+                {
+                    await new ContentDialog
+                    {
+                        Title = Loc.T("tab_merge_title"),
+                        Content = Loc.T(result == TabTransferResult.Uncertain ? "tab_merge_uncertain" : "tab_merge_failed"),
+                        CloseButtonText = Loc.T("ok"), XamlRoot = XamlRoot
+                    }.ShowAsync();
+                }
+                catch { }
+            }
         }
 
         /// <summary>Migrate a tab (live pane or frozen placeholder) from another
@@ -1877,6 +2113,10 @@ namespace CCPad
         private void RefreshProjectFlyout()
         {
             ProjectFlyout.Items.Clear();
+            // Account selection is shared by separately launched CC Pad
+            // processes. Do not build a stale label or overwrite another
+            // window's recent choice from this process' in-memory cache.
+            try { AppConfig.Reload(); } catch { }
 
             string currentDefault = CliMode.LoadDefault();
             string localDefault = currentDefault == CliMode.Claude
@@ -1905,6 +2145,56 @@ namespace CCPad
                 defaultItem.Items.Add(choice);
             }
             ProjectFlyout.Items.Add(defaultItem);
+
+            // Queue authentication for the next clean local startup.
+            var store = new CodexQuotaProfileStore();
+            var launchProfiles = new List<CodexQuotaProfile>
+            {
+                new(CodexQuotaProfileStore.DefaultId,
+                    CodexAccountIdentity.Read(store.DefaultHome)?.Email ?? Loc.T("quota_account_default"), store.DefaultHome)
+            };
+            string? pendingId = null;
+            try
+            {
+                launchProfiles.AddRange(store.LoadInactive());
+                pendingId = new CodexAccountSwitchService().ReadPending()?.ProfileId;
+            }
+            catch { }
+            var currentAccount = launchProfiles[0];
+            var pendingAccount = launchProfiles.FirstOrDefault(p => p.Id == pendingId);
+            var accountItem = new MenuFlyoutSubItem
+            {
+                Text = pendingAccount == null ? Loc.T("account_switch_current", currentAccount.Name)
+                    : Loc.T("account_switch_pending", currentAccount.Name, pendingAccount.Name),
+                Icon = new FontIcon { Glyph = "\uE77B" },
+            };
+            foreach (var profile in launchProfiles)
+            {
+                var captured = profile;
+                var choice = new ToggleMenuFlyoutItem
+                {
+                    Text = profile.Name,
+                    IsChecked = profile.Id == (pendingId ?? CodexQuotaProfileStore.DefaultId),
+                };
+                choice.Click += async (_, _) =>
+                {
+                    var service = new CodexAccountSwitchService();
+                    bool saved = service.Request(captured.Id);
+                    RefreshProjectFlyout();
+                    if ((Application.Current as App)?.MainWnd is MainWindow main)
+                        main.RefreshCodexLaunchAccountBadge();
+                    if (XamlRoot != null)
+                        await new ContentDialog
+                        {
+                            Title = Loc.T("quota_account"),
+                            Content = Loc.T(!saved ? "account_switch_save_failed" :
+                                captured.Id == CodexQuotaProfileStore.DefaultId ? "account_switch_cancelled" : "account_switch_queued"),
+                            CloseButtonText = Loc.T("ok"), XamlRoot = XamlRoot,
+                        }.ShowAsync();
+                };
+                accountItem.Items.Add(choice);
+            }
+            ProjectFlyout.Items.Add(accountItem);
 
             ProjectFlyout.Items.Add(new MenuFlyoutSeparator());
 
@@ -2516,6 +2806,11 @@ namespace CCPad
 
         public int ActiveTabIndex => Tabs.SelectedIndex;
 
+        internal Task CaptureStagingForCloseAsync()
+            => Task.WhenAll(Tabs.TabItems.OfType<TabViewItem>()
+                .Select(t => CtxOf(t)?.Pane)
+                .Where(p => p != null).Select(p => p!.CaptureStagingAsync(suspend: true)));
+
         public List<TabState> GetTabStates()
         {
             var states = new List<TabState>();
@@ -2537,11 +2832,13 @@ namespace CCPad
                     states.Add(new TabState
                     {
                         Name = frozen.Name,
+                        Staging = frozen.Staging,
                         WorkingDir = frozen.WorkingDir,
                         RemoteProfileId = frozen.RemoteProfileId,
                         RemoteWorkingDir = frozen.RemoteWorkingDir,
                         CliMode = frozen.CliMode,
                         SessionId = frozen.SessionId,
+                        CodexAccountId = frozen.CodexAccountId,
                         Tag = ctx.TagValue,
                         Frozen = true,
                         CustomWidth = CustomWidthOf(tvi)
@@ -2583,11 +2880,13 @@ namespace CCPad
                 states.Add(new TabState
                 {
                     Name = rawHeader,
+                    Staging = pane?.SavedStaging,
                     WorkingDir = string.IsNullOrEmpty(dir) ? "" : dir,
                     RemoteProfileId = pane?.RemoteProfileId ?? "",
                     RemoteWorkingDir = pane?.RemoteWorkingDir ?? "",
                     CliMode = pane?.CliMode ?? "",
                     SessionId = sessionId,
+                    CodexAccountId = pane?.CliMode == CliMode.Codex ? pane.CodexAccountId : "",
                     Tag = ctx?.TagValue ?? pane?.TabTag ?? "",
                     CustomWidth = CustomWidthOf(tvi)
                 });
@@ -2617,8 +2916,8 @@ namespace CCPad
             {
                 var known = pane.SessionId;
                 if (known != null && known.Length > 0 && pane.ShellRelaunchUtc == null &&
-                    CliSessions.CodexSessionExists(known))
-                    return known;
+                    CliSessions.CodexSessionExists(known, pane.CodexHome))
+                    return CliSessions.ResolveCodexResumeSessionId(known, pane.CodexHome) ?? known;
 
                 // The claimed set may include this pane's OWN tracked ID (the
                 // snapshot pass seeds it with every tab's ID) — never let that
@@ -2630,8 +2929,10 @@ namespace CCPad
                     excl = new HashSet<string>(excl, StringComparer.OrdinalIgnoreCase);
                     excl.Remove(own);
                 }
-                return CliSessions.FindLatestCodexSessionId(
-                    dir, pane.ShellRelaunchUtc ?? pane.LaunchedAtUtc, excl) ?? known ?? "";
+                var discovered = CliSessions.FindLatestCodexSessionId(
+                    dir, pane.ShellRelaunchUtc ?? pane.LaunchedAtUtc, excl, pane.CodexHome);
+                if (discovered != null) pane.SessionId = discovered;
+                return discovered ?? known ?? "";
             }
             var id = pane.SessionId ?? "";
             if (id.Length > 0 && CliSessions.ClaudeSessionExists(id)) return id;
@@ -2697,10 +2998,22 @@ namespace CCPad
                 var tag = string.IsNullOrEmpty(s.Tag) ? null : s.Tag;
                 var remoteProfile = string.IsNullOrEmpty(s.RemoteProfileId) ? null : s.RemoteProfileId;
                 var remoteDir = string.IsNullOrEmpty(s.RemoteWorkingDir) ? null : s.RemoteWorkingDir;
-                if (i == 0)
-                    await AddFirstTab(name, dir, mode, session, tag, remoteProfile, remoteDir);
-                else
-                    await AddNewTab(name, dir, mode, session, tag, remoteProfile, remoteDir);
+                try
+                {
+                    if (i == 0)
+                        await AddFirstTab(name, dir, mode, session, tag, remoteProfile, remoteDir,
+                            codexAccountId: CodexQuotaProfileStore.DefaultId, staging: s.Staging);
+                    else
+                        await AddNewTab(name, dir, mode, session, tag, remoteProfile, remoteDir,
+                            codexAccountId: CodexQuotaProfileStore.DefaultId, staging: s.Staging);
+                }
+                catch (InvalidOperationException ex) when (ResolveCliMode(mode) == CliMode.Codex && session != null)
+                {
+                    s.Frozen = true;
+                    AddFrozenTab(s);
+                    if (Tabs.TabItems.LastOrDefault() is TabViewItem failed && CtxOf(failed)?.FrozenHint is TextBlock hint)
+                        hint.Text = ex.Message;
+                }
                 if (s.CustomWidth > 0 && i < Tabs.TabItems.Count &&
                     Tabs.TabItems[i] is TabViewItem restored)
                     ApplyCustomWidth(restored, s.CustomWidth);
@@ -2717,6 +3030,8 @@ namespace CCPad
         {
             if (_disposed) return;
             _disposed = true;
+            _tabTransfer?.Dispose();
+            _tabTransfer = null;
             Loaded -= OnPanelLoaded;
             Unloaded -= OnPanelUnloaded;
             DetachGlobalSubscriptions();

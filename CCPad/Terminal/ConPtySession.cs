@@ -1,5 +1,7 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
@@ -18,8 +20,12 @@ namespace CCPad.Terminal
         private volatile bool _disposed;
         private volatile bool _consoleReady;
         private readonly object _procLock = new();
+        private readonly object _inputLock = new();
+        private IReadOnlyDictionary<string, string>? _environmentOverrides;
 
         public event Action<byte[]>? OutputReceived;
+        /// <summary>Raised before an input write from any local, web, or automation caller.</summary>
+        public event Action<string>? InputSending;
 
         /// <summary>
         /// Fires when the CURRENT child process exits. The pseudoconsole stays
@@ -38,9 +44,11 @@ namespace CCPad.Terminal
         public int Cols { get; private set; }
         public int Rows { get; private set; }
 
-        public static ConPtySession Start(string command, int cols, int rows, string? workingDir = null)
+        public static ConPtySession Start(string command, int cols, int rows, string? workingDir = null,
+            IReadOnlyDictionary<string, string>? environmentOverrides = null)
         {
-            var session = new ConPtySession { Cols = cols, Rows = rows };
+            var session = new ConPtySession { Cols = cols, Rows = rows,
+                _environmentOverrides = environmentOverrides };
             session.InitConsole(cols, rows);
             session.SpawnProcess(command, workingDir);
             return session;
@@ -92,7 +100,7 @@ namespace CCPad.Terminal
 
             string dir = workingDir ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
-            IntPtr envBlock = BuildUtf8EnvironmentBlock();
+            IntPtr envBlock = BuildUtf8EnvironmentBlock(_environmentOverrides);
             IntPtr childToken = IntPtr.Zero;
             try
             {
@@ -294,11 +302,53 @@ namespace CCPad.Terminal
             }
         }
 
-        public void WriteInput(string text)
+        public void WriteInput(string text) => _ = TryWriteInput(text);
+
+        /// <summary>
+        /// Write all UTF-8 bytes accepted by the ConPTY input pipe. The old
+        /// fire-and-forget write ignored short writes, which could leave a staged
+        /// command in the CLI composer without its final bytes or Enter. Writes
+        /// are serialized because staged input, automation and real keystrokes
+        /// can arrive from different threads.
+        /// </summary>
+        public bool TryWriteInput(string text)
         {
-            if (_hPipeInWrite == IntPtr.Zero || _disposed) return;
-            var bytes = Encoding.UTF8.GetBytes(text);
-            WriteFile(_hPipeInWrite, bytes, bytes.Length, out _, IntPtr.Zero);
+            if (string.IsNullOrEmpty(text)) return true;
+            byte[] bytes = Encoding.UTF8.GetBytes(text);
+
+            lock (_inputLock)
+            {
+                if (_hPipeInWrite == IntPtr.Zero || _disposed) return false;
+
+                // Consumers can fence stale completion observations before the CLI
+                // receives the next Enter. Do not let a status observer block input.
+                try { InputSending?.Invoke(text); } catch { }
+
+                int offset = 0;
+                while (offset < bytes.Length)
+                {
+                    int remaining = bytes.Length - offset;
+                    byte[] chunk;
+                    if (offset == 0)
+                    {
+                        chunk = bytes;
+                    }
+                    else
+                    {
+                        chunk = new byte[remaining];
+                        Buffer.BlockCopy(bytes, offset, chunk, 0, remaining);
+                    }
+
+                    if (!WriteFile(_hPipeInWrite, chunk, chunk.Length,
+                                   out int written, IntPtr.Zero) ||
+                        written <= 0 || written > chunk.Length)
+                        return false;
+
+                    offset += written;
+                }
+
+                return true;
+            }
         }
 
         public void Resize(int cols, int rows)
@@ -313,9 +363,22 @@ namespace CCPad.Terminal
         /// Build a Unicode environment block that inherits the current process's
         /// environment and declares this terminal's capabilities and UTF-8 locale.
         /// </summary>
-        private static IntPtr BuildUtf8EnvironmentBlock()
+        private static IntPtr BuildUtf8EnvironmentBlock(IReadOnlyDictionary<string, string>? overrides)
         {
-            var env = Environment.GetEnvironmentVariables();
+            var env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (DictionaryEntry entry in Environment.GetEnvironmentVariables())
+            {
+                if (entry.Key is string key)
+                    env[key] = entry.Value?.ToString() ?? "";
+            }
+            if (overrides != null)
+            {
+                foreach (var pair in overrides)
+                {
+                    if (!string.IsNullOrWhiteSpace(pair.Key))
+                        env[pair.Key] = pair.Value ?? "";
+                }
+            }
             // Every child is attached to ConPTY rendered by xterm.js. A launcher
             // can supply TERM=dumb (or another terminal's type); forwarding that
             // makes local Codex warn and remote tmux reject the SSH terminal.
@@ -328,8 +391,7 @@ namespace CCPad.Terminal
             env["PYTHONIOENCODING"] = "utf-8";
 
             // Environment block: sorted KEY=VALUE\0 pairs, terminated by extra \0
-            var keys = new string[env.Count];
-            env.Keys.CopyTo(keys, 0);
+            var keys = env.Keys.ToArray();
             Array.Sort(keys, StringComparer.OrdinalIgnoreCase);
 
             var sb = new StringBuilder();
@@ -355,7 +417,14 @@ namespace CCPad.Terminal
             // the process/thread handles once the child actually goes away.
             if (_hPC != IntPtr.Zero) { ClosePseudoConsole(_hPC); _hPC = IntPtr.Zero; }
             CloseProcessHandles();
-            if (_hPipeInWrite != IntPtr.Zero) { CloseHandle(_hPipeInWrite); _hPipeInWrite = IntPtr.Zero; }
+            lock (_inputLock)
+            {
+                if (_hPipeInWrite != IntPtr.Zero)
+                {
+                    CloseHandle(_hPipeInWrite);
+                    _hPipeInWrite = IntPtr.Zero;
+                }
+            }
             if (_hPipeOutRead != IntPtr.Zero) { CloseHandle(_hPipeOutRead); _hPipeOutRead = IntPtr.Zero; }
             if (_attributeList != IntPtr.Zero)
             {

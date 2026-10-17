@@ -59,8 +59,16 @@ namespace CCPad.CodexQuota
     {
         private const string UsageEndpoint = "https://chatgpt.com/backend-api/wham/usage";
         private static readonly HttpClient Http = CreateHttpClient();
+        private readonly HttpClient _http;
+        private readonly string _codexHome;
         private readonly SemaphoreSlim _refreshGate = new(1, 1);
         private bool _disposed;
+
+        public CodexQuotaService(string? codexHome = null, HttpClient? http = null)
+        {
+            _codexHome = CodexQuotaProfileStore.ResolveHome(codexHome);
+            _http = http ?? Http;
+        }
 
         public async Task<CodexQuotaSnapshot> RefreshAsync(CancellationToken cancellationToken = default)
         {
@@ -81,7 +89,7 @@ namespace CCPad.CodexQuota
                 if (!string.IsNullOrWhiteSpace(credentials.Value.AccountId))
                     request.Headers.TryAddWithoutValidation("chatgpt-account-id", credentials.Value.AccountId);
 
-                using var response = await Http.SendAsync(
+                using var response = await _http.SendAsync(
                     request,
                     HttpCompletionOption.ResponseHeadersRead,
                     cancellationToken).ConfigureAwait(false);
@@ -121,7 +129,8 @@ namespace CCPad.CodexQuota
             if (_disposed)
                 return;
             _disposed = true;
-            _refreshGate.Dispose();
+            // An in-flight read still owns the gate and must be able to release it.
+            // SemaphoreSlim has no native handle here; it can be collected with this service.
         }
 
         private static HttpClient CreateHttpClient()
@@ -134,13 +143,9 @@ namespace CCPad.CodexQuota
             return client;
         }
 
-        private static CodexCredentials? ReadCredentials()
+        private CodexCredentials? ReadCredentials()
         {
-            var home = Environment.GetEnvironmentVariable("CODEX_HOME");
-            if (string.IsNullOrWhiteSpace(home))
-                home = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");
-
-            var authPath = Path.Combine(home, "auth.json");
+            var authPath = Path.Combine(_codexHome, "auth.json");
             if (!File.Exists(authPath))
                 return null;
 

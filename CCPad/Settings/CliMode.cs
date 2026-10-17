@@ -80,7 +80,8 @@ namespace CCPad.Settings
         public static string BuildResumePickerCommand(string mode, string extraArgs = "") => Normalize(mode) switch
         {
             Codex => ResolveLaunch("codex", JoinArgs(
-                    JoinArgs("resume --no-daemon", CodexResumeSafetyArgs()), extraArgs)),
+                    // A new window may open in a different directory from the original thread.
+                    JoinArgs("resume --all --no-daemon", CodexResumeSafetyArgs()), extraArgs)),
             _ => ResolveLaunch("claude", JoinArgs(
                     JoinArgs("--resume",
                         AppConfig.Load().BypassPermissions ? "--permission-mode bypassPermissions" : ""),
@@ -101,7 +102,7 @@ namespace CCPad.Settings
         /// bare <c>codex</c> launcher instead of resolving PATH to an executable.</summary>
         public static string BuildCodexResumeShellCommand(string? sessionId, string extraArgs = "")
         {
-            string target = string.IsNullOrWhiteSpace(sessionId) ? "" : " " + sessionId;
+            string target = string.IsNullOrWhiteSpace(sessionId) ? " --all" : " " + sessionId;
             return JoinArgs(
                 JoinArgs($"codex resume{target} --no-daemon", CodexResumeSafetyArgs()),
                 extraArgs);

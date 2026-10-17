@@ -190,6 +190,7 @@ namespace CCPad.Web
 
   <script src="/xterm/xterm.js"></script>
   <script src="/xterm/xterm-addon-fit.js"></script>
+  <script src="/xterm/ccpad-input-compat.js"></script>
   <script>
     const TOKEN = '{{token}}';
     const statusEl = document.getElementById('status');
@@ -209,6 +210,7 @@ namespace CCPad.Web
     const fit = new FitAddon.FitAddon();
     term.loadAddon(fit);
     term.open(document.getElementById('terminal'));
+    term.loadAddon(new CCPadInputCompat(sendKey));
     fit.fit();
 
     function setStatus(text, cls) { statusEl.textContent = text; statusEl.className = cls; }

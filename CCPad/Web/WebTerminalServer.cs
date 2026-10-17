@@ -32,6 +32,8 @@ namespace CCPad.Web
         public int Port { get; private set; }
         public bool IsRunning => _app != null;
         public bool UseToken { get; set; } = false;
+        /// <summary>Bind only to loopback for local sidecars and demos.</summary>
+        public bool BindLoopbackOnly { get; set; } = false;
         public string Host { get; set; } = "localhost";
         public int MaxPortRetries { get; set; } = 10;
 
@@ -76,7 +78,7 @@ namespace CCPad.Web
             var builder = WebApplication.CreateSlimBuilder();
             builder.WebHost.ConfigureKestrel(opts =>
             {
-                opts.Listen(IPAddress.Any, actualPort);
+                opts.Listen(BindLoopbackOnly ? IPAddress.Loopback : IPAddress.Any, actualPort);
             });
             builder.Logging.ClearProviders();
 
@@ -118,8 +120,22 @@ namespace CCPad.Web
                         ["label"] = s.Label,
                         ["command"] = s.Command,
                         ["workingDir"] = s.WorkingDir,
+                        ["cliMode"] = s.CliMode ?? "",
+                        ["sessionId"] = s.CliSessionId ?? "",
+                        ["codexAccountId"] = s.CodexAccountId ?? "",
+                        ["remoteProfileId"] = s.RemoteProfileId ?? "",
+                        ["remoteWorkingDir"] = s.RemoteWorkingDir ?? "",
+                        ["status"] = s.Status,
+                        ["launchedAtUtc"] = s.LaunchedAtUtc == default
+                            ? "" : s.LaunchedAtUtc.ToUniversalTime().ToString("O"),
+                        ["lastActivityUtc"] = s.LastActivityUtc == default
+                            ? "" : s.LastActivityUtc.ToUniversalTime().ToString("O"),
                         ["cols"] = s.Cols,
-                        ["rows"] = s.Rows
+                        ["rows"] = s.Rows,
+                        // The pane id is process-local. A bridge may only use it
+                        // across a restart when the descriptor PID is unchanged;
+                        // the CLI sessionId is the stable resume candidate.
+                        ["processId"] = Environment.ProcessId
                     };
                 }
                 return Results.Text(new JsonArray(nodes).ToJsonString(), "application/json");

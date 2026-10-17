@@ -14,6 +14,12 @@ namespace CCPad.Settings
         /// <summary>Default CLI for new tabs: "claude" / "codex" / "codex-remote".</summary>
         public string DefaultCli { get; set; } = "claude";
 
+        /// <summary>
+        /// Legacy per-profile launch preference, retained for old preference files.
+        /// Account switches now use a pending request and keep the native history home.
+        /// </summary>
+        public string DefaultCodexAccountId { get; set; } = "default";
+
         /// <summary>Connection parameters for the "Codex@167" mode (ssh + tmux
         /// attach). No settings UI in v1 — edit prefs.json by hand; missing
         /// fields fall back to these defaults.</summary>

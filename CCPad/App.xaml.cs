@@ -13,6 +13,7 @@ namespace CCPad
     public partial class App : Application
     {
         private Window? _window;
+        private static bool _isFeishuDemo;
 
         public Window? MainWnd => _window;
         public string? StartupWorkingDir { get; private set; }
@@ -65,7 +66,12 @@ namespace CCPad
             // init, after a renderer death, after a re-parent. Terminals are
             // dark; make the failure color dark too, before any core is created.
             Environment.SetEnvironmentVariable("WEBVIEW2_DEFAULT_BACKGROUND_COLOR", "FF0C0C0C");
-            InitializeComponent();
+            try { InitializeComponent(); }
+            catch (Exception ex)
+            {
+                LogStartupError("Application/resources", ex);
+                throw;
+            }
             UnhandledException += OnUnhandledException;
         }
 
@@ -214,6 +220,16 @@ namespace CCPad
         protected override void OnLaunched(LaunchActivatedEventArgs args)
         {
             var cmdArgs = Environment.GetCommandLineArgs();
+            bool feishuDemo = false;
+            foreach (var arg in cmdArgs)
+            {
+                if (string.Equals(arg, "--feishu-demo", StringComparison.OrdinalIgnoreCase))
+                {
+                    feishuDemo = true;
+                    break;
+                }
+            }
+            _isFeishuDemo = feishuDemo;
 
             // Lightweight notify helper spawned by a Claude hook or by Codex
             // (notify=[...] config):
@@ -256,6 +272,47 @@ namespace CCPad
                 return;
             }
 
+            if (cmdArgs.Length > 1 && cmdArgs[1] == "--quota-overview")
+            {
+                // Standalone read-only tool: no terminal, workspace recovery, hooks or login actions.
+                try
+                {
+                    LogDiag("quota-overview launch");
+                    Loc.Init();
+                    Settings.ThemeManager.Init();
+                    _window = new QuotaOverviewWindow();
+                    _window.Activate();
+                }
+                catch (Exception ex)
+                {
+                    LogStartupError("QuotaOverview/startup", ex);
+                    Exit();
+                }
+                return;
+            }
+
+            if (cmdArgs.Length > 1 && cmdArgs[1] == "--quota-toolbar-preview")
+            {
+                // Exercise the real quota footer without creating or recovering any terminal.
+                try
+                {
+                    Loc.Init();
+                    Settings.ThemeManager.Init();
+                    _window = new MainWindow(quotaToolbarPreview: true);
+                    var previewHandle = WinRT.Interop.WindowNative.GetWindowHandle(_window);
+                    var previewAppWindow = AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(previewHandle));
+                    previewAppWindow.Resize(new SizeInt32(1200, 650));
+                    _window.Activate();
+                    LogDiag("quota-toolbar preview launch: terminal creation disabled");
+                }
+                catch (Exception ex)
+                {
+                    LogStartupError("QuotaToolbarPreview/startup", ex);
+                    Exit();
+                }
+                return;
+            }
+
             if (cmdArgs.Length > 1)
             {
                 var arg = cmdArgs[1];
@@ -293,14 +350,23 @@ namespace CCPad
             // Resolve the saved theme preference before the first window is built.
             Settings.ThemeManager.Init();
 
-            // 每次启动自动注册右键菜单（幂等操作）
-            try { RegisterContextMenu(); } catch { }
+            // A sidecar/demo instance must not mutate machine-wide shell verbs or
+            // notification registration used by the production installation.
+            if (!feishuDemo)
+            {
+                // 每次启动自动注册右键菜单（幂等操作）
+                try { RegisterContextMenu(); } catch { }
 
-            // Register the toast notifier early so background "waiting" nudges
-            // and their click-to-reveal activation work. Best-effort (unpackaged).
-            Notify.ToastService.EnsureRegistered();
+                // Register the toast notifier early so background "waiting" nudges
+                // and their click-to-reveal activation work. Best-effort (unpackaged).
+                Notify.ToastService.EnsureRegistered();
+            }
 
-            _window = new MainWindow();
+            var accountSwitcher = new CodexQuota.CodexAccountSwitchService();
+            var accountSwitch = accountSwitcher.ApplyPending();
+            if (accountSwitch != CodexQuota.CodexAccountSwitchResult.None)
+                LogDiag($"account-switch result={accountSwitch} failure={accountSwitcher.FailureCode ?? "none"}");
+            _window = new MainWindow(accountSwitchResult: accountSwitch);
 
             var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(_window);
             var wid = Win32Interop.GetWindowIdFromWindow(hwnd);
@@ -319,11 +385,21 @@ namespace CCPad
             }
 
             _window.Activate();
+
+            if (feishuDemo && _window is MainWindow demoWindow)
+            {
+                _window.DispatcherQueue.TryEnqueue(async () =>
+                {
+                    var started = await demoWindow.StartFeishuDemoWebTerminalAsync();
+                    LogDiag($"Feishu single-window demo WebTerminal started={started}");
+                });
+            }
         }
 
         /// <summary>Re-write the shell context-menu labels (e.g. after a language switch).</summary>
         public static void ReRegisterContextMenu()
         {
+            if (_isFeishuDemo) return;
             try { RegisterContextMenu(); } catch { }
         }
 

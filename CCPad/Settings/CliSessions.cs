@@ -30,15 +30,16 @@ namespace CCPad.Settings
             }
         }
 
-        private static string CodexSessionsDir
+        private static string CodexSessionsDir(string? codexHome = null)
         {
-            get
-            {
-                var root = Environment.GetEnvironmentVariable("CODEX_HOME");
-                if (string.IsNullOrEmpty(root))
-                    root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");
-                return Path.Combine(root, "sessions");
-            }
+            var root = codexHome;
+            if (string.IsNullOrWhiteSpace(root))
+                root = Environment.GetEnvironmentVariable("CODEX_HOME");
+            if (string.IsNullOrWhiteSpace(root))
+                root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");
+            try { root = Environment.ExpandEnvironmentVariables(root.Trim()); }
+            catch { }
+            return Path.Combine(root, "sessions");
         }
 
         public static bool ClaudeSessionExists(string sessionId)
@@ -90,12 +91,12 @@ namespace CCPad.Settings
             return sb.ToString();
         }
 
-        public static bool CodexSessionExists(string sessionId)
+        public static bool CodexSessionExists(string sessionId, string? codexHome = null)
         {
             if (!IsUuid(sessionId)) return false;
             try
             {
-                var dir = CodexSessionsDir;
+                var dir = CodexSessionsDir(codexHome);
                 if (!Directory.Exists(dir)) return false;
                 return Directory.EnumerateFiles(dir, "rollout-*" + sessionId + ".jsonl", SearchOption.AllDirectories).Any();
             }
@@ -110,12 +111,13 @@ namespace CCPad.Settings
         /// two same-cwd panes must never persist the same conversation. Returns null when
         /// nothing matches.
         /// </summary>
-        public static string? FindLatestCodexSessionId(string? workingDir, DateTime? notBeforeUtc, ISet<string>? excludeIds = null)
+        public static string? FindLatestCodexSessionId(string? workingDir, DateTime? notBeforeUtc,
+            ISet<string>? excludeIds = null, string? codexHome = null)
         {
             if (string.IsNullOrEmpty(workingDir)) return null;
             try
             {
-                var dir = CodexSessionsDir;
+                var dir = CodexSessionsDir(codexHome);
                 if (!Directory.Exists(dir)) return null;
 
                 var files = Directory.EnumerateFiles(dir, "rollout-*.jsonl", SearchOption.AllDirectories)
@@ -135,35 +137,97 @@ namespace CCPad.Settings
             return null;
         }
 
-        /// <summary>Parse the first-line session_meta and return the session ID when its
-        /// cwd matches; null otherwise. Non-interactive ("exec") sessions are skipped —
-        /// `codex resume` hides those by default and they never came from a CCPad pane.</summary>
-        private static string? MatchCodexMeta(string path, string workingDir)
+        /// <summary>Old snapshots may contain an inherited worker notify ID. Follow only
+        /// explicit subagent ancestry; a user-created fork is its own conversation.</summary>
+        public static string? ResolveCodexResumeSessionId(string sessionId, string? codexHome = null)
         {
             try
             {
-                using var reader = new StreamReader(path);
-                var line = reader.ReadLine();
-                if (string.IsNullOrWhiteSpace(line)) return null;
-
-                using var doc = JsonDocument.Parse(line);
-                if (!doc.RootElement.TryGetProperty("payload", out var payload)) return null;
-
-                if (payload.TryGetProperty("source", out var source) &&
-                    string.Equals(source.GetString(), "exec", StringComparison.OrdinalIgnoreCase))
-                    return null;
-
-                if (!payload.TryGetProperty("cwd", out var cwd) ||
-                    !PathsEqual(cwd.GetString(), workingDir))
-                    return null;
-
-                if (payload.TryGetProperty("id", out var id) && IsUuid(id.GetString()))
-                    return id.GetString();
-                if (payload.TryGetProperty("session_id", out var sid) && IsUuid(sid.GetString()))
-                    return sid.GetString();
+                var dir = CodexSessionsDir(codexHome);
+                if (!Directory.Exists(dir)) return null;
+                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                while (IsUuid(sessionId) && seen.Count < 32 && seen.Add(sessionId))
+                {
+                    var path = Directory.EnumerateFiles(dir, "rollout-*-" + sessionId + ".jsonl",
+                        SearchOption.AllDirectories).FirstOrDefault();
+                    var meta = path == null ? null : ReadCodexMeta(path);
+                    if (meta == null || !string.Equals(meta.Id, sessionId, StringComparison.OrdinalIgnoreCase))
+                        return null;
+                    if (meta.Interactive) return meta.Id;
+                    if (meta.ParentId == null) return null;
+                    sessionId = meta.ParentId;
+                }
             }
             catch { }
             return null;
+        }
+
+        private sealed record CodexMeta(string Id, string? Cwd, bool Interactive, string? ParentId);
+
+        private static CodexMeta? ReadCodexMeta(string path)
+        {
+            try
+            {
+                using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete);
+                using var reader = new StreamReader(stream);
+                var line = reader.ReadLine();
+                if (string.IsNullOrWhiteSpace(line)) return null;
+                using var doc = JsonDocument.Parse(line);
+                var root = doc.RootElement;
+                // Current Codex writes an explicit session_meta marker. Older
+                // rollouts (and saved CCPad snapshots) only had the payload on
+                // the first line, so keep accepting that legacy shape while
+                // rejecting an explicitly different record type.
+                if (root.TryGetProperty("type", out var type) &&
+                    (type.ValueKind != JsonValueKind.String || type.GetString() != "session_meta"))
+                    return null;
+                if (!root.TryGetProperty("payload", out var payload) ||
+                    payload.ValueKind != JsonValueKind.Object) return null;
+
+                string? Text(JsonElement obj, string name) =>
+                    obj.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+                        ? value.GetString() : null;
+                var id = Text(payload, "id") ?? Text(payload, "session_id");
+                if (!IsUuid(id)) return null;
+                var parent = Text(payload, "parent_thread_id");
+                var agentPath = Text(payload, "agent_path");
+                bool child = !string.IsNullOrEmpty(parent) ||
+                    (!string.IsNullOrEmpty(agentPath) && agentPath != "/root");
+                bool interactive = true; // Legacy rollouts can omit source.
+                if (payload.TryGetProperty("source", out var source))
+                {
+                    interactive = source.ValueKind == JsonValueKind.String &&
+                        (source.GetString() == "cli" || source.GetString() == "vscode" ||
+                         source.GetString() == "tui");
+                    if (source.ValueKind == JsonValueKind.String && source.GetString() == "subagent")
+                        child = true;
+                    if (source.ValueKind == JsonValueKind.Object && source.TryGetProperty("subagent", out var subagent))
+                    {
+                        child = true;
+                        if (subagent.ValueKind == JsonValueKind.Object &&
+                            subagent.TryGetProperty("thread_spawn", out var spawn) &&
+                            spawn.ValueKind == JsonValueKind.Object)
+                        {
+                            var sourceParent = Text(spawn, "parent_thread_id");
+                            if (parent != null && sourceParent != null &&
+                                !string.Equals(parent, sourceParent, StringComparison.OrdinalIgnoreCase)) return null;
+                            parent ??= sourceParent;
+                        }
+                    }
+                }
+                if (child) parent ??= Text(payload, "forked_from_id");
+                return new CodexMeta(id!, Text(payload, "cwd"), interactive && !child,
+                    child && IsUuid(parent) ? parent : null);
+            }
+            catch { return null; }
+        }
+
+        private static string? MatchCodexMeta(string path, string workingDir)
+        {
+            var meta = ReadCodexMeta(path);
+            return meta is { Interactive: true } && PathsEqual(meta.Cwd, workingDir) &&
+                path.EndsWith("-" + meta.Id + ".jsonl", StringComparison.OrdinalIgnoreCase) ? meta.Id : null;
         }
 
         private static bool PathsEqual(string? a, string? b)

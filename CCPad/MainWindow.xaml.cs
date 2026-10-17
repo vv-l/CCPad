@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Threading.Tasks;
 using CCPad.CodexQuota;
 using CCPad.Localization;
@@ -58,8 +59,15 @@ namespace CCPad
         private bool _codexQuotaRefreshInFlight;
         private bool _claudeQuotaRefreshInFlight;
 
-        public MainWindow()
+        private readonly bool _quotaToolbarPreview;
+
+        private readonly CodexAccountSwitchResult _accountSwitchResult;
+
+        public MainWindow(bool quotaToolbarPreview = false, CodexAccountSwitchResult accountSwitchResult = CodexAccountSwitchResult.None)
         {
+            _quotaToolbarPreview = quotaToolbarPreview;
+            _accountSwitchResult = accountSwitchResult;
+            _quotaToolbarView = _quotaToolbarSettings.Load();
             InitializeComponent();
             SystemBackdrop = new MicaBackdrop { Kind = MicaKind.BaseAlt };
             // Trigger first-time init from Loaded rather than Activated: at
@@ -79,7 +87,7 @@ namespace CCPad
             LastCmdBarManager.Changed += OnLastCmdBarManagerChanged;
             ReplyButton.IsChecked = AutoReplyManager.IsOn;
             AutoReplyManager.Changed += OnAutoReplyManagerChanged;
-            SessionRecovery.MarkRunning();
+            if (!_quotaToolbarPreview) SessionRecovery.MarkRunning();
             UpdateQuotaUi();
         }
 
@@ -102,16 +110,23 @@ namespace CCPad
             _quotaClockTimer.IsRepeating = true;
             _quotaClockTimer.Tick += (_, _) => UpdateQuotaUi();
             _quotaClockTimer.Start();
+            StartQuotaAccountWatcher();
             RefreshAllQuotas();
         }
 
         private void RefreshAllQuotas()
         {
+            SynchronizeCodexQuotaAccounts();
             _ = RefreshQuotaAsync(QuotaProvider.Codex);
             _ = RefreshQuotaAsync(QuotaProvider.Claude);
+            foreach (var entry in _additionalCodexQuotas.Values)
+                _ = RefreshAdditionalCodexQuotaAsync(entry);
         }
 
-        private Task RefreshSelectedQuotaAsync() => RefreshQuotaAsync(_quotaProvider);
+        private Task RefreshSelectedQuotaAsync() =>
+            _quotaProvider == QuotaProvider.Codex &&
+                _additionalCodexQuotas.TryGetValue(_selectedCodexQuotaId, out var entry)
+                ? RefreshAdditionalCodexQuotaAsync(entry) : RefreshQuotaAsync(_quotaProvider);
 
         private async Task RefreshQuotaAsync(QuotaProvider provider)
         {
@@ -186,28 +201,48 @@ namespace CCPad
 
         private void UpdateQuotaUi()
         {
+            UpdateQuotaAccountControls();
             UpdateCodexQuotaUi(_codexQuotaSnapshot);
             UpdateClaudeQuotaUi(_claudeQuotaSnapshot);
+            UpdateQuotaToolbar();
         }
 
         private void UpdateCodexQuotaUi(CodexQuotaSnapshot snapshot)
         {
             _codexQuotaSnapshot = snapshot;
-            var hasUsage = snapshot.State == CodexQuotaState.Ready && snapshot.Windows.Length > 0;
-            var percent = hasUsage ? snapshot.TightestUsedPercent : 0;
-            var soonestReset = GetSoonestReset(snapshot);
+            if (QuotaLaunchAccountLabel is not null)
+            {
+                QuotaLaunchAccountLabel.Visibility = Visibility.Visible;
+                QuotaLaunchAccountLabel.Text = Loc.T("quota_launch_badge", CurrentCodexLaunchAccountName());
+                ToolTipService.SetToolTip(QuotaLaunchAccountLabel,
+                    Loc.T("proj_codex_account", CurrentCodexLaunchAccountName()));
+            }
+            snapshot = SelectedCodexQuotaSnapshot;
+            UpdateResetCreditButton();
+            var badgeSnapshot = ShowsAllQuotaAccounts ? _codexQuotaSnapshot : snapshot;
+            var hasUsage = badgeSnapshot.State == CodexQuotaState.Ready && badgeSnapshot.Windows.Length > 0;
+            var percent = hasUsage ? badgeSnapshot.TightestUsedPercent : 0;
+            var soonestReset = GetSoonestReset(badgeSnapshot);
             QuotaProgress.Value = percent;
             QuotaPercentLabel.Text = hasUsage ? $"{percent:0}%" : "--";
             QuotaResetLabel.Text = soonestReset.HasValue
                 ? FormatCountdown(soonestReset.Value - DateTimeOffset.UtcNow)
                 : "";
-            QuotaProviderLabel.Text = Loc.T("quota_codex");
-            ToolTipService.SetToolTip(QuotaButton, hasUsage
+            QuotaProviderLabel.Text = Loc.T("quota_account_badge",
+                ShowsAllQuotaAccounts ? DefaultCodexQuotaName : SelectedCodexQuotaName);
+            var badgeDescription = QuotaProviderLabel.Text +
+                (ShowsAllQuotaAccounts || IsDefaultCodexQuotaSelected ? " · " + Loc.T("quota_account_default") : "") + " · " + (hasUsage
                 ? Loc.T("quota_tooltip", percent)
                 : Loc.T("quota_tooltip_empty"));
+            ToolTipService.SetToolTip(QuotaButton, badgeDescription);
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(QuotaButton, badgeDescription);
 
             if (_quotaProvider != QuotaProvider.Codex)
                 return;
+
+            // Details always follow the clicked/selected account, independently of the default badge.
+            hasUsage = snapshot.State == CodexQuotaState.Ready && snapshot.Windows.Length > 0;
+            percent = hasUsage ? snapshot.TightestUsedPercent : 0;
 
             // The contents of a Flyout are created lazily by WinUI. During the
             // MainWindow constructor (and during early language/theme updates)
@@ -224,7 +259,7 @@ namespace CCPad
                 return;
 
             QuotaFlyoutProgress.Value = percent;
-            QuotaFlyoutTitle.Text = Loc.T("quota_title");
+            QuotaFlyoutTitle.Text = Loc.T("quota_account_badge", SelectedCodexQuotaName);
             QuotaFlyoutPlan.Text = hasUsage && !string.IsNullOrWhiteSpace(snapshot.PlanType)
                 ? Loc.T("quota_plan", snapshot.PlanType!)
                 : "";
@@ -238,7 +273,8 @@ namespace CCPad
             {
                 CodexQuotaState.Loading => Loc.T("quota_loading"),
                 CodexQuotaState.Unavailable => Loc.T("quota_not_signed_in"),
-                CodexQuotaState.Error => snapshot.Error ?? Loc.T("quota_unavailable"),
+                CodexQuotaState.Error => snapshot.Error == "Codex login expired; run codex login"
+                    ? Loc.T("quota_account_expired") : snapshot.Error ?? Loc.T("quota_unavailable"),
                 _ => ""
             };
             QuotaRefreshButton.Content = Loc.T("quota_refresh");
@@ -250,9 +286,18 @@ namespace CCPad
             }
         }
 
+        internal void RefreshCodexLaunchAccountBadge()
+        {
+            if (!_quotaToolbarPreview)
+                UpdateQuotaUi();
+        }
+
         private void UpdateClaudeQuotaUi(ClaudeQuotaSnapshot snapshot)
         {
             _claudeQuotaSnapshot = snapshot;
+            if (QuotaLaunchAccountLabel is not null)
+                QuotaLaunchAccountLabel.Visibility = Visibility.Collapsed;
+            UpdateResetCreditButton();
             var hasUsage = snapshot.State == ClaudeQuotaState.Ready && snapshot.Windows.Length > 0;
             var hasPlan = !string.IsNullOrWhiteSpace(snapshot.PlanLabel);
             var percent = hasUsage ? snapshot.TightestUsedPercent : 0;
@@ -406,25 +451,35 @@ namespace CCPad
         }
 
         private void OnQuotaButtonClick(object sender, RoutedEventArgs e)
-            => ShowQuotaDetails(QuotaProvider.Codex, openFlyout: false);
+        {
+            if (_codexResetInFlight) return;
+            if (ShowsAllQuotaAccounts)
+            {
+                _selectedCodexQuotaId = CodexQuotaProfileStore.DefaultId;
+                RebuildQuotaAccountSelector();
+            }
+            ShowQuotaDetails(QuotaProvider.Codex, openFlyout: false);
+        }
 
         private void OnClaudeQuotaButtonClick(object sender, RoutedEventArgs e)
             => ShowQuotaDetails(QuotaProvider.Claude, openFlyout: true);
 
-        private void ShowQuotaDetails(QuotaProvider provider, bool openFlyout)
+        private void ShowQuotaDetails(QuotaProvider provider, bool openFlyout, FrameworkElement? anchor = null)
         {
+            if (_codexResetInFlight) return;
             _quotaFlyoutRequestedProvider = provider;
             _quotaProvider = provider;
             if (QuotaProviderSelector is not null)
                 QuotaProviderSelector.SelectedIndex = provider == QuotaProvider.Claude ? 1 : 0;
             UpdateQuotaUi();
             if (openFlyout)
-                QuotaFlyout.ShowAt(ClaudeQuotaButton);
+                QuotaFlyout.ShowAt(anchor ?? (provider == QuotaProvider.Claude ? ClaudeQuotaButton : QuotaButton));
             _ = RefreshSelectedQuotaAsync();
         }
 
         private void OnQuotaFlyoutOpened(object sender, object e)
         {
+            SynchronizeCodexQuotaAccounts();
             // Flyout contents are created lazily. Their initial selector event
             // may fire before Opened and must not override the clicked badge.
             _quotaProvider = _quotaFlyoutRequestedProvider;
@@ -460,11 +515,49 @@ namespace CCPad
             if (_initialized) return;
             _initialized = true;
             RootGrid.Loaded -= OnRootLoaded;
+            if (_accountSwitchResult is not CodexAccountSwitchResult.None and not CodexAccountSwitchResult.Applied)
+            {
+                var message = _accountSwitchResult switch
+                {
+                    CodexAccountSwitchResult.Busy => "account_switch_busy",
+                    CodexAccountSwitchResult.UnsupportedStore => "account_switch_store",
+                    CodexAccountSwitchResult.InvalidLogin => "account_switch_invalid",
+                    _ => "account_switch_failed",
+                };
+                var result = await new ContentDialog
+                {
+                    Title = Loc.T("quota_account"), Content = Loc.T(message),
+                    PrimaryButtonText = Loc.T("account_switch_cancel_use_current"),
+                    CloseButtonText = Loc.T("close"), DefaultButton = ContentDialogButton.Close,
+                    XamlRoot = Content.XamlRoot,
+                }.ShowAsync();
+                if (result != ContentDialogResult.Primary || !new CodexAccountSwitchService().Request(CodexQuotaProfileStore.DefaultId))
+                {
+                    _closeConfirmed = true;
+                    Close();
+                    return;
+                }
+            }
             StartQuotaMonitor();
 
             // Apply the saved theme before any terminal panes are built below, so
             // their initial xterm styling matches the effective dark/light value.
             ApplyThemePref();
+
+            if (_quotaToolbarPreview)
+            {
+                Title = "CC Pad · " + Loc.T("quota_toolbar_preview");
+                WorkspaceButton.Visibility = Visibility.Collapsed;
+                FooterActions.IsHitTestVisible = false;
+                FooterActions.Opacity = 0.4;
+                RootGrid.Children.Add(new TextBlock
+                {
+                    Text = Loc.T("quota_toolbar_preview_help"), FontSize = 18, TextWrapping = TextWrapping.Wrap,
+                    HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
+                    MaxWidth = 700, Margin = new Thickness(24),
+                });
+                return; // Never create terminals, recover workspaces, register hooks or start update actions.
+            }
 
             var app = Application.Current as App;
             var projects = ProjectConfig.Load();
@@ -481,7 +574,7 @@ namespace CCPad
                     {
                         bool frozenTemplate = WorkspaceConfig.IsTemplateFile(workspaceFile);
                         if (frozenTemplate)
-                            WorkspaceConfig.MarkAllTabsFrozen(ws);
+                            WorkspaceConfig.MarkAllTabsFrozen(ws, resumeOriginal: true);
                         _splitHost = SplitHost.RestoreFromLayout(ws.Layout, projects);
                         if (frozenTemplate)
                             _splitHost.DisableFrozenPrewarm();
@@ -1161,7 +1254,7 @@ namespace CCPad
 
                 // Items loaded from disk do not retain the transient ForkOnThaw
                 // hint. Reapply template semantics immediately before launch.
-                WorkspaceConfig.MarkAllTabsFrozen(template.Entry);
+                WorkspaceConfig.MarkAllTabsFrozen(template.Entry, resumeOriginal: true);
                 _splitHost = SplitHost.RestoreFromLayout(template.Entry.Layout, ProjectConfig.Load());
                 _splitHost.DisableFrozenPrewarm();
                 RootGrid.Children.Add(_splitHost);
@@ -1750,10 +1843,12 @@ namespace CCPad
             ReplyButtonLabel.Text = Loc.T("btn_reply");
             ToolTipService.SetToolTip(StageButton, Loc.T("tip_stage"));
             StageButtonLabel.Text = Loc.T("btn_stage");
+            if (QuotaOverviewButton is not null) QuotaOverviewButton.Text = Loc.T("quota_overview_open");
             if (QuotaCodexItem is not null)
                 QuotaCodexItem.Content = Loc.T("quota_codex");
             if (QuotaClaudeItem is not null)
                 QuotaClaudeItem.Content = Loc.T("quota_claude");
+            RebuildQuotaAccountSelector();
             UpdateQuotaUi();
         }
 
@@ -2055,6 +2150,46 @@ namespace CCPad
 
         private MenuFlyoutItem? _remoteMenuItem;
 
+        /// <summary>
+        /// Start the isolated single-window Feishu demo server. The command-line
+        /// switch is intentionally separate from the normal LAN sharing dialog:
+        /// it binds loopback only, always uses a token, and writes the descriptor
+        /// into the selected CCPAD_DATA_DIR for the sidecar to read.
+        /// </summary>
+        internal async Task<bool> StartFeishuDemoWebTerminalAsync()
+        {
+            _webServer ??= new WebTerminalServer();
+            _webServer.UseToken = true;
+            _webServer.BindLoopbackOnly = true;
+            _webServer.Host = "127.0.0.1";
+
+            var result = await _webServer.StartAsync(9220, autoIncrement: true);
+            if (!result.Success || string.IsNullOrWhiteSpace(_webServer.Token))
+                return false;
+
+            var descriptor = new
+            {
+                base_url = $"http://127.0.0.1:{result.ActualPort}",
+                token = _webServer.Token,
+                pid = Environment.ProcessId,
+                created_at_utc = DateTimeOffset.UtcNow
+            };
+            try
+            {
+                Directory.CreateDirectory(AppPaths.Root);
+                var path = Path.Combine(AppPaths.Root, "feishu-demo-webterminal.json");
+                File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(descriptor,
+                    new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+            }
+            catch
+            {
+                await _webServer.StopAsync();
+                _webServer = null;
+                return false;
+            }
+            return true;
+        }
+
         private async void OnRemoteTerminalClick()
         {
             if (_webServer?.IsRunning == true)
@@ -2249,6 +2384,39 @@ namespace CCPad
 
         // ── Auto-save on close (only if in workspace mode) ───────────────
 
+        internal bool SaveTabTransferSnapshot()
+        {
+            try
+            {
+                return !AppConfig.Load().SessionRecoveryEnabled ||
+                    (_splitHost != null && SessionRecovery.SaveSnapshot(CreateSnapshot()));
+            }
+            catch { return false; }
+        }
+
+        internal void CloseAfterTabTransfer()
+        {
+            if (_splitHost?.HasTabs() != false) return;
+            _closeConfirmed = true;
+            _restoreOnNextLaunch = false;
+            Close();
+        }
+
+        private bool _capturingStagingOnClose;
+        private bool _stagingCapturedOnClose;
+
+        private async System.Threading.Tasks.Task CaptureStagingAndCloseAsync()
+        {
+            _capturingStagingOnClose = true;
+            try { if (_splitHost != null) await _splitHost.CaptureStagingForCloseAsync(); }
+            finally
+            {
+                _stagingCapturedOnClose = true;
+                _closeConfirmed = true;
+                DispatcherQueue.TryEnqueue(Close);
+            }
+        }
+
         private void OnWindowClosed(object sender, WindowEventArgs args)
         {
             if (!_closeConfirmed)
@@ -2267,16 +2435,28 @@ namespace CCPad
                 _restoreOnNextLaunch = prefs.RestoreOnClose;
             }
 
+            if (!_stagingCapturedOnClose && _splitHost != null)
+            {
+                args.Handled = true;
+                if (!_capturingStagingOnClose) _ = CaptureStagingAndCloseAsync();
+                return;
+            }
+
             Loc.LanguageChanged -= OnLanguageChanged;
             ThemeManager.PrefChanged -= OnThemePrefChanged;
             LastCmdBarManager.Changed -= OnLastCmdBarManagerChanged;
 
             _resourceTimer?.Stop();
             _quotaTimer?.Stop();
+            _quotaAccountsWatcher?.Dispose();
+            _quotaAccountsDebounce?.Stop();
             _quotaClockTimer?.Stop();
             _quotaRefreshCts.Cancel();
             _codexQuotaService.Dispose();
+            foreach (var entry in _additionalCodexQuotas.Values)
+                entry.Service.Dispose();
             _claudeQuotaService.Dispose();
+            if (_quotaToolbarPreview) return;
 
             // Snapshot for the closed-session history must be taken while the
             // panes (and their session IDs / working dirs) are still alive.
@@ -2314,7 +2494,7 @@ namespace CCPad
             // automatically or leaves it in the menu.
             try
             {
-                if (finalSnapshot?.Layout != null)
+                if (finalSnapshot?.Layout != null && _splitHost?.HasTabs() == true)
                     SessionRecovery.ArchiveClosed(finalSnapshot);
                 SessionRecovery.MarkClosedCleanly();
             }

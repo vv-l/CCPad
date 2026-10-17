@@ -28,6 +28,20 @@ namespace CCPad.Web
         public static SessionEntry? Get(string id) => _entries.GetValueOrDefault(id);
         public static List<SessionEntry> GetAll() => _entries.Values.ToList();
 
+        /// <summary>
+        /// Update bridge-visible metadata without replacing the live ConPTY entry.
+        /// Session IDs and lifecycle status can change after a pane is registered,
+        /// so the WebTerminal API must read the current values.
+        /// </summary>
+        public static bool UpdateMetadata(string id, Action<SessionEntry> update,
+            bool notify = false)
+        {
+            if (!_entries.TryGetValue(id, out var entry)) return false;
+            update(entry);
+            if (notify) NotifyChanged();
+            return true;
+        }
+
         public static event Action? Changed;
         internal static void NotifyChanged() => Changed?.Invoke();
     }
@@ -39,6 +53,18 @@ namespace CCPad.Web
         public required string Command { get; init; }
         public string? WorkingDir { get; init; }
         public required ConPtySession Session { get; set; }
+
+        // Bridge metadata. These fields are deliberately descriptive only: the
+        // bridge still writes input through this live entry and never starts a
+        // second model process.
+        public string? CliMode { get; set; }
+        public string? CliSessionId { get; set; }
+        public string? CodexAccountId { get; set; }
+        public string? RemoteProfileId { get; set; }
+        public string? RemoteWorkingDir { get; set; }
+        public string Status { get; set; } = "waiting";
+        public DateTime LaunchedAtUtc { get; set; }
+        public DateTime LastActivityUtc { get; set; }
 
         /// <summary>Ring buffer capturing recent output for replay to new web clients.</summary>
         public OutputRingBuffer Buffer { get; } = new(512 * 1024); // 512KB

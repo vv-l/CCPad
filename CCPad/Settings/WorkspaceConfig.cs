@@ -6,9 +6,24 @@ using System.Collections.Generic;
 
 namespace CCPad.Settings
 {
+    public sealed record StagingState
+    {
+        public bool Enabled { get; init; }
+        public string[] Queue { get; init; } = Array.Empty<string>();
+        public string Draft { get; init; } = "";
+        public bool BulkOpen { get; init; }
+        public string BulkDraft { get; init; } = "";
+        public int? EditingIndex { get; init; }
+        public string EditingDraft { get; init; } = "";
+        public bool Paused { get; init; }
+        // A transport acknowledgement may have been lost during shutdown.
+        public string? PendingCommand { get; init; }
+    }
+
     public class TabState
     {
         public string Name { get; set; } = "";
+        public StagingState? Staging { get; set; }
         public string WorkingDir { get; set; } = "";
 
         /// <summary>SSH profile and Linux working directory for a remote tab.
@@ -27,6 +42,12 @@ namespace CCPad.Settings
         /// `tmux new -A` reattaches it on restore (see RemoteSessions).
         /// Empty → the restored tab starts a fresh conversation/session.</summary>
         public string SessionId { get; set; } = "";
+
+        /// <summary>
+        /// Legacy local launch-profile metadata. Local restores now use the native
+        /// history home and its currently signed-in account. Remote tabs leave this empty.
+        /// </summary>
+        public string CodexAccountId { get; set; } = "";
 
         /// <summary>User-defined tag shown as a badge next to the tab title. Empty → none.</summary>
         public string Tag { get; set; } = "";
@@ -94,6 +115,7 @@ namespace CCPad.Settings
     }
 
     [JsonSerializable(typeof(WorkspaceEntry))]
+    [JsonSerializable(typeof(StagingState))]
     [JsonSourceGenerationOptions(WriteIndented = true)]
     internal partial class WorkspaceJsonContext : JsonSerializerContext { }
 
@@ -141,24 +163,24 @@ namespace CCPad.Settings
         /// Layout, names, directories, tags and conversation IDs are preserved, but
         /// every tab starts as a lightweight placeholder when the template is opened.
         /// </summary>
-        public static void MarkAllTabsFrozen(WorkspaceEntry entry)
+        public static void MarkAllTabsFrozen(WorkspaceEntry entry, bool resumeOriginal = false)
         {
             entry.RestoreOnLaunch = false;
             entry.Crashed = false;
-            MarkNodeFrozen(entry.Layout);
+            MarkNodeFrozen(entry.Layout, resumeOriginal);
         }
 
-        private static void MarkNodeFrozen(LayoutNode? node)
+        private static void MarkNodeFrozen(LayoutNode? node, bool resumeOriginal)
         {
             if (node == null) return;
             if (node.Tabs != null)
                 foreach (var tab in node.Tabs)
                 {
                     tab.Frozen = true;
-                    tab.ForkOnThaw = true;
+                    tab.ForkOnThaw = !resumeOriginal;
                 }
-            MarkNodeFrozen(node.First);
-            MarkNodeFrozen(node.Second);
+            MarkNodeFrozen(node.First, resumeOriginal);
+            MarkNodeFrozen(node.Second, resumeOriginal);
         }
 
     }

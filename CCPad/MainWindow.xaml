@@ -27,18 +27,32 @@
         <local:FileManagerPanel x:Name="FilePanel" Grid.Row="0" Grid.RowSpan="2"
                                 Grid.Column="1" Visibility="Collapsed"/>
 
-        <StackPanel Grid.Row="1" Grid.Column="0"
+        <Grid x:Name="FooterGrid" Grid.Row="1" Grid.Column="0" Margin="8,0,8,8"
+              SizeChanged="OnQuotaFooterSizeChanged" ColumnSpacing="8" RowSpacing="6">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+        <ScrollViewer x:Name="QuotaToolbarScroll" Grid.Row="0" Grid.Column="0"
+                      HorizontalScrollMode="Enabled" HorizontalScrollBarVisibility="Auto"
+                      VerticalScrollMode="Disabled" VerticalScrollBarVisibility="Disabled">
+        <StackPanel x:Name="QuotaToolbarPanel" SizeChanged="OnQuotaFooterSizeChanged"
                     Orientation="Horizontal" Spacing="6"
-                    HorizontalAlignment="Left" VerticalAlignment="Bottom"
-                    Margin="8,0,0,8">
+                    HorizontalAlignment="Left" VerticalAlignment="Bottom">
         <Button x:Name="QuotaButton" Padding="7,3"
                 ToolTipService.ToolTip="Codex usage"
                 Click="OnQuotaButtonClick">
             <StackPanel Orientation="Horizontal" Spacing="6">
-                <TextBlock Text="AI" FontSize="11" FontWeight="SemiBold"
-                           VerticalAlignment="Center"/>
                 <TextBlock x:Name="QuotaProviderLabel" Text="Codex"
-                           FontSize="12" VerticalAlignment="Center"/>
+                           FontSize="12" VerticalAlignment="Center"
+                           MaxWidth="150" TextTrimming="CharacterEllipsis"/>
+                <TextBlock x:Name="QuotaLaunchAccountLabel" Text=""
+                           FontSize="10" Opacity="0.72" VerticalAlignment="Center"
+                           MaxWidth="140" TextTrimming="CharacterEllipsis"/>
                 <ProgressBar x:Name="QuotaProgress" Width="54" Height="5"
                              Minimum="0" Maximum="100" Value="0"
                              VerticalAlignment="Center"/>
@@ -63,6 +77,27 @@
                                 <ComboBoxItem x:Name="QuotaCodexItem" Content="Codex"/>
                                 <ComboBoxItem x:Name="QuotaClaudeItem" Content="Claude"/>
                             </ComboBox>
+                            <StackPanel x:Name="QuotaAccountPanel" Spacing="6">
+                                <ComboBox x:Name="QuotaAccountSelector" HorizontalAlignment="Stretch"
+                                          SelectionChanged="OnQuotaAccountChanged"/>
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <Button x:Name="QuotaAccountAddButton" Content="Add quota account…"
+                                            Padding="8,4" Click="OnQuotaAccountAddClick"/>
+                                    <Button x:Name="QuotaAccountRemoveButton" Content="Remove display"
+                                            Padding="8,4" IsEnabled="False" Click="OnQuotaAccountRemoveClick"/>
+                                </StackPanel>
+                                <ScrollViewer MaxHeight="160" VerticalScrollMode="Enabled"
+                                              VerticalScrollBarVisibility="Auto" HorizontalScrollMode="Disabled"
+                                              HorizontalScrollBarVisibility="Disabled">
+                                    <TextBlock x:Name="QuotaAccountUsage" FontSize="12" TextWrapping="Wrap"/>
+                                </ScrollViewer>
+                                <TextBlock x:Name="QuotaAccountPath" FontSize="11" Opacity="0.65"
+                                           TextWrapping="Wrap"/>
+                                <TextBlock x:Name="QuotaAccountKind" FontSize="11" FontWeight="SemiBold"
+                                           TextWrapping="Wrap"/>
+                                <TextBlock x:Name="QuotaAccountNote" FontSize="11" Opacity="0.65"
+                                           TextWrapping="Wrap"/>
+                            </StackPanel>
                             <Grid>
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*"/>
@@ -70,7 +105,7 @@
                                 </Grid.ColumnDefinitions>
                                 <StackPanel Grid.Column="0" Spacing="2">
                                     <TextBlock x:Name="QuotaFlyoutTitle" Text="Codex"
-                                               FontSize="16" FontWeight="SemiBold"/>
+                                               FontSize="16" FontWeight="SemiBold" TextWrapping="Wrap"/>
                                     <TextBlock x:Name="QuotaFlyoutPlan" Text=""
                                                FontSize="12" Opacity="0.7"/>
                                 </StackPanel>
@@ -83,6 +118,9 @@
                             <StackPanel x:Name="QuotaWindowPanel" Spacing="9"/>
                             <TextBlock x:Name="QuotaCreditsLabel" Text=""
                                        FontSize="12" FontWeight="SemiBold"/>
+                            <Button x:Name="QuotaResetCreditButton" Content="Use reset credit"
+                                    HorizontalAlignment="Left" Padding="12,5"
+                                    IsEnabled="False" Click="OnQuotaResetCreditClick"/>
                             <TextBlock x:Name="QuotaFlyoutStatus" Text=""
                                        TextWrapping="Wrap" FontSize="12" Opacity="0.75"/>
                             <Button x:Name="QuotaRefreshButton" Content="Refresh"
@@ -93,6 +131,7 @@
                 </Flyout>
             </Button.Flyout>
         </Button>
+        <StackPanel x:Name="AdditionalQuotaBadges" Orientation="Horizontal" Spacing="6"/>
         <Button x:Name="ClaudeQuotaButton" Padding="7,3"
                 ToolTipService.ToolTip="Claude usage"
                 Click="OnClaudeQuotaButtonClick">
@@ -109,12 +148,29 @@
                            FontSize="11" Opacity="0.7" VerticalAlignment="Center"/>
             </StackPanel>
         </Button>
+        <DropDownButton x:Name="QuotaViewButton" Content="View" Padding="7,3" FontSize="12">
+            <DropDownButton.Flyout>
+                <MenuFlyout>
+                    <ToggleMenuFlyoutItem x:Name="QuotaViewCompactItem" Text="Compact view"
+                                          Click="OnQuotaViewCompactClick"/>
+                    <ToggleMenuFlyoutItem x:Name="QuotaViewAllItem" Text="Show all accounts"
+                                          Click="OnQuotaViewAllClick"/>
+                    <MenuFlyoutSeparator/>
+                    <MenuFlyoutItem x:Name="QuotaOverviewButton" Text="Quota overview"
+                                    Click="OnQuotaOverviewClick"/>
+                </MenuFlyout>
+            </DropDownButton.Flyout>
+        </DropDownButton>
         </StackPanel>
+        </ScrollViewer>
+
+        <StackPanel x:Name="FooterActions" Grid.Row="0" Grid.Column="1" Orientation="Horizontal"
+                    Spacing="4" HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                    SizeChanged="OnQuotaFooterSizeChanged">
 
         <!-- Update button — global, bottom-right, left of the toggle cluster -->
-        <Button x:Name="UpdateButton" Grid.Row="1" Grid.Column="0"
+        <Button x:Name="UpdateButton"
                 HorizontalAlignment="Right" VerticalAlignment="Bottom"
-                Margin="0,0,400,9"
                 Padding="6"
                 ToolTipService.ToolTip="检查更新"
                 Background="Transparent"
@@ -127,10 +183,10 @@
         <!-- Bottom-right control cluster: [回车] [寄存] [关于]. Three uniform
              buttons — same control footprint (plain Button shape, no chevron),
              equal width/height, identical icon+label layout, tight spacing. -->
-        <StackPanel x:Name="BottomRightCluster" Grid.Row="1" Grid.Column="0"
+        <StackPanel x:Name="BottomRightCluster"
                     Orientation="Horizontal" Spacing="4"
                     HorizontalAlignment="Right" VerticalAlignment="Bottom"
-                    Margin="0,0,8,8">
+                    >
             <ToggleButton x:Name="LastCmdButton"
                           Width="74" Height="28" MinHeight="28" MinWidth="0"
                           Padding="0" HorizontalContentAlignment="Center"
@@ -220,6 +276,8 @@
                 </Button.Flyout>
             </Button>
         </StackPanel>
+        </StackPanel>
+        </Grid>
 
         <!-- Workspace button — global, top-right, above all split panels -->
         <DropDownButton x:Name="WorkspaceButton" Grid.Row="0" Grid.Column="0"

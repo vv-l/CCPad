@@ -33,8 +33,26 @@ namespace CCPad
 
         public PaneNode ActivePane => _activePane;
 
+        internal bool HasTabs()
+        {
+            bool found = false;
+            if (_root != null) ForEachPanel(_root, p => found |= p.TabCount > 0);
+            return found;
+        }
+
         /// <summary>The TerminalPane in the currently-active tab panel, if any.</summary>
         public TerminalPane? ActiveTerminal => _activePane?.Panel?.CurrentPane;
+
+        /// <summary>Whether any local Codex process is currently live in this
+        /// window. The launch-account selector is a next-launch setting and is
+        /// locked while this is true; remote Codex panes are deliberately ignored.</summary>
+        public bool HasLiveLocalCodexTabs()
+        {
+            bool found = false;
+            if (_root != null)
+                ForEachPanel(_root, p => found |= p.HasLiveLocalCodexTab());
+            return found;
+        }
 
         /// <summary>Raised when the active pane changes (so chrome like the staging toggle can refresh).</summary>
         public event Action? ActivePaneChanged;
@@ -530,6 +548,13 @@ namespace CCPad
         }
 
         // ── Disposal ────────────────────────────────────────────────────
+
+        internal Task CaptureStagingForCloseAsync()
+        {
+            var tasks = new List<Task>();
+            ForEachPanel(_root, p => tasks.Add(p.CaptureStagingForCloseAsync()));
+            return Task.WhenAll(tasks);
+        }
 
         public void DisposeAll()
         {

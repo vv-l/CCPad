@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -59,9 +61,13 @@ namespace CCPad
         private string _remoteBrowserOpenScan = "";
         private string? _lastRemoteBrowserUrl;
         private DateTime _lastRemoteBrowserLaunchUtc = DateTime.MinValue;
+        private Settings.RemoteBrowserTunnel? _remoteBrowserTunnel;
         private static readonly Regex RemoteBrowserOpenPattern = new(
             @"Opened\s+(https?://[^\s<>""']+)\s+in\s+your\s+browser",
             RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        private static readonly char[] RemoteBrowserUrlTerminators =
+            ['.', ',', ';', ':', '!', '?', ')', ']', '}', '\u3002', '\uFF0C', '\uFF1B',
+             '\uFF1A', '\uFF01', '\uFF1F', '\uFF09', '\u3011', '\u300B'];
         private int _cols = 120;
         private int _rows = 30;
         private TaskCompletionSource? _readyTcs;
@@ -115,6 +121,7 @@ namespace CCPad
         ];
         private const string CodexCommandApprovalPrompt = "Would you like to run the following command?";
         private const string CodexProceedOption = "Yes, proceed";
+        private const string CodexApprovalFooter = "Press enter to confirm or esc to cancel";
 
         /// <summary>Shell to drop into when the launched CLI exits.</summary>
         private const string ShellCommand = "cmd.exe";
@@ -163,35 +170,51 @@ namespace CCPad
         private DateTime _lastUserInputUtc = DateTime.MinValue;
         private DateTime _outputRunStartUtc = DateTime.MinValue; // start of the current continuous output run while Waiting
         private DateTime _lastOutputUtc = DateTime.MinValue;     // last output seen while Waiting
+        // A completion callback is authoritative for the current turn.  The CLI
+        // can still repaint its final answer after that callback, so do not let
+        // the amber->green output heuristic reopen a turn that has already ended.
+        // A real submit clears this gate when SetStatus moves back to Working.
+        private volatile bool _explicitWaitingSignal;
 
-        // Symmetric self-correction for a stale GREEN light: green→amber normally
-        // rides on the CLI's Stop hook, but that callback can be lost (hookless
-        // resume, notify request dropped, hook file rejected) or undone by the
-        // amber→green persistence heuristic above firing on a long turn-end
-        // burst. Either way the pane reports Working forever and the staging
-        // queue never flushes. The tell for "actually idle" is the mirror of the
-        // persistence signal: a working CLI repaints its spinner/elapsed timer at
-        // least once a second, so sustained SILENCE while we show Working means
-        // the turn is over. Checked by a 1s timer (silence produces no output
-        // events, so an event-driven check could never see it). Guards:
-        //  • >6s since the last user keystroke, so someone idling mid-composition
+        // Symmetric self-correction for a stale GREEN light on a hookless/legacy
+        // CLI: green?amber normally rides on the CLI's completion hook, but that
+        // callback can be lost (hookless resume, notify request dropped, hook file
+        // rejected) or undone by the amber?green persistence heuristic above
+        // firing on a long turn-end burst. Either way the pane reports Working
+        // forever and the staging queue never flushes. The tell for "actually
+        // idle" is the mirror of the persistence signal: a working CLI repaints
+        // its spinner/elapsed timer at least once a second, so sustained SILENCE
+        // while we show Working means the turn is over. This fallback is used only
+        // when no completion callback is configured. Checked by a 1s timer
+        // (silence produces no output events, so an event-driven check could never
+        // see it). Guards:
+        //  ? >6s since the last user keystroke, so someone idling mid-composition
         //    at a stale-green prompt isn't interrupted by a queue flush;
-        //  • normally requires ≥1 output chunk since the green flip and >6s of
-        //    silence after it (≈six missed spinner frames);
-        //  • if NOTHING has painted at all since the flip (optimistic Enter on an
+        //  ? normally requires ?1 output chunk since the green flip and >6s of
+        //    silence after it (?six missed spinner frames);
+        //  ? if NOTHING has painted at all since the flip (optimistic Enter on an
         //    empty prompt, dead-quiet CLI), fall back to a longer 15s window.
-        // Real hook events keep overriding this — it only runs while Working.
+        // A configured completion callback disables this fallback entirely.
+
         private DateTime _lastAnyOutputUtc = DateTime.MinValue; // last output in ANY status
         private DateTime _workingSinceUtc = DateTime.MinValue;  // when the light last turned green
         private bool _workingOutputSeen;                        // any output since the green flip
         private Timer? _workingWatchTimer;
+        private CodexTurnActivityReader? _codexActivityReader;
+        private string? _codexActivityHome;
+        private string? _codexActivitySession;
+        private int _codexActivityReadInFlight;
+        private long _codexSubmissionEpoch;
+        private long _lastCodexSubmissionTicks;
+        private readonly object _codexActivityGate = new();
+        private readonly object _codexActivityReaderGate = new();
 
         // True when this pane has a real completion callback (Claude Stop or local
-        // Codex notify). For Claude that makes silence non-evidence of idleness
-        // (long thinking and tool calls can legitimately paint nothing for
-        // minutes) and the silence heuristic stands down. Codex is exempt from
-        // that authority in CheckStaleWorking: its notify only reports SUCCESSFUL
-        // turn ends, so an errored turn would otherwise hold green forever.
+        // Codex notify). Once such a callback is configured, the staging queue must
+        // wait for that explicit turn boundary. A long silent tool call, network
+        // wait, or model-side pause is not evidence that Codex is idle. Error paths
+        // move the pane to Disconnected (or use the auto-reply gate) explicitly;
+        // silence must never release a queued command by itself.
         private volatile bool _completionHooksActive;
         internal bool CompletionHooksActive
         {
@@ -218,11 +241,55 @@ namespace CCPad
         private bool _shellCliActive;
         private string _shellLineBuf = "";
         private string _recentBannerScan = "";
+        private string? _sessionId;
 
-        private void SetStatus(PaneStatus status)
+        private static string BridgeStatus(PaneStatus status) => status switch
         {
-            if (_status == status) return;
+            PaneStatus.Working => "working",
+            PaneStatus.Waiting => "waiting",
+            _ => "disconnected"
+        };
+
+        /// <summary>Keep the loopback bridge's read-only session metadata current.</summary>
+        private void SyncWebSessionMetadata(bool notify = false)
+        {
+            TerminalSessionRegistry.UpdateMetadata(PaneId, entry =>
+            {
+                entry.CliMode = CliMode;
+                entry.CliSessionId = SessionId;
+                entry.CodexAccountId = CodexAccountId;
+                entry.RemoteProfileId = RemoteProfileId;
+                entry.RemoteWorkingDir = RemoteWorkingDir;
+                entry.Status = BridgeStatus(_status);
+                entry.LaunchedAtUtc = LaunchedAtUtc;
+                entry.LastActivityUtc = LastActivityUtc;
+            }, notify);
+        }
+
+        private void UpdateWebSessionActivity()
+        {
+            TerminalSessionRegistry.UpdateMetadata(PaneId,
+                entry => entry.LastActivityUtc = LastActivityUtc);
+        }
+
+        private void SetStatus(PaneStatus status, bool explicitTransition = false)
+        {
+            // Once a completion callback has declared the turn idle, only a
+            // lifecycle callback or a real submit may reopen it.  Keeping this
+            // check in the transition itself closes the small race where a final
+            // output chunk and the callback arrive on different threads.
+            if (status == PaneStatus.Working && _explicitWaitingSignal && !explicitTransition)
+                return;
+            if (_status == status)
+            {
+                if (status == PaneStatus.Working && explicitTransition)
+                    _explicitWaitingSignal = false;
+                return;
+            }
             _status = status;
+            if (status != PaneStatus.Waiting)
+                _explicitWaitingSignal = false;
+            SyncWebSessionMetadata(notify: true);
             if (status == PaneStatus.Waiting)
             {
                 // Begin watching for a sustained output run that would mean the CLI
@@ -240,16 +307,73 @@ namespace CCPad
             // Mirror the status into the WebView so the in-terminal command-staging
             // UI knows when the CLI is idle (Waiting) and can flush the next queued
             // command. Demo feature — see the stage panel in TerminalHtml.
-            SendPaneStatus(status);
+            SendPaneStatus();
         }
 
         /// <summary>Command-staging mode state (mirrors the WebView UI). Owned by the host (toolbar button).</summary>
         public bool StagingOn { get; private set; }
+        internal Settings.StagingState SavedStaging { get; private set; } = new();
+        private int _stagingGeneration;
+        private bool _stagingRestorePending;
+        internal event Action? StagingStateChanged;
+
+        internal void RestoreStaging(Settings.StagingState? state)
+        {
+            SavedStaging = state ?? new();
+            StagingOn = SavedStaging.Enabled;
+            _stagingRestorePending = true;
+            if (_ready && _session != null) SendStagingState();
+        }
+
+        private void SendStagingState()
+        {
+            if (_disposed || !_ready) return;
+            _stagingRestorePending = false;
+            int generation = ++_stagingGeneration;
+            string state = JsonSerializer.Serialize(SavedStaging, Settings.WorkspaceJsonContext.Default.StagingState);
+            WebView.CoreWebView2?.PostWebMessageAsString(
+                $"{{\"type\":\"restoreStaging\",\"generation\":{generation},\"state\":{state}}}");
+        }
+
+        internal void ResumeStagingAfterCapture()
+        {
+            if (!_disposed && _ready)
+                WebView.CoreWebView2?.PostWebMessageAsString("{\"type\":\"resumeStaging\"}");
+        }
+
+        private void AcceptStagingState(JsonElement message)
+        {
+            if (_stagingRestorePending || !message.TryGetProperty("generation", out var generation) ||
+                generation.GetInt32() != _stagingGeneration) return;
+            var state = message.GetProperty("state").Deserialize(Settings.WorkspaceJsonContext.Default.StagingState);
+            if (state == null) return;
+            SavedStaging = state;
+            StagingOn = state.Enabled;
+            StagingStateChanged?.Invoke();
+            StagingChanged?.Invoke();
+        }
+
+        internal async Task CaptureStagingAsync(bool suspend = false)
+        {
+            if (_disposed || !_ready || _stagingRestorePending || WebView.CoreWebView2 == null) return;
+            try
+            {
+                var json = await WebView.CoreWebView2.ExecuteScriptAsync(
+                    $"window.ccpadCaptureStaging?.({(suspend ? "true" : "false")})")
+                    .AsTask().WaitAsync(TimeSpan.FromSeconds(2));
+                using var result = JsonDocument.Parse(json);
+                if (result.RootElement.ValueKind == JsonValueKind.Object)
+                    AcceptStagingState(result.RootElement);
+            }
+            catch { } // The host mirror still survives a stalled renderer.
+        }
 
         /// <summary>Turn command-staging mode on/off from the host (the WinUI toolbar button).</summary>
         public void SetStaging(bool on)
         {
             StagingOn = on;
+            SavedStaging = SavedStaging with { Enabled = on };
+            StagingStateChanged?.Invoke();
             if (_disposed) return;
             string json = $"{{\"type\":\"setStaging\",\"on\":{(on ? "true" : "false")}}}";
             DispatcherQueue.TryEnqueue(() =>
@@ -278,58 +402,98 @@ namespace CCPad
         /// by Alt+V while the staging input has focus — there the CLI's own clipboard
         /// read can't see the keystroke, so the host does the capture instead.
         /// </summary>
-        private async Task StageImagePasteAsync()
+        private async Task StageImagePasteAsync(string requestId)
         {
-            var (path, error) = await CaptureClipboardImageAsync();
+            var (path, error) = await CaptureClipboardImageAsync(requestId: requestId);
             if (path != null)
-                (path, error) = await RelocateForRemoteAsync(path!);
+            {
+                try { (path, error) = await RelocateForRemoteAsync(path!, requestId); }
+                catch (Exception ex)
+                {
+                    App.LogDiag($"image-paste phase=upload outcome=failed request={requestId} exception={ex.GetType().Name} code=0x{ex.HResult:X8}");
+                    path = null;
+                    error = Localization.Loc.T("clip_upload_fail", $"0x{ex.HResult:X8}");
+                }
+            }
 
             if (_disposed) return;
-            string payload = path != null
-                ? $"{{\"type\":\"stageImagePasted\",\"path\":{JsonSerializer.Serialize(path)}}}"
-                : $"{{\"type\":\"stageImagePasted\",\"error\":{JsonSerializer.Serialize(error ?? "")}}}";
+            string payload = JsonSerializer.Serialize(new { type = "stageImagePasted", requestId, path, error });
             WebView.CoreWebView2?.PostWebMessageAsString(payload);
         }
 
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern uint GetClipboardSequenceNumber();
+
         /// <summary>Clipboard image → PNG in the local temp folder. Shared by the
         /// staging Alt+V flow and the remote-pane terminal paste bridge.</summary>
-        private static async Task<(string? Path, string? Error)> CaptureClipboardImageAsync()
+        private static async Task<(string? Path, string? Error)> CaptureClipboardImageAsync(
+            Windows.ApplicationModel.DataTransfer.DataPackageView? content = null, string requestId = "terminal")
         {
-            try
+            uint sequence = GetClipboardSequenceNumber();
+            for (int attempt = 1; attempt <= 3; attempt++)
             {
-                var content = Windows.ApplicationModel.DataTransfer.Clipboard.GetContent();
-                if (!content.Contains(Windows.ApplicationModel.DataTransfer.StandardDataFormats.Bitmap))
-                    return (null, Localization.Loc.T("clip_no_image"));
-
-                var bitmapRef = await content.GetBitmapAsync();
-                using var inStream = await bitmapRef.OpenReadAsync();
-                var decoder = await BitmapDecoder.CreateAsync(inStream);
-                var pixels = await decoder.GetPixelDataAsync();
-
-                string dir = Path.Combine(Path.GetTempPath(), "CCPad", "staged-images");
-                Directory.CreateDirectory(dir);
-                var folder = await StorageFolder.GetFolderFromPathAsync(dir);
-                var file = await folder.CreateFileAsync(
-                    $"img-{DateTime.Now:yyyyMMdd-HHmmss-fff}.png",
-                    CreationCollisionOption.GenerateUniqueName);
-                using (var outStream = await file.OpenAsync(FileAccessMode.ReadWrite))
+                string phase = "clipboard";
+                string? partialPath = null;
+                try
                 {
-                    var encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.PngEncoderId, outStream);
-                    encoder.SetPixelData(
-                        decoder.BitmapPixelFormat,
-                        decoder.BitmapAlphaMode,
-                        decoder.PixelWidth, decoder.PixelHeight,
-                        decoder.DpiX, decoder.DpiY,
-                        pixels.DetachPixelData());
-                    await encoder.FlushAsync();
+                    // Keep the original view. A delayed read/retry must never
+                    // pick up the NEXT receipt copied while this one is uploading.
+                    content ??= Windows.ApplicationModel.DataTransfer.Clipboard.GetContent();
+                    if (!content.Contains(Windows.ApplicationModel.DataTransfer.StandardDataFormats.Bitmap))
+                        return (null, Localization.Loc.T("clip_no_image"));
+
+                    phase = "bitmap";
+                    var bitmapRef = await content.GetBitmapAsync();
+                    phase = "stream";
+                    using var snapshot = new Windows.Storage.Streams.InMemoryRandomAccessStream();
+                    using (var inStream = await bitmapRef.OpenReadAsync())
+                        await Windows.Storage.Streams.RandomAccessStream.CopyAsync(inStream, snapshot);
+                    snapshot.Seek(0);
+
+                    // Release the clipboard stream before decoding or uploading.
+                    // Normalize source formats (including indexed screenshots)
+                    // instead of asking the PNG encoder to accept arbitrary pixels.
+                    phase = "decode";
+                    var decoder = await BitmapDecoder.CreateAsync(snapshot);
+                    var pixels = await decoder.GetPixelDataAsync(
+                        BitmapPixelFormat.Bgra8, BitmapAlphaMode.Straight, new BitmapTransform(),
+                        ExifOrientationMode.IgnoreExifOrientation, ColorManagementMode.DoNotColorManage);
+
+                    phase = "save";
+                    string dir = Path.Combine(Path.GetTempPath(), "CCPad", "staged-images");
+                    Directory.CreateDirectory(dir);
+                    var folder = await StorageFolder.GetFolderFromPathAsync(dir);
+                    var file = await folder.CreateFileAsync(
+                        $"img-{DateTime.Now:yyyyMMdd-HHmmss-fff}-{Guid.NewGuid():N}.png",
+                        CreationCollisionOption.FailIfExists);
+                    partialPath = file.Path;
+                    using (var outStream = await file.OpenAsync(FileAccessMode.ReadWrite))
+                    {
+                        var encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.PngEncoderId, outStream);
+                        encoder.SetPixelData(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Straight,
+                            decoder.PixelWidth, decoder.PixelHeight, decoder.DpiX, decoder.DpiY,
+                            pixels.DetachPixelData());
+                        await encoder.FlushAsync();
+                    }
+                    return (file.Path, null);
                 }
-                return (file.Path, null);
+                catch (Exception ex)
+                {
+                    if (partialPath != null) { try { File.Delete(partialPath); } catch { } }
+                    // Retry only transient clipboard contention, never encoding,
+                    // file I/O, or SSH, and only while the clipboard is unchanged.
+                    bool retry = attempt < 3 && (phase is "clipboard" or "bitmap" or "stream") &&
+                        (ex.HResult is unchecked((int)0x800401D0) or unchecked((int)0x8001010A) or
+                            unchecked((int)0x80010001) or unchecked((int)0x8000000A)) &&
+                        sequence != 0 && GetClipboardSequenceNumber() == sequence;
+                    App.LogDiag($"image-paste phase={phase} outcome={(retry ? "retry" : "failed")} request={requestId} attempt={attempt} exception={ex.GetType().Name} code=0x{ex.HResult:X8}");
+                    if (!retry) return (null, Localization.Loc.T("clip_read_failed"));
+                    await Task.Delay(60 * attempt);
+                    if (GetClipboardSequenceNumber() != sequence)
+                        return (null, Localization.Loc.T("clip_read_failed"));
+                }
             }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine("Clipboard image capture failed: " + ex);
-                return (null, Localization.Loc.T("clip_read_failed"));
-            }
+            return (null, Localization.Loc.T("clip_read_failed"));
         }
 
         private const string RemoteImageDir = "/tmp/ccpad-images";
@@ -338,7 +502,7 @@ namespace CCPad
         /// temp path means nothing — push the captured PNG there and hand back the
         /// REMOTE path instead. Local CLIs and the fallback shell (a local cmd)
         /// keep the local path unchanged.</summary>
-        private async Task<(string? Path, string? Error)> RelocateForRemoteAsync(string localPath)
+        private async Task<(string? Path, string? Error)> RelocateForRemoteAsync(string localPath, string? requestId = null)
         {
             if (_inShell ||
                 !string.Equals(CliMode, Settings.CliMode.CodexRemote, StringComparison.OrdinalIgnoreCase))
@@ -351,7 +515,7 @@ namespace CCPad
                 (!string.IsNullOrEmpty(RemoteProfileId) &&
                  !string.Equals(device.Id, RemoteProfileId, StringComparison.Ordinal)))
                 return (null, Localization.Loc.T("clip_upload_fail", "SSH device not found"));
-            WebView.CoreWebView2?.PostWebMessageAsString("{\"type\":\"imgUploading\"}");
+            WebView.CoreWebView2?.PostWebMessageAsString(JsonSerializer.Serialize(new { type = "imgUploading", requestId }));
             string remotePath = RemoteImageDir + "/" + Path.GetFileName(localPath);
             var (ok, err) = await Settings.RemoteDeviceConnection.PushFileAsync(device, localPath, remotePath);
             if (!ok) return (null, Localization.Loc.T("clip_upload_fail", err));
@@ -381,7 +545,7 @@ namespace CCPad
                 // alt text). Ctrl+V retains conventional text-first behavior.
                 if (preferImage && hasImage)
                 {
-                    (path, error) = await CaptureClipboardImageAsync();
+                    (path, error) = await CaptureClipboardImageAsync(content);
                     if (path != null)
                         (path, error) = await RelocateForRemoteAsync(path!);
                 }
@@ -391,7 +555,7 @@ namespace CCPad
                 }
                 else if (hasImage)
                 {
-                    (path, error) = await CaptureClipboardImageAsync();
+                    (path, error) = await CaptureClipboardImageAsync(content);
                     if (path != null)
                         (path, error) = await RelocateForRemoteAsync(path!);
                 }
@@ -441,77 +605,208 @@ namespace CCPad
             _codexApprovalPromptUtc = DateTime.MinValue;
             _autoConfirmTimer?.Dispose();
             _autoConfirmTimer = null;
-            SendPaneStatus(_status);
+            SendPaneStatus();
         }
 
         /// <summary>Write a staged command first, then submit it only after the
         /// text write has returned and the adaptive settle delay has elapsed.
         /// Keeping the delay here (after WriteInput) avoids a browser timer
         /// racing a long WebView message that is still being written to ConPTY.</summary>
-        private void SendStagedInput(string data, int settleMs)
+        private void SendStagedInput(string data, int settleMs, long requestId, bool bracketedPaste)
         {
-            if (_disposed || _session == null || data.Length == 0) return;
+            if (_disposed || data.Length == 0) return;
+            // A fatal CLI/API banner leaves the process alive at its prompt, but
+            // it cannot accept the next queued task safely. Put the item back in
+            // the page queue and require a manual retry (or the configured
+            // capacity shortcut) before staging can continue.
+            if (_apiErrored)
+            {
+                NotifyStagedInputFailure(data, "terminal_error", requestId);
+                SendPaneStatus();
+                return;
+            }
 
-            CancelStagedSubmit();
             var session = _session;
+            if (session == null)
+            {
+                NotifyStagedInputFailure(data, "session_missing", requestId);
+                return;
+            }
+
+            // The page may have made its decision from an old waiting snapshot.
+            // Recheck here before any copy-mode key, paste, or Enter reaches PTY.
+            if (_status != PaneStatus.Waiting || _automationSendInFlight ||
+                _autoConfirmTimer != null || _autoReplyPending != null)
+            {
+                NotifyStagedInputFailure(data, "not_ready", requestId);
+                return;
+            }
+
             var cts = new CancellationTokenSource();
-            _stagedSubmitCts = cts;
+            // Never let a second staged message cancel the first one's delayed
+            // Enter. The page has its own lock, but the host must enforce the
+            // same invariant when stale WebView messages arrive out of order.
+            if (Interlocked.CompareExchange(ref _stagedSubmitCts, cts, null) != null)
+            {
+                cts.Dispose();
+                NotifyStagedInputFailure(data, "busy", requestId);
+                return;
+            }
             _lastUserInputUtc = DateTime.UtcNow;
             _lastRealInputUtc = DateTime.UtcNow;
             ResetAutoConfirmState();
-            session.WriteInput(data);
-            _ = FinishStagedInputAsync(session, cts, Math.Clamp(settleMs, 180, 3000));
+            // Publish the in-flight gate before writing any bytes. A stale
+            // waiting notification can arrive during the settle window; the
+            // staging page must not start another item and cancel this one's
+            // Enter.
+            SendPaneStatus();
+            bool remote = string.Equals(CliMode, Settings.CliMode.CodexRemote, StringComparison.OrdinalIgnoreCase);
+            bool nativeCodex = !_inShell && string.Equals(CliMode, Settings.CliMode.Codex, StringComparison.OrdinalIgnoreCase);
+            _ = FinishStagedInputAsync(session, cts,
+                StagedInputProtocol.SettleMilliseconds(settleMs, remote), data, requestId, bracketedPaste, remote, nativeCodex);
         }
 
         private async Task FinishStagedInputAsync(
-            ConPtySession session, CancellationTokenSource cts, int settleMs)
+            ConPtySession session, CancellationTokenSource cts, int settleMs, string data,
+            long requestId, bool bracketedPaste, bool remote, bool nativeCodex)
         {
+            string phase = "start";
             try
             {
-                await Task.Delay(settleMs, cts.Token).ConfigureAwait(false);
-                if (cts.IsCancellationRequested || _disposed || !ReferenceEquals(_session, session))
+                // Keep tmux's copy-mode exit inside the same send gate. Sending
+                // it as ordinary browser input used to cancel another item's Enter.
+                if (remote)
+                {
+                    phase = "copy_mode_exit";
+                    if (!session.TryWriteInput("\x1b[24~"))
+                    {
+                        NotifyStagedInputFailure(data, "copy_mode_exit", requestId);
+                        return;
+                    }
+                    await Task.Delay(80, cts.Token).ConfigureAwait(false);
+                }
+                cts.Token.ThrowIfCancellationRequested();
+                if (_disposed || !ReferenceEquals(_session, session))
+                {
+                    NotifyStagedInputFailure(data, "session_changed", requestId);
                     return;
+                }
+                if (_apiErrored)
+                {
+                    NotifyStagedInputFailure(data, "terminal_error", requestId);
+                    return;
+                }
+                phase = "text_write";
+                if (!session.TryWriteInput(StagedInputProtocol.Paste(data, bracketedPaste)))
+                {
+                    NotifyStagedInputFailure(data, "text_write", requestId);
+                    return;
+                }
+                phase = "settle";
+                App.LogDiag($"staged-input pane={PaneId} request={requestId} phase={phase} outcome=pasted nativeCodex={nativeCodex}");
+                await Task.Delay(settleMs, cts.Token).ConfigureAwait(false);
+                cts.Token.ThrowIfCancellationRequested();
+                if (_disposed || !ReferenceEquals(_session, session))
+                {
+                    NotifyStagedInputFailure(data, "session_changed", requestId);
+                    return;
+                }
+                if (_apiErrored)
+                {
+                    NotifyStagedInputFailure(data, "terminal_error", requestId);
+                    return;
+                }
 
-                session.WriteInput("\r");
                 _lastUserInputUtc = DateTime.UtcNow;
                 OnRealSubmitResetAutoReply();
-                if (_status == PaneStatus.Waiting || _apiErrored)
+                if (_status == PaneStatus.Waiting && !_apiErrored)
+                    SetStatus(PaneStatus.Working, explicitTransition: true);
+                phase = "enter_write";
+                if (!session.TryWriteInput(StagedInputProtocol.Submit(nativeCodex)))
                 {
-                    _apiErrored = false;
-                    SetStatus(PaneStatus.Working);
+                    NotifyStagedInputFailure(data, "enter_write", requestId);
+                    return;
                 }
+                // This acknowledges transport only. The page still waits for the
+                // turn boundary and (on remote Codex) an empty, idle composer.
+                string json = JsonSerializer.Serialize(new { type = "stagedInputSubmitted", requestId });
+                DispatcherQueue.TryEnqueue(() => WebView.CoreWebView2?.PostWebMessageAsString(json));
+                App.LogDiag($"staged-input pane={PaneId} request={requestId} phase={phase} outcome=written");
             }
-            catch (OperationCanceledException) { }
-            catch (ObjectDisposedException) { }
+            catch (OperationCanceledException)
+            {
+                App.LogDiag($"staged-input pane={PaneId} request={requestId} phase={phase} outcome=interrupted");
+                NotifyStagedInputFailure(data, "interrupted", requestId);
+            }
+            catch (ObjectDisposedException)
+            {
+                NotifyStagedInputFailure(data, "session_changed", requestId);
+            }
+            catch (Exception ex)
+            {
+                App.LogDiag($"staged-input pane={PaneId} request={requestId} phase={phase} outcome=failed exception={ex.GetType().Name} code=0x{ex.HResult:X8}");
+                NotifyStagedInputFailure(data, phase, requestId);
+            }
             finally
             {
-                if (ReferenceEquals(_stagedSubmitCts, cts))
-                    _stagedSubmitCts = null;
-                cts.Dispose();
+                ReleaseStagedSubmit(cts);
             }
         }
 
         private void CancelStagedSubmit()
         {
             var cts = Interlocked.Exchange(ref _stagedSubmitCts, null);
-            if (cts != null) cts.Cancel();
+            if (cts != null)
+            {
+                cts.Cancel();
+                SendPaneStatus();
+            }
+        }
+
+        private void ReleaseStagedSubmit(CancellationTokenSource cts)
+        {
+            if (ReferenceEquals(Interlocked.CompareExchange(ref _stagedSubmitCts, null, cts), cts))
+                SendPaneStatus();
+            cts.Dispose();
+        }
+
+        private void NotifyStagedInputFailure(string data, string phase, long requestId)
+        {
+            if (_disposed) return;
+            App.LogDiag($"staged-input pane={PaneId} request={requestId} phase={phase} outcome=failed");
+            string json = JsonSerializer.Serialize(new
+            {
+                type = "stagedInputFailed",
+                requestId,
+                data,
+                phase
+            });
+            DispatcherQueue.TryEnqueue(() => WebView.CoreWebView2?.PostWebMessageAsString(json));
         }
 
         /// <summary>Push the current pane status to the xterm front-end (for command staging).</summary>
-        private void SendPaneStatus(PaneStatus status)
+        private void SendPaneStatus()
         {
             if (_disposed) return;
-            string s = status switch
+            // Compute the snapshot on the dispatcher, just before posting it.
+            // Timer/output threads can otherwise enqueue stale waiting snapshots
+            // after a newer working/submitted notification.
+            DispatcherQueue.TryEnqueue(() =>
             {
-                PaneStatus.Working => "working",
-                PaneStatus.Waiting => "waiting",
-                _ => "disconnected"
-            };
-            bool automationPending = _automationSendInFlight ||
-                                     _autoConfirmTimer != null ||
-                                     _autoReplyPending != null;
-            string json = $"{{\"type\":\"paneStatus\",\"status\":\"{s}\",\"automationPending\":{(automationPending ? "true" : "false")}}}";
-            DispatcherQueue.TryEnqueue(() => WebView.CoreWebView2?.PostWebMessageAsString(json));
+                if (_disposed) return;
+                string s = _status switch
+                {
+                    PaneStatus.Working => "working",
+                    PaneStatus.Waiting => "waiting",
+                    _ => "disconnected"
+                };
+                bool automationPending = _automationSendInFlight ||
+                                         _autoConfirmTimer != null ||
+                                         _autoReplyPending != null ||
+                                         Interlocked.CompareExchange(ref _stagedSubmitCts, null, null) != null;
+                string json = $"{{\"type\":\"paneStatus\",\"status\":\"{s}\",\"automationPending\":{(automationPending ? "true" : "false")}}}";
+                WebView.CoreWebView2?.PostWebMessageAsString(json);
+            });
         }
 
         /// <summary>Tell the page whether this pane's CLI lives across ssh — there
@@ -528,6 +823,14 @@ namespace CCPad
         /// <summary>Map a hook callback (waiting/working) to a status change.</summary>
         private void OnCliNotify(string evt, string? cliSessionId)
         {
+            // Workers inherit the parent's notify command. Their completion must
+            // neither replace this pane's conversation nor release its staged input.
+            if (CliMode == Settings.CliMode.Codex &&
+                (string.IsNullOrEmpty(cliSessionId) || !string.Equals(cliSessionId,
+                    Settings.CliSessions.ResolveCodexResumeSessionId(cliSessionId, CodexHome),
+                    StringComparison.OrdinalIgnoreCase)))
+                return;
+
             // Receiving any callback proves this CLI is instrumented. From here on,
             // only its explicit lifecycle events may declare the turn idle.
             _completionHooksActive = true;
@@ -547,11 +850,12 @@ namespace CCPad
                     // A fatal API error keeps the red light; the turn-ending Stop
                     // hook (also "waiting") must not downgrade it to amber.
                     if (_apiErrored) return;
+                    _explicitWaitingSignal = true;
                     SetStatus(PaneStatus.Waiting);
                     break;
                 case "working":
                     _apiErrored = false;
-                    SetStatus(PaneStatus.Working);
+                    SetStatus(PaneStatus.Working, explicitTransition: true);
                     break;
             }
         }
@@ -569,6 +873,49 @@ namespace CCPad
         public string? RemoteProfileId { get; set; }
         public string? RemoteWorkingDir { get; set; }
 
+        private readonly object _codexLeaseGate = new();
+        private IDisposable? _codexSessionLease;
+        private string? _leasedCodexSession;
+
+        internal bool TryClaimCodexSession(string codexHome, string sessionId)
+        {
+            lock (_codexLeaseGate)
+            {
+                if (_disposed) return false;
+                if (string.Equals(_leasedCodexSession, sessionId, StringComparison.OrdinalIgnoreCase)) return true;
+                var lease = Settings.CodexSessionLease.TryAcquire(codexHome, sessionId);
+                if (lease == null) return false;
+                _codexSessionLease?.Dispose();
+                _codexSessionLease = lease;
+                _leasedCodexSession = sessionId;
+                return true;
+            }
+        }
+
+        public string CodexAccountId { get; private set; } = "default";
+        public string? CodexHome { get; private set; }
+        public bool CodexAccountAvailable { get; private set; } = true;
+
+        private void SetCodexLaunchProfile(string? codexHome, string? codexAccountId,
+            bool codexAccountAvailable)
+        {
+            // A local pane owns this identity for its entire lifetime. A later
+            // change to the global default must never mutate an existing PTY.
+            if (string.Equals(CliMode, Settings.CliMode.Codex, StringComparison.OrdinalIgnoreCase))
+            {
+                CodexHome = codexHome;
+                CodexAccountId = string.IsNullOrWhiteSpace(codexAccountId)
+                    ? "default" : codexAccountId.Trim();
+                CodexAccountAvailable = codexAccountAvailable;
+            }
+            else
+            {
+                CodexHome = null;
+                CodexAccountId = "default";
+                CodexAccountAvailable = true;
+            }
+        }
+
         /// <summary>CLI mode this pane was launched with ("claude" / "codex" /
         /// "codex-remote"). Null until LaunchSession/InitializeAsync.</summary>
         public string? CliMode { get; private set; }
@@ -576,7 +923,18 @@ namespace CCPad
         /// <summary>Conversation ID for this pane, when known. Claude: always set (we pass
         /// --session-id / --resume). Codex: set only when restored via resume; fresh Codex
         /// sessions are harvested from disk at snapshot time instead.</summary>
-        public string? SessionId { get; set; }
+        public string? SessionId
+        {
+            get => _sessionId;
+            set
+            {
+                if (string.Equals(_sessionId, value, StringComparison.OrdinalIgnoreCase)) return;
+                _sessionId = value;
+                if (CliMode == Settings.CliMode.Codex && CodexHome != null && value != null)
+                    TryClaimCodexSession(CodexHome, value);
+                SyncWebSessionMetadata(notify: true);
+            }
+        }
 
         /// <summary>When the CLI process was started — used to scope the Codex
         /// session-file scan to files this pane could have produced.</summary>
@@ -694,6 +1052,8 @@ namespace CCPad
                 stageStatusWaiting = Localization.Loc.T("stage_status_waiting"),
                 stageStatusWorking = Localization.Loc.T("stage_status_working"),
                 stageStatusDisconnected = Localization.Loc.T("stage_status_disc"),
+                stageSendFailed = Localization.Loc.T("stage_status_disc"),
+                stageRecoveryPaused = Localization.Loc.T("stage_recovery_paused"),
                 stageBulkToggle = Localization.Loc.T("stage_bulk_toggle"),
                 stageQueued = Localization.Loc.T("stage_queued"),
                 stageEmpty = Localization.Loc.T("stage_empty"),
@@ -702,6 +1062,8 @@ namespace CCPad
                 stageBulkImport = Localization.Loc.T("stage_bulk_import"),
                 cancel = Localization.Loc.T("cancel"),
                 stageHint = Localization.Loc.T("stage_hint"),
+                stageImagePending = Localization.Loc.T("stage_image_pending"),
+                stageImageTimeout = Localization.Loc.T("stage_image_timeout"),
                 editTip = Localization.Loc.T("js_edit_tip"),
                 dragTip = Localization.Loc.T("js_drag_tip"),
                 deleteTip = Localization.Loc.T("js_del_tip"),
@@ -839,7 +1201,9 @@ namespace CCPad
                 .Replace("按住拖动排序", T("js_drag_tip"))
                 .Replace("删除这条", T("js_del_tip"))
                 .Replace("没有图片", T("js_no_image"))
-                .Replace("正在上传图片…", T("js_img_uploading"));
+                .Replace("正在上传图片…", T("js_img_uploading"))
+                .Replace("图片处理中，完成后再按 Enter", T("stage_image_pending"))
+                .Replace("图片处理超时，请重新粘贴", T("stage_image_timeout"));
         }
 
         /// <summary>Await xterm's "ready" callback, bounded — an unbounded wait is
@@ -922,12 +1286,12 @@ namespace CCPad
                 _session.Resize(Math.Max(2, _cols - 1), _rows);
                 _session.Resize(_cols, _rows);
             }
-            SendPaneStatus(_status);
+            SendPaneStatus();
             // Mirror the exit-banner arming: a remote pane's ↑ resume-picker offer
             // must survive a renderer reload just like the local resume command.
             SendShellMode(_inShell && (_resumeCommand != null || _remoteResumeOffer));
             SendRemotePasteMode();
-            if (StagingOn) SetStaging(true);
+            // The ready handler restores the queue and panel together.
         }
 
         private void ShowErrorOverlay(string message)
@@ -962,11 +1326,14 @@ namespace CCPad
         /// Phase 2: Start the ConPty session. If prewarm isn't done yet, it will
         /// start automatically once xterm reports ready.
         /// </summary>
-        public void LaunchSession(string command, string? workingDir = null, bool focusOnReady = false, string? cliMode = null)
+        public void LaunchSession(string command, string? workingDir = null, bool focusOnReady = false,
+            string? cliMode = null, string? codexHome = null, string? codexAccountId = null,
+            bool codexAccountAvailable = true)
         {
             _command = command;
             _workingDir = workingDir;
             CliMode = cliMode;
+            SetCodexLaunchProfile(codexHome, codexAccountId, codexAccountAvailable);
             _remoteBrowserOpenScan = "";
             _lastRemoteBrowserUrl = null;
             _lastRemoteBrowserLaunchUtc = DateTime.MinValue;
@@ -982,11 +1349,14 @@ namespace CCPad
         /// in-pane error overlay with a retry button instead of propagating up into
         /// async-void event handlers (or, before this, a silent white pane).
         /// </summary>
-        public async Task InitializeAsync(string command, string? workingDir = null, bool focusOnReady = false, string? cliMode = null)
+        public async Task InitializeAsync(string command, string? workingDir = null, bool focusOnReady = false,
+            string? cliMode = null, string? codexHome = null, string? codexAccountId = null,
+            bool codexAccountAvailable = true)
         {
             _command = command;
             _workingDir = workingDir;
             CliMode = cliMode;
+            SetCodexLaunchProfile(codexHome, codexAccountId, codexAccountAvailable);
             _remoteBrowserOpenScan = "";
             _lastRemoteBrowserUrl = null;
             _lastRemoteBrowserLaunchUtc = DateTime.MinValue;
@@ -1026,6 +1396,7 @@ namespace CCPad
         private void StartSession()
         {
             _sessionPending = false;
+            CancelStagedSubmit();
             OnRealSubmitResetAutoReply();
             _replyScanCarry = "";
             _autoConfirmTail = "";
@@ -1033,9 +1404,14 @@ namespace CCPad
             _autoConfirmTimer?.Dispose();
             _autoConfirmTimer = null;
             _automationSendInFlight = false;
-            SendPaneStatus(_status);
+            SendPaneStatus();
             _session?.Dispose();
             _session = null;
+            lock (_codexActivityGate)
+            {
+                Interlocked.Increment(ref _codexSubmissionEpoch);
+                Interlocked.Exchange(ref _lastCodexSubmissionTicks, 0);
+            }
             _awaitingRestart = false;
             _inShell = false;
             _apiErrored = false;
@@ -1052,8 +1428,17 @@ namespace CCPad
             try
             {
                 _cliStartedUtc = DateTime.UtcNow;
-                _session = ConPtySession.Start(_command, _cols, _rows, _workingDir);
+                IReadOnlyDictionary<string, string>? environment =
+                    string.Equals(CliMode, Settings.CliMode.Codex, StringComparison.OrdinalIgnoreCase) &&
+                    !string.IsNullOrWhiteSpace(CodexHome)
+                        ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                        {
+                            ["CODEX_HOME"] = CodexHome!
+                        }
+                        : null;
+                _session = ConPtySession.Start(_command, _cols, _rows, _workingDir, environment);
                 _session.OutputReceived += OnOutput;
+                _session.InputSending += OnSessionInputSending;
                 _session.ProcessExited += OnProcessExited;
 
                 TerminalSessionRegistry.Register(PaneId, new SessionEntry
@@ -1062,6 +1447,14 @@ namespace CCPad
                     Label = Label,
                     Command = _command,
                     WorkingDir = _workingDir,
+                    CliMode = CliMode,
+                    CliSessionId = SessionId,
+                    CodexAccountId = CodexAccountId,
+                    RemoteProfileId = RemoteProfileId,
+                    RemoteWorkingDir = RemoteWorkingDir,
+                    Status = BridgeStatus(_status),
+                    LaunchedAtUtc = LaunchedAtUtc,
+                    LastActivityUtc = LastActivityUtc,
                     Session = _session
                 });
                 TerminalSessionRegistry.NotifyChanged();
@@ -1072,6 +1465,7 @@ namespace CCPad
                 CliNotify.Register(PaneId, OnCliNotify);
                 Notify.ToastService.RegisterPane(PaneId, this);
                 SetStatus(PaneStatus.Waiting);
+                if (_ready && _stagingRestorePending) SendStagingState();
             }
             catch (Exception ex)
             {
@@ -1085,6 +1479,7 @@ namespace CCPad
         private void OnOutput(byte[] data)
         {
             _lastAnyOutputUtc = DateTime.UtcNow;
+            UpdateWebSessionActivity();
             if (_status == PaneStatus.Working)
                 _workingOutputSeen = true;
             SendOutput(data);
@@ -1134,10 +1529,8 @@ namespace CCPad
             foreach (Match match in RemoteBrowserOpenPattern.Matches(_remoteBrowserOpenScan))
             {
                 consumedThrough = Math.Max(consumedThrough, match.Index + match.Length);
-                string raw = match.Groups[1].Value.TrimEnd('.', ',', ';', ':', ')', ']', '。', '，');
-                if (!Uri.TryCreate(raw, UriKind.Absolute, out var uri) ||
-                    (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
-                    continue;
+                string raw = TrimRemoteBrowserUrl(match.Groups[1].Value);
+                if (!TryParseBrowserUri(raw, out var uri)) continue;
 
                 var now = DateTime.UtcNow;
                 if (string.Equals(raw, _lastRemoteBrowserUrl, StringComparison.Ordinal) &&
@@ -1156,55 +1549,237 @@ namespace CCPad
                 _remoteBrowserOpenScan = _remoteBrowserOpenScan[consumedThrough..];
         }
 
+        private static string TrimRemoteBrowserUrl(string raw)
+            => raw.Trim().TrimEnd(RemoteBrowserUrlTerminators);
+
+        private static bool TryParseBrowserUri(string raw, out Uri uri)
+        {
+            if (Uri.TryCreate(raw, UriKind.Absolute, out uri!) &&
+                (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps) &&
+                string.IsNullOrEmpty(uri.UserInfo))
+                return true;
+            uri = null!;
+            return false;
+        }
+
         private async Task OpenLocalBrowserAsync(Uri uri)
         {
-            bool opened = false;
-            try
+            Uri launchUri = uri;
+            var device = GetBoundRemoteBrowserDevice(uri);
+            if (device != null && !await WaitForBrowserEndpointAsync(uri).ConfigureAwait(true))
             {
-                opened = await Windows.System.Launcher.LaunchUriAsync(uri);
+                Uri? tunnelUri = await GetRemoteBrowserTunnelUriAsync(device, uri)
+                    .ConfigureAwait(true);
+                if (tunnelUri != null)
+                {
+                    launchUri = tunnelUri;
+                    App.LogDiag($"remote-browser phase=tunnel outcome=ready pane={PaneId} port={uri.Port}");
+                }
+                else
+                {
+                    App.LogDiag($"remote-browser phase=tunnel outcome=unavailable pane={PaneId} port={uri.Port}");
+                }
             }
-            catch { }
 
-            // Packaged WebView hosts can occasionally return false even though
-            // the normal Windows shell handler is available.  Try the shell as
-            // a second path, then leave a visible, actionable notice in the pane.
+            bool opened = await LaunchBrowserWithRetryAsync(launchUri).ConfigureAwait(true);
+            // The shell can accept a URL while the remote service is still
+            // starting.  If the direct launch path did not accept it, make one
+            // tunnel attempt before showing the retry notice.
+            if (!opened && device != null && ReferenceEquals(launchUri, uri))
+            {
+                Uri? tunnelUri = await GetRemoteBrowserTunnelUriAsync(device, uri)
+                    .ConfigureAwait(true);
+                if (tunnelUri != null)
+                    opened = await LaunchBrowserWithRetryAsync(tunnelUri).ConfigureAwait(true);
+            }
+
             if (!opened)
             {
+                // A failed launch must not consume the 30-second de-duplication
+                // window; the next blue-link click should really retry.
+                _lastRemoteBrowserUrl = null;
+                _lastRemoteBrowserLaunchUtc = DateTime.MinValue;
+                ShowNotice(Localization.Loc.T("remote_browser_local_open_failed"));
+            }
+        }
+
+        private async Task<bool> LaunchBrowserWithRetryAsync(Uri uri)
+        {
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                if (_disposed) return false;
                 try
                 {
-                    Process.Start(new ProcessStartInfo
+                    if (await Windows.System.Launcher.LaunchUriAsync(uri))
+                        return true;
+                }
+                catch { }
+
+                try
+                {
+                    using var process = Process.Start(new ProcessStartInfo
                     {
                         FileName = uri.AbsoluteUri,
                         UseShellExecute = true,
                     });
-                    opened = true;
+                    if (process != null) return true;
                 }
                 catch { }
-            }
 
-            if (!opened)
-                ShowNotice(Localization.Loc.T("remote_browser_local_open_failed"));
+                if (attempt < 2)
+                    await Task.Delay(250 * (attempt + 1)).ConfigureAwait(true);
+            }
+            return false;
         }
 
-        // Detect the CLI's own fatal API-error banner (it stays alive at the prompt
-        // afterwards, so nothing else flips the light). Matches the exact banner
-        // forms Claude/Codex print, e.g. "API Error: 529 Overloaded", "API Error:
-        // 402 ...", "API Error (request id ...): ...", covering 402/403/429/5xx.
-        // A rolling buffer handles the marker being split across read chunks; it's
-        // cleared on match so the same banner can't re-trigger after recovery.
+        private Settings.RemoteDeviceEntry? GetBoundRemoteBrowserDevice(Uri uri)
+        {
+            if (!string.Equals(CliMode, Settings.CliMode.CodexRemote,
+                    StringComparison.OrdinalIgnoreCase))
+                return null;
+            var device = Settings.RemoteDeviceConfig.Find(RemoteProfileId);
+            if (device == null ||
+                (!string.IsNullOrEmpty(RemoteProfileId) &&
+                 !string.Equals(device.Id, RemoteProfileId, StringComparison.Ordinal)))
+                return null;
+            return string.Equals(NormalizeRemoteHost(uri.Host), NormalizeRemoteHost(device.Host),
+                    StringComparison.OrdinalIgnoreCase)
+                ? device : null;
+        }
+
+        private static string NormalizeRemoteHost(string value)
+            => value.Trim().Trim('[', ']');
+
+        private static async Task<bool> WaitForBrowserEndpointAsync(Uri uri)
+        {
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                using var client = new TcpClient();
+                using var timeout = new CancellationTokenSource(700);
+                try
+                {
+                    await client.ConnectAsync(uri.Host, uri.Port, timeout.Token)
+                        .ConfigureAwait(false);
+                    return true;
+                }
+                catch (OperationCanceledException) { }
+                catch (SocketException) { }
+                catch (ArgumentException) { return false; }
+                if (attempt < 2) await Task.Delay(180).ConfigureAwait(false);
+            }
+            return false;
+        }
+
+        private async Task<Uri?> GetRemoteBrowserTunnelUriAsync(
+            Settings.RemoteDeviceEntry device, Uri uri)
+        {
+            _remoteBrowserTunnel ??= new Settings.RemoteBrowserTunnel(device);
+            try
+            {
+                return await _remoteBrowserTunnel.GetLocalUriAsync(uri).ConfigureAwait(true);
+            }
+            catch (Exception ex)
+            {
+                App.LogDiag($"remote-browser phase=tunnel outcome=failed pane={PaneId} exception={ex.GetType().Name} code=0x{ex.HResult:X8}");
+                return null;
+            }
+        }
+
+        // Detect the CLI's own fatal error banners (the process stays alive at the
+        // prompt afterwards, so nothing else flips the light). Matches the exact
+        // API forms Claude/Codex print, e.g. "API Error: 529 Overloaded", and
+        // Codex's capacity message. A rolling buffer handles a marker split across
+        // read chunks; it is cleared on match so the same banner cannot re-trigger
+        // after recovery.
         private void CheckApiError(string text)
         {
             if ((_inShell && !_shellCliActive) || _apiErrored) return;
-            _recentErrScan += text;
+            _recentErrScan += StripAnsiText(text);
             if (_recentErrScan.Length > 1024)
                 _recentErrScan = _recentErrScan[^1024..];
             string lower = _recentErrScan.ToLowerInvariant();
-            if (lower.Contains("api error:") || lower.Contains("api error ("))
+            bool capacityText = lower.Contains(CodexCapacityBanner.ToLowerInvariant(),
+                StringComparison.Ordinal) || CodexCapacityBannerPattern.IsMatch(_recentErrScan);
+            bool apiText = lower.Contains("api error:", StringComparison.Ordinal) ||
+                       lower.Contains("api error (", StringComparison.Ordinal);
+
+            // Local Codex renders the whole conversation in its TUI. A previous
+            // turn (including a child-agent failure) can therefore repaint the
+            // same capacity/API words while a newer turn is still working. For
+            // tracked sessions, only the latest JSONL completion error belongs to
+            // this pane's current turn; terminal prose is not an error signal.
+            bool trackedCodex = HasTrackedLocalCodexSession();
+            bool capacity = capacityText;
+            bool api = apiText;
+            if (trackedCodex)
+            {
+                string? currentError = TryReadCurrentCodexError();
+                capacity = capacityText && currentError != null &&
+                    currentError.Contains(CodexCapacityTrigger, StringComparison.OrdinalIgnoreCase);
+                api = apiText && currentError != null &&
+                    (currentError.Contains("api error:", StringComparison.OrdinalIgnoreCase) ||
+                     currentError.Contains("api error (", StringComparison.OrdinalIgnoreCase));
+                if ((capacityText || apiText) && !capacity && !api)
+                    _recentErrScan = "";
+            }
+            if (api || capacity)
             {
                 _recentErrScan = "";
                 _apiErrored = true;
-                SetStatus(PaneStatus.Disconnected);
+                // An enabled capacity auto-reply owns the retry transition and
+                // publishes its own pending gate. Keep its historical amber path;
+                // without that rule the queue must immediately show red/paused.
+                if (!capacity || !HasActiveCodexCapacityAutoReply())
+                    SetStatus(PaneStatus.Disconnected);
             }
+        }
+
+        private bool HasTrackedLocalCodexSession()
+            => !_inShell && _session != null &&
+               string.Equals(CliMode, Settings.CliMode.Codex, StringComparison.OrdinalIgnoreCase) &&
+               !string.IsNullOrWhiteSpace(CodexHome) && Guid.TryParse(SessionId, out _);
+
+        private string? TryReadCurrentCodexError()
+        {
+            if (!HasTrackedLocalCodexSession()) return null;
+            long submissionTicks = Interlocked.Read(ref _lastCodexSubmissionTicks);
+            if (submissionTicks <= 0) return null;
+            if (Interlocked.Exchange(ref _codexActivityReadInFlight, 1) != 0) return null;
+            try
+            {
+                var sessionId = SessionId!;
+                var home = CodexHome!;
+                CodexTurnObservation? observation;
+                lock (_codexActivityReaderGate)
+                {
+                    if (_codexActivityReader == null ||
+                        !string.Equals(_codexActivityHome, home, StringComparison.OrdinalIgnoreCase) ||
+                        !string.Equals(_codexActivitySession, sessionId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _codexActivityReader = new CodexTurnActivityReader(home, sessionId);
+                        _codexActivityHome = home;
+                        _codexActivitySession = sessionId;
+                    }
+                    observation = _codexActivityReader.Read();
+                }
+                var lastSubmission = new DateTime(submissionTicks, DateTimeKind.Utc);
+                if (observation == null || observation.Activity != CodexTurnActivity.Waiting ||
+                    string.IsNullOrWhiteSpace(observation.Error) ||
+                    !observation.CanApplyAfter(lastSubmission)) return null;
+                return observation.Error;
+            }
+            catch { return null; }
+            finally { Interlocked.Exchange(ref _codexActivityReadInFlight, 0); }
+        }
+
+        private static bool HasActiveCodexCapacityAutoReply()
+        {
+            if (!Settings.AutoReplyManager.IsOn) return false;
+            foreach (var rule in Settings.AutoReplyManager.ActiveRules)
+            {
+                if (IsCodexCapacityRule(rule)) return true;
+            }
+            return false;
         }
 
         // While at the fallback shell with no CLI detected yet, watch the output
@@ -1341,6 +1916,10 @@ namespace CCPad
         private void MaybeCorrectStaleWaiting(byte[] data)
         {
             if (_status != PaneStatus.Waiting) return;
+            // Stop/agent-turn-complete is the authoritative boundary.  Final TUI
+            // redraws often arrive after the callback and must not be mistaken for
+            // a new turn.  The flag is cleared by the next real submit.
+            if (_explicitWaitingSignal) return;
             if (_lastUserInputUtc == DateTime.MinValue) return;
             if (data.Length < 24) return;
             var now = DateTime.UtcNow;
@@ -1359,24 +1938,29 @@ namespace CCPad
                 SetStatus(PaneStatus.Working);
         }
 
-        // The mirror correction: showing Working (green) but the CLI has gone
-        // SILENT for a sustained window → the turn actually ended and the Stop
-        // signal was lost, so recover the amber light (which also lets the
-        // staging queue flush). See the _workingWatchTimer field comment for the
-        // full rationale and guards. Runs on a 1s timer, off the UI thread.
+        // The mirror correction: showing Working (green) but a hookless CLI has
+        // gone SILENT for a sustained window → the turn probably ended and its
+        // completion signal was lost, so recover the amber light (which also lets
+        // the staging queue flush). This fallback is intentionally disabled as
+        // soon as a real completion callback is configured: Codex can be silent
+        // for much longer than this while a tool or network request is running.
+        // See the _workingWatchTimer field comment for the full rationale and
+        // guards. Runs on a 1s timer, off the UI thread.
         private const double WorkingSilenceFlipMs = 6000;
         private const double WorkingNoPaintFlipMs = 15000;
         private void CheckStaleWorking(object? _)
         {
             if (_disposed || _status != PaneStatus.Working) return;
-            // Hook authority holds for Claude only: its Stop hook fires at EVERY
-            // turn end, so silence proves nothing there. Codex's notify emits
-            // ONLY agent-turn-complete — an errored turn (capacity banner,
-            // stream abort) ends with no event at all, so for codex panes the
-            // silence heuristic must stay armed even with hooks seen.
-            if (_completionHooksActive &&
-                !string.Equals(CliMode, Settings.CliMode.Codex, StringComparison.OrdinalIgnoreCase) &&
-                !string.Equals(CliMode, Settings.CliMode.CodexRemote, StringComparison.OrdinalIgnoreCase))
+            // A restored transcript can repaint for seconds without starting work,
+            // and notify helpers can be lost. Consult this exact local conversation's
+            // lifecycle before falling back to hooks or hookless timing heuristics.
+            if (TryCorrectCodexWorking()) return;
+            // An installed completion callback is the staging barrier. In
+            // particular, do not infer Codex completion from six seconds of
+            // silence: tool execution and network waits routinely exceed that.
+            // API/capacity failures have their own explicit error/automation paths
+            // and must not be treated as a normal turn boundary here.
+            if (_completionHooksActive)
                 return;
             var now = DateTime.UtcNow;
             if (_lastUserInputUtc != DateTime.MinValue &&
@@ -1386,6 +1970,75 @@ namespace CCPad
                 : (now - _workingSinceUtc).TotalMilliseconds;
             if (silentMs >= (_workingOutputSeen ? WorkingSilenceFlipMs : WorkingNoPaintFlipMs))
                 SetStatus(PaneStatus.Waiting);
+        }
+
+        private void OnSessionInputSending(string text)
+        {
+            if (!string.Equals(CliMode, Settings.CliMode.Codex, StringComparison.OrdinalIgnoreCase)) return;
+            if (!text.Contains('\r') && !IsCodexCapacityRetryInput(text)) return;
+            lock (_codexActivityGate)
+            {
+                MarkCodexSubmission();
+                // Web input bypasses OnWebMessage. Claim its turn here too, before
+                // the bytes reach the CLI and before staging can see stale amber.
+                if (!_inShell && !_apiErrored && !_disposed)
+                    SetStatus(PaneStatus.Working, explicitTransition: true);
+            }
+        }
+
+        private void MarkCodexSubmission()
+        {
+            lock (_codexActivityGate)
+            {
+                Interlocked.Exchange(ref _lastCodexSubmissionTicks, DateTime.UtcNow.Ticks);
+                Interlocked.Increment(ref _codexSubmissionEpoch);
+            }
+        }
+
+        private bool TryCorrectCodexWorking()
+        {
+            if (!string.Equals(CliMode, Settings.CliMode.Codex, StringComparison.OrdinalIgnoreCase) ||
+                _session == null || _inShell || _apiErrored || !Guid.TryParse(SessionId, out _) ||
+                string.IsNullOrWhiteSpace(CodexHome)) return false;
+            if (Interlocked.Exchange(ref _codexActivityReadInFlight, 1) != 0) return true;
+            try
+            {
+                var sessionId = SessionId!;
+                var home = CodexHome!;
+                var epoch = Interlocked.Read(ref _codexSubmissionEpoch);
+                if (_codexActivityReader == null ||
+                    !string.Equals(_codexActivityHome, home, StringComparison.OrdinalIgnoreCase) ||
+                    !string.Equals(_codexActivitySession, sessionId, StringComparison.OrdinalIgnoreCase))
+                {
+                    _codexActivityReader = new CodexTurnActivityReader(home, sessionId);
+                    _codexActivityHome = home;
+                    _codexActivitySession = sessionId;
+                }
+                var observation = _codexActivityReader.Read();
+                if (observation == null) return true; // unknown must not become idle through silence
+                // A started turn remains working even during long silent tool calls.
+                // An old completion cannot clear a new input, including web/staged input.
+                if (observation.Activity != CodexTurnActivity.Waiting ||
+                    !observation.CanApplyAfter(new DateTime(Interlocked.Read(ref _lastCodexSubmissionTicks), DateTimeKind.Utc)))
+                    return true;
+
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    lock (_codexActivityGate)
+                    {
+                        if (_disposed || _status != PaneStatus.Working || _apiErrored || _inShell ||
+                            epoch != Interlocked.Read(ref _codexSubmissionEpoch) ||
+                            !string.Equals(SessionId, sessionId, StringComparison.OrdinalIgnoreCase) ||
+                            !string.Equals(CodexHome, home, StringComparison.OrdinalIgnoreCase)) return;
+                        _explicitWaitingSignal = true;
+                        SetStatus(PaneStatus.Waiting);
+                        App.LogDiag("pane-status corrected source=codex-lifecycle outcome=waiting");
+                    }
+                });
+                return true;
+            }
+            catch { return true; }
+            finally { Interlocked.Exchange(ref _codexActivityReadInFlight, 0); }
         }
 
         // Strip ANSI escape sequences, keep plain text.
@@ -1421,33 +2074,48 @@ namespace CCPad
         private void ObserveAutoConfirmOutput(string plain)
         {
             if (string.IsNullOrEmpty(plain)) return;
-            string scan = _autoConfirmTail + plain.ToLowerInvariant();
+            // Search the new chunk directly, plus only enough carry to catch a
+            // heading split across reads. The temporary strings stay bounded
+            // even if a remote tmux repaint is very large.
+            int overlap = Math.Min(_autoConfirmTail.Length, CodexCommandApprovalPrompt.Length - 1);
+            int prefix = Math.Min(plain.Length, CodexCommandApprovalPrompt.Length - 1);
+            bool headingSeen = plain.Contains(CodexCommandApprovalPrompt, StringComparison.OrdinalIgnoreCase) ||
+                (_autoConfirmTail[^overlap..] + plain[..prefix]).Contains(
+                    CodexCommandApprovalPrompt, StringComparison.OrdinalIgnoreCase);
+            if (headingSeen)
+                _codexApprovalPromptUtc = DateTime.UtcNow;
+
+            int suffix = Math.Min(plain.Length, AutoConfirmTailChars);
+            string scan = _autoConfirmTail + plain[^suffix..].ToLowerInvariant();
             if (scan.Length > AutoConfirmTailChars)
                 scan = scan[^AutoConfirmTailChars..];
             _autoConfirmTail = scan;
-
-            if (scan.Contains(CodexCommandApprovalPrompt.ToLowerInvariant(), StringComparison.Ordinal))
-                _codexApprovalPromptUtc = DateTime.UtcNow;
         }
 
         private bool TryScheduleAutoConfirmFromTail(bool allowRetainedPrompt)
         {
-            // Never press Enter in a fallback shell or a remote Codex pane. The
-            // toolbar switch is intentionally scoped to local interactive CLIs.
-            if (!_autoConfirm || (_inShell && !_shellCliActive) ||
-                string.Equals(CliMode, Settings.CliMode.CodexRemote, StringComparison.OrdinalIgnoreCase))
+            // Never press Enter in a fallback shell. Remote Codex approval
+            // prompts use the same explicit command/Yes option as local Codex.
+            if (!_autoConfirm || (_inShell && !_shellCliActive))
                 return false;
-            if (_autoConfirmTimer != null || _autoReplyPending != null || _automationSendInFlight)
+            if (_autoConfirmTimer != null || _autoReplyPending != null || _automationSendInFlight ||
+                Interlocked.CompareExchange(ref _stagedSubmitCts, null, null) != null)
                 return false;
 
             string scan = _autoConfirmTail;
+            bool remoteCodex = string.Equals(CliMode, Settings.CliMode.CodexRemote,
+                StringComparison.OrdinalIgnoreCase);
             bool hasCodexPrompt = scan.Contains(CodexCommandApprovalPrompt.ToLowerInvariant(), StringComparison.Ordinal);
-            bool matched = hasCodexPrompt &&
-                           (allowRetainedPrompt ||
-                            (_codexApprovalPromptUtc != DateTime.MinValue &&
-                             (DateTime.UtcNow - _codexApprovalPromptUtc).TotalSeconds <= CodexApprovalWindowSeconds)) &&
-                           scan.Contains(CodexProceedOption.ToLowerInvariant(), StringComparison.Ordinal);
-            if (!matched && !allowRetainedPrompt)
+            // The command/reason can push the heading out of the 512-character
+            // tail before the Yes option arrives. Remember a recently seen
+            // heading so long approval dialogs still match.
+            bool recentCodexPrompt = _codexApprovalPromptUtc != DateTime.MinValue &&
+                (allowRetainedPrompt ||
+                 (DateTime.UtcNow - _codexApprovalPromptUtc).TotalSeconds <= CodexApprovalWindowSeconds);
+            bool matched = (hasCodexPrompt || recentCodexPrompt) &&
+                           scan.Contains(CodexProceedOption.ToLowerInvariant(), StringComparison.Ordinal) &&
+                           (!remoteCodex || scan.Contains(CodexApprovalFooter.ToLowerInvariant(), StringComparison.Ordinal));
+            if (!matched && !allowRetainedPrompt && !remoteCodex)
             {
                 foreach (var hint in ConfirmHints)
                 {
@@ -1470,7 +2138,7 @@ namespace CCPad
             if (_status == PaneStatus.Working)
                 SetStatus(PaneStatus.Waiting);
             else
-                SendPaneStatus(_status);
+                SendPaneStatus();
             return true;
         }
 
@@ -1484,14 +2152,15 @@ namespace CCPad
             _automationSendInFlight = true;
             try
             {
-                if (_autoConfirm && _session != null && !_disposed)
+                if (_autoConfirm && _session != null && !_disposed &&
+                    Interlocked.CompareExchange(ref _stagedSubmitCts, null, null) == null)
                 {
                     // Flip green before writing so command staging cannot enter
                     // during the confirmation's short settle window.
                     if (_status == PaneStatus.Waiting)
-                        SetStatus(PaneStatus.Working);
+                        SetStatus(PaneStatus.Working, explicitTransition: true);
                     else
-                        SendPaneStatus(_status);
+                        SendPaneStatus();
                     _session.WriteInput("\r");
                     _lastUserInputUtc = DateTime.UtcNow;
                 }
@@ -1501,7 +2170,7 @@ namespace CCPad
             {
                 _autoConfirmTimer = null;
                 _automationSendInFlight = false;
-                SendPaneStatus(_status);
+                SendPaneStatus();
             }
         }
 
@@ -1538,10 +2207,21 @@ namespace CCPad
                 if (!MatchesAutoReplyRule(rule, scan))
                     continue;
 
+                // A local Codex TUI can repaint an old capacity message while a
+                // later turn is active. Only let the built-in capacity rule act
+                // when the exact current conversation reports that error.
+                if (IsCodexCapacityRule(rule) && HasTrackedLocalCodexSession() &&
+                    !(TryReadCurrentCodexError()?.Contains(
+                        CodexCapacityTrigger, StringComparison.OrdinalIgnoreCase) ?? false))
+                {
+                    _replyScanCarry = "";
+                    continue;
+                }
+
                 // A user can type the same sentence into the composer. The
                 // built-in capacity banner is only actionable while the pane
                 // is processing a turn; an idle prompt is ordinary user text.
-                if (IsCodexCapacityRule(rule) && _status != PaneStatus.Working)
+                if (IsCodexCapacityRule(rule) && _status != PaneStatus.Working && !_apiErrored)
                 {
                     _replyScanCarry = "";
                     continue;
@@ -1600,7 +2280,7 @@ namespace CCPad
             _autoReplyTimer = new Timer(_ => FireAutoReplyNow(rule), null, delayMs, Timeout.Infinite);
             // Keep command staging behind the reply timer. The timer and the
             // actual PTY write are both represented by paneStatus's pending flag.
-            SendPaneStatus(_status);
+            SendPaneStatus();
         }
 
         /// <summary>Cancel a scheduled auto-send and reset the consecutive-retry
@@ -1618,7 +2298,7 @@ namespace CCPad
                 _autoReplyTimer = null;
             }
             if (hadPending)
-                SendPaneStatus(_status);
+                SendPaneStatus();
         }
 
         // Send the reply the same way the staging queue does: text first, Enter
@@ -1632,7 +2312,7 @@ namespace CCPad
             {
                 _autoReplyPending = null;
                 _autoReplyTimer = null;
-                SendPaneStatus(_status);
+                SendPaneStatus();
                 return;
             }
 
@@ -1649,7 +2329,15 @@ namespace CCPad
                     _autoReplyCapNoticeShown = true;
                     ShowNotice(Localization.Loc.T("reply_cap_hit", rule.MaxRetries));
                 }
-                SendPaneStatus(_status);
+                if (IsCodexCapacityRule(rule))
+                {
+                    // Do not let a maxed-out capacity retry leave the staging
+                    // queue in an apparently idle state. The next item must wait
+                    // for a deliberate manual retry/model change.
+                    _apiErrored = true;
+                    SetStatus(PaneStatus.Disconnected);
+                }
+                SendPaneStatus();
                 return;
             }
 
@@ -1657,8 +2345,9 @@ namespace CCPad
             // with whatever is half-typed there (a lone "/" turns the reply into
             // a bogus slash command). Keep deferring while the user is active;
             // their own submit cancels the pending send altogether.
-            if (_lastRealInputUtc != DateTime.MinValue &&
-                (DateTime.UtcNow - _lastRealInputUtc).TotalSeconds < AutoReplyTypingGuardSeconds)
+            if (Interlocked.CompareExchange(ref _stagedSubmitCts, null, null) != null ||
+                (_lastRealInputUtc != DateTime.MinValue &&
+                 (DateTime.UtcNow - _lastRealInputUtc).TotalSeconds < AutoReplyTypingGuardSeconds))
             {
                 _autoReplyTimer?.Dispose();
                 _autoReplyTimer = new Timer(_ => FireAutoReplyNow(rule), null,
@@ -1672,9 +2361,9 @@ namespace CCPad
                 // Claim the pane before any text, F12, or settle delay is sent.
                 // This closes the old 400ms/450ms race with command staging.
                 if (_status == PaneStatus.Waiting)
-                    SetStatus(PaneStatus.Working);
+                    SetStatus(PaneStatus.Working, explicitTransition: true);
                 else
-                    SendPaneStatus(_status);
+                    SendPaneStatus();
                 if (string.Equals(CliMode, Settings.CliMode.CodexRemote, StringComparison.OrdinalIgnoreCase))
                 {
                     session.WriteInput("\x1b[24~");
@@ -1702,7 +2391,7 @@ namespace CCPad
                 _lastUserInputUtc = DateTime.UtcNow;
                 _apiErrored = false;
                 if (_status == PaneStatus.Waiting)
-                    SetStatus(PaneStatus.Working);
+                    SetStatus(PaneStatus.Working, explicitTransition: true);
             }
             catch { }
             finally
@@ -1710,7 +2399,7 @@ namespace CCPad
                 _autoReplyPending = null;
                 _autoReplyTimer = null;
                 _automationSendInFlight = false;
-                SendPaneStatus(_status);
+                SendPaneStatus();
             }
         }
 
@@ -1720,6 +2409,22 @@ namespace CCPad
             // Enter, just like every other auto-reply rule.
             => IsCodexCapacityRule(rule) &&
                string.Equals(rule.Reply?.Trim(), "r", StringComparison.Ordinal);
+
+        private bool IsCodexCapacityRetryInput(string data)
+        {
+            // The capacity screen consumes a bare `r` immediately; it does not
+            // send an Enter event through the terminal input channel. Treat that
+            // deliberate shortcut like a manual submit so the red error lock and
+            // any pending automatic retry are cleared together.
+            if (!_apiErrored || data.Length != 1 ||
+                (data[0] != 'r' && data[0] != 'R'))
+                return false;
+
+            return string.Equals(CliMode, Settings.CliMode.Codex,
+                       StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(CliMode, Settings.CliMode.CodexRemote,
+                       StringComparison.OrdinalIgnoreCase);
+        }
 
         private void OnProcessExited()
         {
@@ -1976,11 +2681,16 @@ namespace CCPad
                             // dimensions (a parallel start spawns at the default).
                             if (backlog != null)
                                 SendOutput(backlog);
-                            SendPaneStatus(_status);
+                            SendPaneStatus();
                             SendRemotePasteMode();
                             _session.Resize(Math.Max(2, _cols - 1), _rows);
                             _session.Resize(_cols, _rows);
                         }
+                        SendStagingState();
+                        break;
+
+                    case "stagingState":
+                        AcceptStagingState(doc.RootElement);
                         break;
 
                     case "stagedInput":
@@ -1989,20 +2699,26 @@ namespace CCPad
                                        settleProp.TryGetInt32(out var requestedSettle)
                             ? requestedSettle
                             : 180;
-                        SendStagedInput(staged, settleMs);
+                        long requestId = doc.RootElement.TryGetProperty("requestId", out var requestProp) &&
+                                         requestProp.TryGetInt64(out var parsedRequest) ? parsedRequest : 0;
+                        bool bracketedPaste = doc.RootElement.TryGetProperty("bracketedPaste", out var pasteProp) &&
+                                              pasteProp.ValueKind == JsonValueKind.True;
+                        SendStagedInput(staged, settleMs, requestId, bracketedPaste);
                         break;
 
                     case "input":
                         string data = doc.RootElement.GetProperty("data").GetString() ?? "";
-                        bool scrollNavigationInput =
-                            doc.RootElement.TryGetProperty("source", out var inputSource) &&
-                            inputSource.ValueKind == JsonValueKind.String &&
-                            inputSource.GetString() is ("middle-scroll" or "wheel-scroll");
-                        if (!scrollNavigationInput)
+                        string? inputOrigin = doc.RootElement.TryGetProperty("source", out var inputSource) &&
+                            inputSource.ValueKind == JsonValueKind.String ? inputSource.GetString() : null;
+                        bool interactiveInput = StagedInputProtocol.InterruptsSubmission(data, inputOrigin);
+                        bool capacityRetryInput = interactiveInput &&
+                            IsCodexCapacityRetryInput(data);
+                        if (capacityRetryInput) MarkCodexSubmission();
+                        if (interactiveInput)
                         {
-                            // Mouse navigation must not cancel the Enter that
-                            // submits an already written staged command, or
-                            // count as typing for the auto-reply guard.
+                            // Focus notifications, terminal replies and scrolling
+                            // must not cancel the pending Enter. Actual typing,
+                            // paste, editing keys and Escape still take ownership.
                             CancelStagedSubmit();
                             _lastUserInputUtc = DateTime.UtcNow;
                             _lastRealInputUtc = DateTime.UtcNow;
@@ -2010,7 +2726,7 @@ namespace CCPad
                                 ResetAutoConfirmState();
                             // A real Enter means a human (or the staging queue)
                             // took over: reset the auto-reply retry budget.
-                            if (data.Contains('\r'))
+                            if (data.Contains('\r') || capacityRetryInput)
                                 OnRealSubmitResetAutoReply();
                         }
                         if (_awaitingRestart && data == "\r")
@@ -2030,13 +2746,13 @@ namespace CCPad
                             // hook re-asserts truth. Plain keystrokes, arrow keys,
                             // mouse events, and focus-report sequences (ESC[I, sent
                             // by xterm on tab switch) must NOT turn it green.
-                            if (data.Contains('\r') &&
+                            if ((data.Contains('\r') || capacityRetryInput) &&
                                 (_status == PaneStatus.Waiting || _apiErrored))
                             {
                                 // Retrying after an API error counts as handing work
                                 // back to the AI → clear the error and go green.
                                 _apiErrored = false;
-                                SetStatus(PaneStatus.Working);
+                                SetStatus(PaneStatus.Working, explicitTransition: true);
                             }
                             // Ordered after the green-flip check: a pasted
                             // "claude --resume ...\r" must land on amber (fresh
@@ -2051,7 +2767,7 @@ namespace CCPad
                         // Staging watchdog asks for the current status; re-send it
                         // unconditionally (SetStatus only emits on change, so this is
                         // the only way to recover a missed waiting transition).
-                        SendPaneStatus(_status);
+                        SendPaneStatus();
                         break;
 
                     case "resize":
@@ -2108,9 +2824,7 @@ namespace CCPad
                         // Windows launcher instead, so a normal click opens the
                         // user's default browser without an in-pane prompt.
                         string link = doc.RootElement.GetProperty("url").GetString() ?? "";
-                        if (Uri.TryCreate(link, UriKind.Absolute, out var linkUri) &&
-                            (linkUri.Scheme.Equals(Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) ||
-                             linkUri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)))
+                        if (TryParseBrowserUri(TrimRemoteBrowserUrl(link), out var linkUri))
                         {
                             DispatcherQueue.TryEnqueue(() => _ = OpenLocalBrowserAsync(linkUri));
                         }
@@ -2130,8 +2844,13 @@ namespace CCPad
 
                     case "stageImagePaste":
                         // Alt+V inside the staging input: capture the clipboard image
-                        // host-side and feed its file path back for queueing.
-                        DispatcherQueue.TryEnqueue(async () => await StageImagePasteAsync());
+                        // immediately on this UI callback, before another clipboard
+                        // change. Echo the request id so late uploads keep their owner.
+                        if (doc.RootElement.TryGetProperty("requestId", out var imageRequest) &&
+                            imageRequest.ValueKind == JsonValueKind.String &&
+                            imageRequest.GetString() is string imageRequestId &&
+                            Regex.IsMatch(imageRequestId, @"\A[a-zA-Z0-9-]{1,80}\z"))
+                            _ = StageImagePasteAsync(imageRequestId);
                         break;
 
                     case "termPaste":
@@ -2253,6 +2972,8 @@ namespace CCPad
             CancelStagedSubmit();
             _autoReplyTimer?.Dispose();
             _workingWatchTimer?.Dispose();
+            _remoteBrowserTunnel?.Dispose();
+            _remoteBrowserTunnel = null;
             CliNotify.Unregister(PaneId);
             CliNotify.CleanupHooks(PaneId);
             Notify.ToastService.UnregisterPane(PaneId);
@@ -2261,9 +2982,16 @@ namespace CCPad
             if (_session != null)
             {
                 _session.OutputReceived -= OnOutput;
+                _session.InputSending -= OnSessionInputSending;
                 _session.ProcessExited -= OnProcessExited;
                 _session.Dispose();
                 _session = null;
+            }
+            lock (_codexLeaseGate)
+            {
+                _codexSessionLease?.Dispose();
+                _codexSessionLease = null;
+                _leasedCodexSession = null;
             }
             try
             {
@@ -2592,6 +3320,7 @@ namespace CCPad
               <div id="paste-toast"></div>
               <script src="https://xterm.local/xterm.js"></script>
               <script src="https://xterm.local/xterm-addon-fit.js"></script>
+              <script src="https://xterm.local/ccpad-input-compat.js"></script>
               <script>
                 const term = new Terminal({
                   // Keep terminal OSC-8 links clickable, but hand them to the
@@ -2617,10 +3346,60 @@ namespace CCPad
                   allowProposedApi: true
                 });
 
+                // xterm only recognizes OSC-8 links by itself.  CLI output
+                // usually contains ordinary https:// text, so provide the
+                // same click behavior for those URLs as well.  Build matches
+                // across soft-wrapped rows so long LAN links remain clickable.
+                term.registerLinkProvider({
+                  provideLinks: (y, callback) => {
+                    const buffer = term.buffer.active;
+                    let first = y;
+                    while (first > 0 && buffer.getLine(first)?.isWrapped) first--;
+                    const parts = [];
+                    let last = first;
+                    for (;;) {
+                      const row = buffer.getLine(last);
+                      if (!row) break;
+                      parts.push(row.translateToString(false).replace(/\s+$/g, ''));
+                      if (!buffer.getLine(last + 1)?.isWrapped) break;
+                      last++;
+                    }
+                    const text = parts.join('');
+                    const links = [];
+                    const urlPattern = /https?:\/\/[^\s<>"'`]+/gi;
+                    let match;
+                    while ((match = urlPattern.exec(text)) !== null) {
+                      let urlText = match[0].replace(/[.,;:!?\]}]+$/g, '');
+                      if (!urlText) continue;
+                      const startOffset = match.index;
+                      const endOffset = startOffset + urlText.length - 1;
+                      const startRow = first + Math.floor(startOffset / term.cols);
+                      const endRow = first + Math.floor(endOffset / term.cols);
+                      if (y < startRow || y > endRow) continue;
+                      links.push({
+                        range: {
+                          start: { x: startOffset % term.cols, y: startRow },
+                          end: { x: endOffset % term.cols, y: endRow }
+                        },
+                        text: urlText,
+                        activate: (_event, linkText) => {
+                          try {
+                            const url = new URL(linkText);
+                            if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
+                            window.chrome.webview.postMessage(JSON.stringify({ type: 'openLink', url: url.href }));
+                          } catch (_) { /* malformed links are ignored */ }
+                        }
+                      });
+                    }
+                    callback(links);
+                  }
+                });
+
                 const fit = new FitAddon.FitAddon();
                 term.loadAddon(fit);
                 const terminalElement = document.getElementById('terminal');
                 term.open(terminalElement);
+                term.loadAddon(new CCPadInputCompat(sendTerminalInput));
                 fit.fit();
 
                 /* Browser-style middle-button drag scrolling. This is kept inside
@@ -2975,9 +3754,18 @@ namespace CCPad
 
                 /* ── Command staging (命令寄存) ── */
                 let stagingOn = false;
+                let stagingGeneration = 0;
+                let stagingSuspended = false;
                 let queue = [];
                 let lastStatus = 'waiting';   // resting state of a fresh CLI
                 let pendingAutomation = false; // host-side auto-enter/reply owns the input
+                let stagedInFlight = null;     // owns the send until its own acknowledgement AND idle
+                // A receipt from the previous renderer must not match a new send.
+                let nextStagedRequestId = Date.now() * 1024;
+                let terminalOutputVersion = 0;
+                let terminalWritesPending = 0;
+                let stagingPaused = false;     // a failed write must be reviewed manually
+                let stagingPauseReason = '';
                 let flushTimer = null;
                 let stageWatchdog = null;     // re-polls real status so a missed
                                               // working→waiting transition can't
@@ -2997,6 +3785,8 @@ namespace CCPad
                   stageStatusWaiting: '等待中 · 空闲时发送',
                   stageStatusWorking: '工作中 · 等待空闲',
                   stageStatusDisconnected: '已断开 · 暂停发送',
+                  stageSendFailed: '发送失败 · 已放回队列，请检查终端后重试',
+                  stageRecoveryPaused: '已恢复 · 请确认发送状态，重新开启寄存后继续',
                   stageBulkToggle: '＋ 批量导入',
                   stageQueued: '待发',
                   stageEmpty: '队列为空 · 在下方输入并按 Enter',
@@ -3005,6 +3795,8 @@ namespace CCPad
                   stageBulkImport: '导入',
                   cancel: '取消',
                   stageHint: '空闲时自动发送 · Enter 寄存 · ✎ 编辑 · ⠿ 排序 · Alt+V 图片 · Alt+` 退出',
+                  stageImagePending: '图片处理中，完成后再按 Enter',
+                  stageImageTimeout: '图片处理超时，请重新粘贴',
                   editTip: '编辑这条(双击文字也可)',
                   dragTip: '按住拖动排序',
                   deleteTip: '删除这条',
@@ -3018,9 +3810,10 @@ namespace CCPad
                   return pageLocale.stageStatusWaiting;
                 }
                 function renderStatus() {
-                  stageDot.className = 'dot' + (lastStatus === 'working' ? ' working'
-                    : lastStatus === 'disconnected' ? ' disconnected' : '');
-                  stageStatus.textContent = statusLabel(lastStatus);
+                  const displayStatus = stagedInFlight && lastStatus !== 'disconnected' ? 'working' : lastStatus;
+                  stageDot.className = 'dot' + (displayStatus === 'working' ? ' working'
+                    : displayStatus === 'disconnected' ? ' disconnected' : '');
+                  stageStatus.textContent = stagingPaused ? pageLocale.stageRecoveryPaused : statusLabel(displayStatus);
                 }
                 // Index of the queue item being edited inline, or null. While an
                 // edit is open the flush machinery is PAUSED (see maybeFlush) so a
@@ -3028,6 +3821,8 @@ namespace CCPad
                 // user's cursor, and indices can't shift under the editor.
                 let editingIdx = null;
                 function renderQueue() {
+                  const oldEditor = stageList.querySelector('.edit-box');
+                  if (oldEditor) cancelStageImages(oldEditor);
                   editingIdx = null;   // any rebuild tears the edit box down
                   stageList.innerHTML = '';
                   queue.forEach((cmd, i) => {
@@ -3051,6 +3846,7 @@ namespace CCPad
                   });
                   stageEmpty.style.display = queue.length ? 'none' : 'block';
                   stageCount.textContent = queue.length + ' ' + pageLocale.stageQueued;
+                  publishStaging();
                 }
                 // Swap item i's text span for a textarea in place. Enter saves,
                 // Esc cancels, clicking away saves (blur). Saving an emptied box
@@ -3073,7 +3869,12 @@ namespace CCPad
                   box.focus();
                   box.selectionStart = box.selectionEnd = box.value.length;
                   const done = save => {
-                    if (editingIdx === null) return; // renderQueue already tore us down
+                    if (editingIdx !== i || !box.isConnected) return;
+                    if (save && hasStageImages(box)) {
+                      flashHint(pageLocale.stageImagePending);
+                      return; // keep this editor alive until its pictures arrive
+                    }
+                    cancelStageImages(box);
                     editingIdx = null;
                     if (save) {
                       const v = box.value.replace(/\s+$/, '');
@@ -3083,9 +3884,10 @@ namespace CCPad
                     renderQueue();
                     maybeFlush();   // the queue was paused for the edit; resume
                   };
-                  box.addEventListener('input', size);
+                  box.addEventListener('input', () => { size(); publishStaging(); });
+                  bindStageImages(box);
                   box.addEventListener('keydown', e => {
-                    if (e.isComposing) return;       // IME confirm ≠ save
+                    if (e.isComposing || e.keyCode === 229) return; // IME confirm ≠ save
                     if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault(); done(true);
                     } else if (e.key === 'Escape') {
@@ -3093,6 +3895,7 @@ namespace CCPad
                     }
                   });
                   box.addEventListener('blur', () => done(true));
+                  publishStaging();
                 }
                 // ── Drag-to-reorder via the ⠿ grip (like the Codex client's staged
                 // list). While a drag is live the flush machinery is paused,
@@ -3163,21 +3966,118 @@ namespace CCPad
                   stageInput.style.height = 'auto';
                   stageInput.style.height = Math.min(96, stageInput.scrollHeight) + 'px';
                 }
-                // Drop text at the caret in the staging box (used by Alt+V image paste).
-                function insertAtCursor(el, text) {
-                  const s = el.selectionStart ?? el.value.length;
-                  const e = el.selectionEnd ?? el.value.length;
-                  const ins = text + ' ';   // trailing space so the next word isn't glued on
-                  el.value = el.value.slice(0, s) + ins + el.value.slice(e);
-                  const pos = s + ins.length;
-                  el.selectionStart = el.selectionEnd = pos;
-                  el.focus();
-                  autoSize();
+                // Each paste owns its editor and original insertion range. Keep
+                // upload replies in request order, even when SSH finishes B first.
+                const stageImageRequests = new Map();
+                const stageImageEditors = new WeakMap();
+                const stageImageEpoch = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+                let nextStageImageId = 0;
+                function hasStageImages(el) {
+                  return !!stageImageEditors.get(el)?.pending.length;
+                }
+                function moveStageImageRanges(state, start, end, length) {
+                  const move = pos => pos < start ? pos : pos > end ? pos + length - (end - start) : start + length;
+                  for (const request of state.pending) {
+                    request.start = move(request.start);
+                    request.end = move(request.end);
+                  }
+                }
+                function trackStageImageEdits(el) {
+                  const state = stageImageEditors.get(el);
+                  if (!state || state.value === el.value) return;
+                  const before = state.value, after = el.value;
+                  let start = 0, end = before.length, newEnd = after.length;
+                  while (start < end && start < newEnd && before[start] === after[start]) start++;
+                  while (end > start && newEnd > start && before[end - 1] === after[newEnd - 1]) { end--; newEnd--; }
+                  moveStageImageRanges(state, start, end, newEnd - start);
+                  state.value = after;
+                }
+                function cancelStageImages(el) {
+                  const state = stageImageEditors.get(el);
+                  if (!state) return;
+                  for (const request of state.pending) {
+                    clearTimeout(request.timer);
+                    stageImageRequests.delete(request.id);
+                  }
+                  stageImageEditors.delete(el);
+                  if (!stageImageRequests.size) hidePasteToast();
+                }
+                function requestStageImage(el) {
+                  trackStageImageEdits(el);
+                  let state = stageImageEditors.get(el);
+                  if (!state) {
+                    state = { value: el.value, pending: [] };
+                    stageImageEditors.set(el, state);
+                  }
+                  const id = stageImageEpoch + '-' + (++nextStageImageId);
+                  const request = { id, el, state, start: el.selectionStart, end: el.selectionEnd, reply: null };
+                  state.pending.push(request);
+                  stageImageRequests.set(id, request);
+                  request.timer = setTimeout(() => receiveStageImage({
+                    requestId: id, error: pageLocale.stageImageTimeout
+                  }), 60000);
+                  clearStageHint();
+                  showPasteToast(pageLocale.stageImagePending, false, 45000);
+                  window.chrome.webview.postMessage(JSON.stringify({ type: 'stageImagePaste', requestId: id }));
+                }
+                function bindStageImages(el) {
+                  el.addEventListener('input', () => trackStageImageEdits(el));
+                  el.addEventListener('keydown', e => {
+                    if (!e.isComposing && e.keyCode !== 229 && e.altKey && !e.ctrlKey && !e.shiftKey && !e.metaKey &&
+                        (e.code === 'KeyV' || e.key === 'v' || e.key === 'V')) {
+                      e.preventDefault(); e.stopPropagation();
+                      if (!e.repeat) requestStageImage(el);
+                    }
+                  });
+                  el.addEventListener('paste', e => {
+                    const data = e.clipboardData;
+                    // Retain normal text-first Ctrl+V; Alt+V explicitly prefers images.
+                    if (!data || data.getData('text/plain') ||
+                        !Array.from(data.items).some(item => item.type.startsWith('image/'))) return;
+                    e.preventDefault(); e.stopPropagation();
+                    requestStageImage(el);
+                  });
+                }
+                function receiveStageImage(msg) {
+                  const request = stageImageRequests.get(msg.requestId);
+                  if (!request || request.reply) return; // stale page, canceled editor, or duplicate
+                  const { el, state } = request;
+                  if (!el.isConnected) { cancelStageImages(el); return; }
+                  clearTimeout(request.timer);
+                  request.reply = msg;
+                  trackStageImageEdits(el);
+                  let failure = '';
+                  while (state.pending.length && state.pending[0].reply) {
+                    const next = state.pending.shift();
+                    stageImageRequests.delete(next.id);
+                    if (!next.reply.path) {
+                      failure = next.reply.error || pageLocale.noImage;
+                      continue;
+                    }
+                    const path = next.reply.path;
+                    const before = el.value.slice(0, next.start);
+                    const text = (before && !/\s$/.test(before) ? ' ' : '') +
+                      (/\s/.test(path) ? '"' + path + '"' : path) + ' ';
+                    const atInsertion = el.selectionStart === next.start && el.selectionEnd === next.end;
+                    el.setRangeText(text, next.start, next.end, 'preserve');
+                    if (atInsertion) el.selectionStart = el.selectionEnd = next.start + text.length;
+                    moveStageImageRanges(state, next.start, next.end, text.length);
+                    state.value = el.value;
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                  }
+                  if (!stageImageRequests.size) hidePasteToast();
+                  if (failure) flashHint(failure);
                 }
                 // Briefly replace the hint line with a transient message (e.g. paste errors).
                 const stageHint = document.getElementById('stage-hint');
                 let stageHintDefault = stageHint.textContent;
                 let hintTimer = null;
+                function clearStageHint() {
+                  if (hintTimer) clearTimeout(hintTimer);
+                  hintTimer = null;
+                  stageHint.textContent = stageHintDefault;
+                  stageHint.style.color = '';
+                }
                 function applyLocale(next) {
                   pageLocale = Object.assign(pageLocale, next || {});
                   lastCmdBar.title = pageLocale.lastCmdTitle;
@@ -3198,19 +4098,12 @@ namespace CCPad
                   stageHint.style.color = '#e07a5f';
                   if (hintTimer) clearTimeout(hintTimer);
                   hintTimer = setTimeout(() => {
-                    stageHint.textContent = stageHintDefault;
-                    stageHint.style.color = '';
+                    clearStageHint();
                   }, 2200);
                 }
-                // Inject one staged command. The text and the submitting Enter are
-                // sent as TWO separate writes with a gap: writing "text\r" in one
-                // shot makes the CLI's TUI treat a long line as a paste and swallow
-                // the trailing \r as a literal newline — the command then just sits
-                // unsent in the prompt box. A standalone \r after the text lands is
-                // seen as a real Enter keypress and submits reliably.
-                function sendCmd(cmd) {
-                  const post = d => window.chrome.webview.postMessage(
-                    JSON.stringify({ type: 'input', data: d }));
+                // A paste frame and a separate Enter preserve multiline prompts.
+                // The host owns the entire sequence, including remote copy-mode exit.
+                function sendCmd(cmd, requestId) {
                   // Staged flush bypasses term.onData, so commit the exact text
                   // to the last-command bar here (100% accurate path).
                   setLastCmd(cmd);
@@ -3222,20 +4115,58 @@ namespace CCPad
                   // staging queue indefinitely.
                   const payloadBytes = new TextEncoder().encode(cmd).length;
                   const settleMs = Math.min(3000, 180 + Math.floor(payloadBytes / 1024) * 100);
-                  const submit = () => window.chrome.webview.postMessage(JSON.stringify({
-                    type: 'stagedInput', data: cmd, settleMs: settleMs
+                  window.chrome.webview.postMessage(JSON.stringify({
+                    type: 'stagedInput', data: cmd, settleMs: settleMs,
+                    requestId: requestId, bracketedPaste: term.modes.bracketedPasteMode
                   }));
-                  if (remotePasteOn) {
-                    // Remote pane = tmux. If the user is reading scrollback the
-                    // pane sits in copy-mode and injected text would be eaten
-                    // (or truncated by the copy-mode Any bind). F12 is bound by
-                    // the managed tmux conf to exit copy-mode and is swallowed
-                    // otherwise — send it first, then the command.
-                    post('\x1b[24~');
-                    setTimeout(submit, 80);
-                  } else {
-                    submit();
+                }
+                // Remote Codex has no completion hook. Silence alone says nothing
+                // about a pending paste, compaction, or a long-running tool. Inspect
+                // the rendered LIVE buffer (not scrollback) before appending input.
+                // Codex puts its cursor after '› ' in an empty composer. The
+                // placeholder may be omitted or lose its dim metadata during a
+                // repaint, while user-entered text remains non-dim. Bracketed
+                // paste is transport metadata, not an idle signal, so this
+                // readiness check must not depend on that mode being enabled.
+                function remoteComposerReady() {
+                  if (!remotePasteOn) return true;
+                  if (terminalWritesPending) return false;
+                  const buffer = term.buffer.active;
+                  const rowIndex = buffer.baseY + buffer.cursorY;
+                  const row = buffer.getLine(rowIndex);
+                  if (!row || row.isWrapped) return false;
+                  const text = row.translateToString(true);
+                  const prefix = text.match(/^\s*› /);
+                  if (!prefix || buffer.cursorX !== prefix[0].length) return false;
+                  for (let x = prefix[0].length; x < row.length; x++) {
+                    const cell = row.getCell(x);
+                    if (!cell || !cell.getChars().trim()) continue;
+                    if (!cell.isDim()) return false;
                   }
+                  // A continuation line is another part of a multiline draft.
+                  if (buffer.getLine(rowIndex + 1)?.translateToString(true).trim()) return false;
+                  for (let y = buffer.baseY; y < buffer.baseY + term.rows; y++) {
+                    const line = buffer.getLine(y)?.translateToString(true) || '';
+                    if (/\([^)]*esc to (?:interrupt|cancel)[^)]*\)\s*$/i.test(line) ||
+                        /^\s*(?:[•·]\s*)?Queued follow-up inputs\b/i.test(line) ||
+                        /^\s*shift\+tab to answer\s*$/i.test(line)) return false;
+                  }
+                  return true;
+                }
+                function completeStagedInputIfIdle() {
+                  if (!stagedInFlight || !stagedInFlight.submitted ||
+                      lastStatus !== 'waiting' || pendingAutomation || terminalWritesPending) return;
+                  // Do not accept the pre-paste empty screen as proof of delivery.
+                  // A remote repaint must have arrived after the transport ack,
+                  // or the composer must already have changed during this send.
+                  // Fast turns can paint both their draft and result before the
+                  // host's acknowledgement reaches the page.
+                  if (remotePasteOn && !stagedInFlight.sawActiveComposer &&
+                      terminalOutputVersion <= stagedInFlight.outputAtSubmit) return;
+                  if (!remoteComposerReady()) return;
+                  stagedInFlight = null;
+                  publishStaging();
+                  renderStatus();
                 }
                 // While items are queued, keep asking the host for its REAL status.
                 // The host only pushes paneStatus on a *change*, so a working→waiting
@@ -3252,31 +4183,42 @@ namespace CCPad
                   }, 1500);
                 }
                 function maybeFlush() {
-                  if (!stagingOn || queue.length === 0) return;
+                  completeStagedInputIfIdle();
+                  if (stagingSuspended || !stagingOn || queue.length === 0) return;
                   ensureWatchdog();
                   if (editingIdx !== null) return;   // paused while an item is being edited
                   if (dragActive) return;            // paused while a row is being dragged
+                  if (stagedInFlight || stagingPaused) return;
                   if (pendingAutomation) return;     // auto-enter/reply has the input gate
                   if (lastStatus !== 'waiting') return;
+                  if (!remoteComposerReady()) return;
                   if (flushTimer) return;
                   // Small settle delay so the CLI prompt is ready to receive input.
                   flushTimer = setTimeout(() => {
                     flushTimer = null;
-                    if (!stagingOn || queue.length === 0 || lastStatus !== 'waiting' || pendingAutomation) return;
+                    if (stagingSuspended || !stagingOn || queue.length === 0 || lastStatus !== 'waiting' || pendingAutomation ||
+                        stagedInFlight || stagingPaused || !remoteComposerReady()) return;
                     if (editingIdx !== null) return; // edit opened during the settle delay
                     if (dragActive) return;          // drag started during the settle delay
                     const cmd = queue.shift();
+                    const requestId = ++nextStagedRequestId;
+                    stagedInFlight = { command: cmd, requestId: requestId, submitted: false,
+                      outputAtSubmit: terminalOutputVersion, sawActiveComposer: false };
                     renderQueue();
                     // Optimistically mark working so we don't double-send before the
                     // host echoes the real status back.
                     lastStatus = 'working';
                     renderStatus();
-                    sendCmd(cmd);
+                    sendCmd(cmd, requestId);
                   }, 450);
                 }
 
                 function applyStaging(on) {
                   stagingOn = on;
+                  if (stagingOn) {
+                    stagingPaused = false;
+                    stagingPauseReason = '';
+                  }
                   stagePanel.classList.toggle('open', stagingOn);
                   fit.fit();
                   // Move the caret to the right box (staging input when on, terminal
@@ -3285,6 +4227,8 @@ namespace CCPad
                   const focusTarget = () => { if (stagingOn) stageInput.focus(); else term.focus(); };
                   focusTarget();
                   requestAnimationFrame(focusTarget);
+                  renderStatus();
+                  publishStaging();
                   if (stagingOn) maybeFlush();
                 }
                 /* ── Remote clipboard bridge (Codex-over-SSH panes) ──
@@ -3337,15 +4281,11 @@ namespace CCPad
                   }
                 }, true);
 
-                stageInput.addEventListener('input', autoSize);
+                stageInput.addEventListener('input', () => { autoSize(); publishStaging(); });
+                bindStageImages(stageInput);
                 stageInput.addEventListener('keydown', e => {
-                  // Alt+V: ask the host to drop a clipboard image into temp and queue
-                  // its path (the CLI's native Alt+V can't see this textarea's focus).
-                  if (e.altKey && !e.ctrlKey && !e.shiftKey && (e.key === 'v' || e.key === 'V')) {
-                    e.preventDefault();
-                    window.chrome.webview.postMessage(JSON.stringify({ type: 'stageImagePaste' }));
-                    return;
-                  }
+                  // Candidate confirmation belongs to the IME, not the queue.
+                  if (e.isComposing || e.keyCode === 229) return;
                   // Alt+A: toggle select-all of the current command. First press selects
                   // everything (for fast delete/copy); pressing it again cancels the
                   // selection and drops the caret at the end.
@@ -3363,6 +4303,10 @@ namespace CCPad
                   }
                   if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();
+                    if (hasStageImages(stageInput)) {
+                      flashHint(pageLocale.stageImagePending);
+                      return;
+                    }
                     const v = stageInput.value.replace(/\s+$/, '');
                     if (v.length === 0) return;
                     queue.push(v);
@@ -3378,11 +4322,13 @@ namespace CCPad
                 const bulkInput = document.getElementById('stage-bulk-input');
                 const bulkImport = document.getElementById('stage-bulk-import');
                 const bulkCancel = document.getElementById('stage-bulk-cancel');
-                function closeBulk() { bulkRow.classList.remove('open'); bulkInput.value = ''; fit.fit(); }
+                function closeBulk() { bulkRow.classList.remove('open'); bulkInput.value = ''; fit.fit(); publishStaging(); }
+                bulkInput.addEventListener('input', publishStaging);
                 bulkToggle.addEventListener('click', () => {
                   const open = bulkRow.classList.toggle('open');
                   fit.fit();
                   if (open) bulkInput.focus();
+                  publishStaging();
                 });
                 bulkCancel.addEventListener('click', () => { closeBulk(); stageInput.focus(); });
                 bulkImport.addEventListener('click', () => {
@@ -3396,6 +4342,64 @@ namespace CCPad
                   maybeFlush();
                 });
 
+                function stagingSnapshot() {
+                  const editor = stageList.querySelector('.edit-box');
+                  return {
+                    Enabled: stagingOn, Queue: queue.slice(), Draft: stageInput.value,
+                    BulkOpen: bulkRow.classList.contains('open'), BulkDraft: bulkInput.value,
+                    EditingIndex: editingIdx, EditingDraft: editor?.value || '',
+                    Paused: stagingPaused,
+                    PendingCommand: stagedInFlight && !stagedInFlight.submitted ? stagedInFlight.command : null
+                  };
+                }
+                function publishStaging() {
+                  if (!stagingGeneration) return;
+                  window.chrome.webview.postMessage(JSON.stringify({
+                    type: 'stagingState', generation: stagingGeneration, state: stagingSnapshot()
+                  }));
+                }
+                window.ccpadCaptureStaging = suspend => {
+                  const snapshot = { generation: stagingGeneration, state: stagingSnapshot() };
+                  if (suspend) {
+                    stagingSuspended = true;
+                    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+                  }
+                  return snapshot;
+                };
+                function restoreStaging(msg) {
+                  if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+                  const state = msg.state || {};
+                  stagingGeneration = 0;
+                  stagingSuspended = false;
+                  stagedInFlight = null;
+                  queue = Array.isArray(state.Queue) ? state.Queue.filter(s => typeof s === 'string') : [];
+                  const pending = typeof state.PendingCommand === 'string' && state.PendingCommand.length > 0;
+                  if (pending) queue.unshift(state.PendingCommand);
+                  stagingOn = !!state.Enabled;
+                  // A pending command is restored as a queued item, but it is
+                  // not itself a failure. Pausing it here left a renderer
+                  // reload permanently stuck until the user toggled staging
+                  // off and on again, even after the remote Codex was idle.
+                  stagingPaused = !!state.Paused;
+                  stagingPauseReason = stagingPaused ? 'restored' : '';
+                  stageInput.value = state.Draft || '';
+                  bulkInput.value = state.BulkDraft || '';
+                  bulkRow.classList.toggle('open', !!state.BulkOpen);
+                  stagePanel.classList.toggle('open', stagingOn);
+                  renderQueue();
+                  const editIndex = Number.isInteger(state.EditingIndex) ? state.EditingIndex + (pending ? 1 : 0) : -1;
+                  if (editIndex >= 0 && editIndex < queue.length) {
+                    beginEdit(editIndex);
+                    stageList.querySelector('.edit-box').value = state.EditingDraft || '';
+                  }
+                  autoSize(); fit.fit(); renderStatus();
+                  stagingGeneration = msg.generation;
+                  publishStaging();
+                  // Recheck current status/composer before any restored entry is sent.
+                  lastStatus = 'disconnected';
+                  window.chrome.webview.postMessage(JSON.stringify({ type: 'requestStatus' }));
+                  if (stagingOn) ensureWatchdog();
+                }
                 renderQueue();
                 renderStatus();
 
@@ -3492,16 +4496,21 @@ namespace CCPad
                   type: 'ready', cols: term.cols, rows: term.rows
                 }));
 
-                term.onData(data => {
+                let physicalKeyData = null;
+                term.onKey(({ key }) => { physicalKeyData = key; });
+                function sendTerminalInput(data) {
                   const scrollInput = dispatchingMiddleScrollWheel || terminalWheelEventsInFlight > 0;
+                  const physicalKey = physicalKeyData === data;
+                  physicalKeyData = null;
                   if (!scrollInput)
                     shadowFeed(data);   // mouse scroll is navigation, not typed text
                   window.chrome.webview.postMessage(JSON.stringify({
                     type: 'input', data,
                     source: dispatchingMiddleScrollWheel ? 'middle-scroll' :
-                            scrollInput ? 'wheel-scroll' : 'user'
+                            scrollInput ? 'wheel-scroll' : physicalKey ? 'keyboard' : 'user'
                   }));
-                });
+                }
+                term.onData(sendTerminalInput);
 
                 term.onResize(({ cols, rows }) => {
                   window.chrome.webview.postMessage(JSON.stringify({ type: 'resize', cols, rows }));
@@ -3513,31 +4522,66 @@ namespace CCPad
                     const bin = atob(msg.data);
                     const bytes = new Uint8Array(bin.length);
                     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-                    term.write(bytes);
+                    terminalWritesPending++;
+                    term.write(bytes, () => {
+                      terminalWritesPending--;
+                      terminalOutputVersion++;
+                      if (remotePasteOn && stagedInFlight && !terminalWritesPending && !remoteComposerReady())
+                        stagedInFlight.sawActiveComposer = true;
+                      maybeFlush();
+                    });
                   } else if (msg.type === 'shellMode') {
                     shellResumeAvailable = !!msg.resume;
                   } else if (msg.type === 'paneStatus') {
                     const wasPending = pendingAutomation;
                     lastStatus = msg.status;
                     pendingAutomation = !!msg.automationPending;
+                    // A capacity/API failure pauses the queue deliberately. Once
+                    // the user or the configured retry hands the pane back to the
+                    // CLI, the working transition is the explicit recovery signal.
+                    if (lastStatus === 'working' && stagingPaused &&
+                        stagingPauseReason === 'terminal_error') {
+                      stagingPaused = false;
+                      stagingPauseReason = '';
+                    }
                     if (pendingAutomation && flushTimer) {
                       clearTimeout(flushTimer); flushTimer = null;
                     }
                     renderStatus();
                     if (lastStatus === 'waiting' && (!pendingAutomation || wasPending)) maybeFlush();
+                  } else if (msg.type === 'stagedInputSubmitted') {
+                    if (!stagedInFlight || msg.requestId !== stagedInFlight.requestId) return;
+                    stagedInFlight.submitted = true;
+                    stagedInFlight.outputAtSubmit = terminalOutputVersion;
+                    publishStaging();
+                  } else if (msg.type === 'stagedInputFailed') {
+                    if (!stagedInFlight || msg.requestId !== stagedInFlight.requestId) return;
+                    stagedInFlight = null;
+                    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+                    if (typeof msg.data === 'string' && msg.data.length)
+                      queue.unshift(msg.data);
+                    stagingPaused = true;
+                    stagingPauseReason = msg.phase || 'unknown';
+                    renderQueue();
+                    renderStatus();
+                    flashHint(pageLocale.stageSendFailed);
+                  } else if (msg.type === 'resumeStaging') {
+                    stagingSuspended = false;
+                    maybeFlush();
+                  } else if (msg.type === 'restoreStaging') {
+                    restoreStaging(msg);
                   } else if (msg.type === 'setStaging') {
                     applyStaging(!!msg.on);
                   } else if (msg.type === 'setLastCmdBar') {
                     applyLastCmdBar(!!msg.on);
                   } else if (msg.type === 'stageImagePasted') {
-                    hidePasteToast();
-                    if (msg.path) insertAtCursor(stageInput, msg.path);
-                    else flashHint(msg.error || pageLocale.noImage);
+                    receiveStageImage(msg);
                   } else if (msg.type === 'locale') {
                     applyLocale(msg);
                   } else if (msg.type === 'setRemotePaste') {
                     remotePasteOn = !!msg.on;
                   } else if (msg.type === 'imgUploading') {
+                    if (msg.requestId && !stageImageRequests.has(msg.requestId)) return;
                     // Long safety auto-hide in case the host reply never arrives.
                     showPasteToast(pageLocale.uploadingImage, false, 45000);
                   } else if (msg.type === 'termPasted') {

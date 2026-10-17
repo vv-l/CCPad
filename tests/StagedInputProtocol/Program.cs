@@ -15,7 +15,12 @@ void Receive(string frame)
     else if (frame == "\r") { messages.Add(composer); composer = ""; }
     else composer += frame;
 }
-var prompts = new[] { "闈炴硶鍚嶇О?", "/tmp/fictional.png 閲嶅鐩爣\n鍚屼竴鏉＄殑绗簩琛岎煓?, new string('涓?, 20000) };
+var prompts = new[]
+{
+    "\u975e\u6cd5\u540d\u79f0?",
+    "/tmp/fictional.png \u91cd\u590d\u76ee\u6807\n\u540c\u4e00\u6761\u7684\u7b2c\u4e8c\u884c?",
+    new string('\u4e2d', 20000)
+};
 foreach (var prompt in prompts)
 {
     int before = messages.Count;

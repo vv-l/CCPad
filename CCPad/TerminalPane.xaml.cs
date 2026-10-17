@@ -4125,12 +4125,14 @@ namespace CCPad
                 // the rendered LIVE buffer (not scrollback) before appending input.
                 // Codex puts its cursor after '› ' in an empty composer. The
                 // placeholder may be omitted or lose its dim metadata during a
-                // repaint, while user-entered text remains non-dim. Bracketed
-                // paste is transport metadata, not an idle signal, so this
-                // readiness check must not depend on that mode being enabled.
+                // repaint, while user-entered text remains non-dim. A remote
+                // staged command can contain newlines, so do not write it until
+                // the CLI has enabled bracketed paste; without the frame those
+                // newlines become real Enter events and can split the command.
                 function remoteComposerReady() {
                   if (!remotePasteOn) return true;
                   if (terminalWritesPending) return false;
+                  if (!term.modes.bracketedPasteMode) return false;
                   const buffer = term.buffer.active;
                   const rowIndex = buffer.baseY + buffer.cursorY;
                   const row = buffer.getLine(rowIndex);
@@ -4376,12 +4378,14 @@ namespace CCPad
                   const pending = typeof state.PendingCommand === 'string' && state.PendingCommand.length > 0;
                   if (pending) queue.unshift(state.PendingCommand);
                   stagingOn = !!state.Enabled;
-                  // A pending command is restored as a queued item, but it is
-                  // not itself a failure. Pausing it here left a renderer
-                  // reload permanently stuck until the user toggled staging
-                  // off and on again, even after the remote Codex was idle.
-                  stagingPaused = !!state.Paused;
-                  stagingPauseReason = stagingPaused ? 'restored' : '';
+                  // A transport acknowledgement only proves that the bytes and
+                  // Enter reached the PTY. If the renderer closes before the
+                  // turn boundary is observed, the command may already have
+                  // executed. Keep it visible but require an explicit resume so
+                  // a renderer reload can never duplicate that command.
+                  stagingPaused = pending || !!state.Paused;
+                  stagingPauseReason = pending ? 'uncertain_delivery' :
+                    (stagingPaused ? 'restored' : '');
                   stageInput.value = state.Draft || '';
                   bulkInput.value = state.BulkDraft || '';
                   bulkRow.classList.toggle('open', !!state.BulkOpen);

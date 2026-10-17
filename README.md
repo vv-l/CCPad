@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="README.zh-CN.md">中文文档</a> · <a href="LICENSE">License (GPL-3.0)</a>
+  <a href="README.zh-CN.md">中文文档</a> · <a href="#demo-videos">Demo videos</a> · <a href="LICENSE">License (GPL-3.0)</a>
 </p>
 
 <p align="center">
@@ -19,6 +19,41 @@
 ---
 
 > Current source version: **v1.10.43**
+
+## Demo videos
+
+See two real Codex sessions work in parallel: one writes a travel story while the other summarizes a fictional sales CSV. Follow the green working lights, copy the full last instruction, then see amber when the tasks finish and red when Codex exits.
+
+<table>
+  <thead>
+    <tr>
+      <th>English · 59 seconds</th>
+      <th>简体中文 · 61 秒</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>
+        <video controls preload="metadata" poster="docs/demos/ccpad-parallel-demo-en.jpg" width="100%" src="https://github.com/user-attachments/assets/aae4439c-ddb0-4666-ae2b-1210359cd976">
+          <a href="https://github.com/user-attachments/assets/aae4439c-ddb0-4666-ae2b-1210359cd976">Play the English demo</a>
+        </video>
+      </td>
+      <td>
+        <video controls preload="metadata" poster="docs/demos/ccpad-parallel-demo-zh-CN.jpg" width="100%" src="https://github.com/user-attachments/assets/0049b6ca-a5b9-4272-adfb-1df13a599a81">
+          <a href="https://github.com/user-attachments/assets/0049b6ca-a5b9-4272-adfb-1df13a599a81">观看中文演示</a>
+        </video>
+      </td>
+    </tr>
+    <tr>
+      <td><a href="https://raw.githubusercontent.com/vv-l/CCPad/master/docs/demos/ccpad-parallel-demo-en.mp4">Download original MP4</a> · English UI, narration and subtitles</td>
+      <td><a href="https://raw.githubusercontent.com/vv-l/CCPad/master/docs/demos/ccpad-parallel-demo-zh-CN.mp4">下载原版 MP4</a> · 中文界面、配音和字幕</td>
+    </tr>
+  </tbody>
+</table>
+
+Use either player to play the video directly in your browser. Use the Download original MP4 link to save the original file.
+
+[Demo guide and subtitles](docs/demos/README.md) · [中文演示说明](docs/demos/README.zh-CN.md)
 
 ## Features
 

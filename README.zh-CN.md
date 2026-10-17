@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> · <a href="LICENSE">许可证 (GPL-3.0)</a>
+  <a href="README.md">English</a> · <a href="#演示视频">演示视频</a> · <a href="LICENSE">许可证 (GPL-3.0)</a>
 </p>
 
 <p align="center">
@@ -19,6 +19,41 @@
 ---
 
 > 当前源码版本：**v1.10.43**
+
+## 演示视频
+
+用一分钟看两个真实 Codex 会话并行工作：左边写游记，右边汇总虚构销售 CSV。视频展示双绿灯运行、完整上一条指令与点击复制、任务完成后的黄灯，以及正常退出后的红灯。
+
+<table>
+  <thead>
+    <tr>
+      <th>简体中文 · 61 秒</th>
+      <th>English · 59 seconds</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>
+        <video controls preload="metadata" poster="docs/demos/ccpad-parallel-demo-zh-CN.jpg" width="100%" src="https://github.com/user-attachments/assets/0049b6ca-a5b9-4272-adfb-1df13a599a81">
+          <a href="https://github.com/user-attachments/assets/0049b6ca-a5b9-4272-adfb-1df13a599a81">观看中文演示</a>
+        </video>
+      </td>
+      <td>
+        <video controls preload="metadata" poster="docs/demos/ccpad-parallel-demo-en.jpg" width="100%" src="https://github.com/user-attachments/assets/aae4439c-ddb0-4666-ae2b-1210359cd976">
+          <a href="https://github.com/user-attachments/assets/aae4439c-ddb0-4666-ae2b-1210359cd976">Watch the English demo</a>
+        </video>
+      </td>
+    </tr>
+    <tr>
+      <td><a href="https://raw.githubusercontent.com/vv-l/CCPad/master/docs/demos/ccpad-parallel-demo-zh-CN.mp4">下载原版 MP4</a> · 中文界面、配音和字幕</td>
+      <td><a href="https://raw.githubusercontent.com/vv-l/CCPad/master/docs/demos/ccpad-parallel-demo-en.mp4">Download original MP4</a> · 英文界面、配音和字幕</td>
+    </tr>
+  </tbody>
+</table>
+
+使用任一播放器即可在浏览器中直接播放视频；如需保存原文件，请使用下方 MP4 链接。
+
+[演示说明与字幕文件](docs/demos/README.zh-CN.md) · [English demo guide](docs/demos/README.md)
 
 ## 功能特性
 

@@ -18,7 +18,7 @@
 
 ---
 
-> Current source version: **v1.10.44**
+> Current source version: **v1.10.45**
 
 ## Demo videos
 
@@ -442,7 +442,11 @@ CCPad/
 
 This is a community fork of [nuomiaa/CCPad](https://github.com/nuomiaa/CCPad) (based on upstream **v1.0.2**). Changes made in this fork:
 
-### v1.10.44 (current source update)
+### v1.10.45 (current source update)
+
+- **Capacity status fix** ? A Codex `Selected model is at capacity` response is a recoverable waiting state: CCPad keeps the pane amber, shows a yellow capacity notice, and leaves red for actual API failure or CLI exit. Configured capacity auto-reply still owns its retry gate.
+
+### v1.10.44 (previous source update)
 
 - **Remote staging safety** ? Remote command staging now waits for bracketed paste mode before writing multiline input, and a command whose delivery was acknowledged but whose turn boundary was not observed is held for explicit review after a renderer restore. This prevents accidental splitting and duplicate execution.
 - **Branch and release cleanup** ? Production work is consolidated on `master`; superseded demo, theme, staging, and pilot histories are retained under local `archive/*` refs, while duplicate remote branches and worktrees are removed.

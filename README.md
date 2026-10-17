@@ -18,7 +18,7 @@
 
 ---
 
-> Current release: **v1.10.20**
+> Current source version: **v1.10.43**
 
 ## Features
 
@@ -406,6 +406,15 @@ CCPad/
 ## Fork Changes
 
 This is a community fork of [nuomiaa/CCPad](https://github.com/nuomiaa/CCPad) (based on upstream **v1.0.2**). Changes made in this fork:
+
+### v1.10.43 (current source update)
+
+- **Codex quota workspace** — Add named Codex quota accounts by reference to existing ChatGPT login directories, show all accounts or a compact switchable view, and open a read-only quota overview window with independent refresh and failure isolation.
+- **Account-isolated local launches** — Choose the Codex profile for new local tabs; each pane receives its own `CODEX_HOME`, running panes keep their original account, and recovery refuses to resume a snapshot under a different account.
+- **Reset-credit safeguards** — Require a fresh account/count preview, the exact `RESET` text, and an explicit confirmation. Debug builds simulate the flow, Release can opt into simulation with `CCPAD_CODEX_RESET_DRY_RUN=1`, logs are sanitized, and failures never trigger an automatic retry. The offline test suite never sends a real reset request.
+- **Terminal and session reliability** — Improve IME and Unicode input in xterm, stage long or multiline prompts through a framed protocol, detect Codex turn activity from bounded history, preserve tab identity during cross-window transfer, and tighten remote approval handling and session recovery.
+- **Feishu single-window demo tooling** — Add a local-only bridge demo with bounded attachment handling, stable session binding, and offline tests for text, image, file, and WebSocket input flows.
+- **Verification** — The x64 Release project build completes with zero errors. The repository includes 144 passing offline C# checks covering quota accounts, login flow, reset safety, session recovery, staged input, tab transfer, and turn activity.
 
 ### v1.10.22
 

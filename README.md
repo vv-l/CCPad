@@ -18,7 +18,7 @@
 
 ---
 
-> Current source version: **v1.10.43**
+> Current source version: **v1.10.44**
 
 ## Demo videos
 
@@ -442,7 +442,14 @@ CCPad/
 
 This is a community fork of [nuomiaa/CCPad](https://github.com/nuomiaa/CCPad) (based on upstream **v1.0.2**). Changes made in this fork:
 
-### v1.10.43 (current source update)
+### v1.10.44 (current source update)
+
+- **Remote staging safety** ? Remote command staging now waits for bracketed paste mode before writing multiline input, and a command whose delivery was acknowledged but whose turn boundary was not observed is held for explicit review after a renderer restore. This prevents accidental splitting and duplicate execution.
+- **Branch and release cleanup** ? Production work is consolidated on `master`; superseded demo, theme, staging, and pilot histories are retained under local `archive/*` refs, while duplicate remote branches and worktrees are removed.
+- **Regression coverage** ? The staged queue browser fixture now passes 24/24 cases, including missing paste mode and uncertain-delivery recovery; the Unicode staged-input fixture is repaired and compiles cleanly.
+- **Verification** ? The x64 Release project build completes with zero errors. Offline reset safety reports `realResetRequests=0` and `realCredentialsRead=0`.
+
+### v1.10.43 (previous source update)
 
 - **Codex quota workspace** — Add named Codex quota accounts by reference to existing ChatGPT login directories, show all accounts or a compact switchable view, and open a read-only quota overview window with independent refresh and failure isolation.
 - **Account-isolated local launches** — Choose the Codex profile for new local tabs; each pane receives its own `CODEX_HOME`, running panes keep their original account, and recovery refuses to resume a snapshot under a different account.

@@ -1726,11 +1726,20 @@ namespace CCPad
             {
                 _recentErrScan = "";
                 _apiErrored = true;
-                // An enabled capacity auto-reply owns the retry transition and
-                // publishes its own pending gate. Keep its historical amber path;
-                // without that rule the queue must immediately show red/paused.
-                if (!capacity || !HasActiveCodexCapacityAutoReply())
+                // Capacity is a recoverable model-selection condition, not a
+                // dead CLI. Keep the pane amber so the user can switch models or
+                // retry; a configured capacity auto-reply may still claim the
+                // retry transition through its own pending gate. Only other API
+                // failures use the red disconnected state.
+                if (capacity)
+                {
+                    ShowNotice(CodexCapacityBanner);
+                    SetStatus(PaneStatus.Waiting);
+                }
+                else
+                {
                     SetStatus(PaneStatus.Disconnected);
+                }
             }
         }
 

@@ -831,6 +831,8 @@ namespace CCPad
                     StringComparison.OrdinalIgnoreCase)))
                 return;
 
+            if (CliMode == Settings.CliMode.Codex) ConfirmObservationSession(cliSessionId);
+
             // Receiving any callback proves this CLI is instrumented. From here on,
             // only its explicit lifecycle events may declare the turn idle.
             _completionHooksActive = true;
@@ -935,6 +937,14 @@ namespace CCPad
                 SyncWebSessionMetadata(notify: true);
             }
         }
+
+        // Only explicit resume and the pane-addressed CLI notification establish identity.
+        // Snapshot recovery's same-directory discovery is deliberately not an observation source.
+        public string? ObservationSessionId { get; private set; }
+        public bool IsObservationPaneAlive => !_disposed && _session != null &&
+            !_awaitingRestart && (!_inShell || _shellCliActive);
+        internal void ConfirmObservationSession(string? sessionId)
+            => ObservationSessionId = Guid.TryParse(sessionId, out var id) ? id.ToString("D") : null;
 
         /// <summary>When the CLI process was started — used to scope the Codex
         /// session-file scan to files this pane could have produced.</summary>
@@ -1396,6 +1406,7 @@ namespace CCPad
         private void StartSession()
         {
             _sessionPending = false;
+            ConfirmObservationSession(CliMode == Settings.CliMode.Codex ? ExtractCodexResumeId(_command) : null);
             CancelStagedSubmit();
             OnRealSubmitResetAutoReply();
             _replyScanCarry = "";
@@ -1870,11 +1881,13 @@ namespace CCPad
                 // next snapshot instead of letting a same-cwd disk scan choose a
                 // newer sibling session that happened to receive a later write.
                 SessionId = explicitSessionId;
+                ConfirmObservationSession(explicitSessionId);
                 ShellRelaunchUtc = null;
             }
             else
             {
                 ShellRelaunchUtc = DateTime.UtcNow;
+                ConfirmObservationSession(null);
             }
             // The ↑ resume offer is stale now — a later ↑ must reach the CLI
             // (prompt history), not paste a resume command into its input box.
@@ -2696,6 +2709,12 @@ namespace CCPad
                             _session.Resize(_cols, _rows);
                         }
                         SendStagingState();
+                        break;
+
+                    case "observationCommand":
+                        var observationCommand = doc.RootElement.GetProperty("data").GetString() ?? "";
+                        if (Regex.IsMatch(observationCommand, @"^/(new|clear|resume|fork)(\s|$)", RegexOptions.IgnoreCase))
+                            ConfirmObservationSession(null);
                         break;
 
                     case "stagingState":
@@ -3699,6 +3718,7 @@ namespace CCPad
                 function setLastCmd(text) {
                   const t = String(text).replace(/\s+$/, '');
                   if (!t) return;
+                  window.chrome.webview.postMessage(JSON.stringify({ type: 'observationCommand', data: t }));
                   lastCmdFull = t;
                   lastCmdText.textContent = t.replace(/\r?\n|\r/g, ' ⏎ ');
                   lastCmdText.title = t;

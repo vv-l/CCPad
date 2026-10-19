@@ -49,6 +49,7 @@ namespace CCPad
 
         private readonly CodexQuotaService _codexQuotaService = new();
         private readonly ClaudeQuotaService _claudeQuotaService = new();
+        private readonly Dictionary<string, CodexObserverWindow> _observers = new();
         private readonly System.Threading.CancellationTokenSource _quotaRefreshCts = new();
         private Microsoft.UI.Dispatching.DispatcherQueueTimer? _quotaTimer;
         private Microsoft.UI.Dispatching.DispatcherQueueTimer? _quotaClockTimer;
@@ -260,7 +261,9 @@ namespace CCPad
 
             QuotaFlyoutProgress.Value = percent;
             QuotaFlyoutTitle.Text = Loc.T("quota_account_badge", SelectedCodexQuotaName);
-            QuotaFlyoutPlan.Text = hasUsage && !string.IsNullOrWhiteSpace(snapshot.PlanType)
+            // A Free account can have a plan but no readable usage window. Keep
+            // that plan visible instead of tying it to the percentage rows.
+            QuotaFlyoutPlan.Text = !string.IsNullOrWhiteSpace(snapshot.PlanType)
                 ? Loc.T("quota_plan", snapshot.PlanType!)
                 : "";
             QuotaFlyoutUpdated.Text = snapshot.UpdatedAt.HasValue
@@ -272,6 +275,7 @@ namespace CCPad
             QuotaFlyoutStatus.Text = snapshot.State switch
             {
                 CodexQuotaState.Loading => Loc.T("quota_loading"),
+                CodexQuotaState.ProfileOnly => Loc.T("quota_plan_only"),
                 CodexQuotaState.Unavailable => Loc.T("quota_not_signed_in"),
                 CodexQuotaState.Error => snapshot.Error == "Codex login expired; run codex login"
                     ? Loc.T("quota_account_expired") : snapshot.Error ?? Loc.T("quota_unavailable"),
@@ -741,6 +745,7 @@ namespace CCPad
             {
                 _splitHost?.FocusActive();
                 RefreshStageButton();
+                RefreshObserveButton();
             }
         }
 
@@ -751,6 +756,34 @@ namespace CCPad
         {
             // ToggleButton has already flipped IsChecked; IsChecked is the intent.
             _splitHost?.ActiveTerminal?.SetStaging(StageButton.IsChecked == true);
+        }
+
+        private void RefreshObserveButton()
+        {
+            var pane = _splitHost?.ActiveTerminal;
+            ObserveButton.IsEnabled = pane?.CliMode == CliMode.Codex && pane.CodexHome != null;
+            ObserveButton.IsChecked = pane != null && _observers.ContainsKey(pane.PaneId);
+        }
+
+        private void OnObserveClick(object sender, RoutedEventArgs e)
+        {
+            var pane = _splitHost?.ActiveTerminal;
+            if (pane?.CliMode != CliMode.Codex || pane.CodexHome == null || pane.WorkingDir == null)
+            {
+                RefreshObserveButton();
+                return;
+            }
+            if (_observers.TryGetValue(pane.PaneId, out var existing))
+            {
+                existing.Close();
+                return;
+            }
+            var window = new CodexObserverWindow(pane.CodexHome, pane.WorkingDir,
+                () => pane.ObservationSessionId, () => pane.IsObservationPaneAlive);
+            _observers[pane.PaneId] = window;
+            window.Closed += (_, _) => { _observers.Remove(pane.PaneId); RefreshObserveButton(); };
+            window.Activate();
+            RefreshObserveButton();
         }
 
         /// <summary>Toggle the GLOBAL last-command info bar (same switch as Alt+L in a pane).</summary>
@@ -1843,6 +1876,9 @@ namespace CCPad
             ReplyButtonLabel.Text = Loc.T("btn_reply");
             ToolTipService.SetToolTip(StageButton, Loc.T("tip_stage"));
             StageButtonLabel.Text = Loc.T("btn_stage");
+            ToolTipService.SetToolTip(ObserveButton, Loc.T("tip_observe"));
+            ObserveButtonLabel.Text = Loc.T("btn_observe");
+            RefreshObserveButton();
             if (QuotaOverviewButton is not null) QuotaOverviewButton.Text = Loc.T("quota_overview_open");
             if (QuotaCodexItem is not null)
                 QuotaCodexItem.Content = Loc.T("quota_codex");
@@ -2446,6 +2482,7 @@ namespace CCPad
             ThemeManager.PrefChanged -= OnThemePrefChanged;
             LastCmdBarManager.Changed -= OnLastCmdBarManagerChanged;
 
+            foreach (var observer in new List<CodexObserverWindow>(_observers.Values)) observer.Close();
             _resourceTimer?.Stop();
             _quotaTimer?.Stop();
             _quotaAccountsWatcher?.Dispose();
@@ -2596,6 +2633,7 @@ namespace CCPad
             if (_splitHost == null) return;
             _splitHost.LayoutChanged += ScheduleAutosave;
             _splitHost.LayoutChanged += ScheduleTopRightAdjust; // re-reserve for new split panels
+            _splitHost.ActivePaneChanged += RefreshObserveButton;
             _splitHost.ActivePaneChanged += RefreshStageButton; // keep the staging toggle in sync
             _splitHost.StagingChanged += RefreshStageButton;    // Alt+` hotkey re-syncs the button
             _splitHost.ActivePaneChanged += RefreshFilePanelRoot; // follow active project dir

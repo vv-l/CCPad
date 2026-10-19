@@ -180,7 +180,7 @@
             <FontIcon Glyph="&#xECC5;" FontSize="14" Foreground="#4CC2FF"/>
         </Button>
 
-        <!-- Bottom-right control cluster: [回车] [寄存] [关于]. Three uniform
+        <!-- Bottom-right control cluster: local controls plus observation and About. Uniform
              buttons — same control footprint (plain Button shape, no chevron),
              equal width/height, identical icon+label layout, tight spacing. -->
         <StackPanel x:Name="BottomRightCluster"
@@ -245,6 +245,16 @@
                 <StackPanel Orientation="Horizontal" Spacing="6">
                     <FontIcon Glyph="&#xE8FD;" FontSize="14"/>
                     <TextBlock x:Name="StageButtonLabel" Text="寄存" FontSize="14" VerticalAlignment="Center"/>
+                </StackPanel>
+            </ToggleButton>
+
+            <ToggleButton x:Name="ObserveButton"
+                          MinWidth="74" Height="28" MinHeight="28"
+                          Padding="8,0" HorizontalContentAlignment="Center"
+                          VerticalContentAlignment="Center" Click="OnObserveClick">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <FontIcon Glyph="&#xE8A7;" FontSize="14"/>
+                    <TextBlock x:Name="ObserveButtonLabel" Text="观察" FontSize="14" VerticalAlignment="Center"/>
                 </StackPanel>
             </ToggleButton>
 

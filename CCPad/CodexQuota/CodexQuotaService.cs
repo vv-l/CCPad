@@ -12,6 +12,8 @@ namespace CCPad.CodexQuota
     {
         Loading,
         Ready,
+        /// <summary>The account plan was read, but no usage window is available.</summary>
+        ProfileOnly,
         Unavailable,
         Error,
     }
@@ -35,6 +37,10 @@ namespace CCPad.CodexQuota
 
         public static CodexQuotaSnapshot Unavailable(string error) =>
             new(CodexQuotaState.Unavailable, null, Array.Empty<CodexQuotaWindow>(), 0, null, error);
+
+        public static CodexQuotaSnapshot ProfileOnly(string planType, string error) =>
+            new(CodexQuotaState.ProfileOnly, planType, Array.Empty<CodexQuotaWindow>(), 0,
+                DateTimeOffset.UtcNow, error);
 
         public static CodexQuotaSnapshot ErrorSnapshot(string error) =>
             new(CodexQuotaState.Error, null, Array.Empty<CodexQuotaWindow>(), 0, null, error);
@@ -94,8 +100,16 @@ namespace CCPad.CodexQuota
                     HttpCompletionOption.ResponseHeadersRead,
                     cancellationToken).ConfigureAwait(false);
 
-                if ((int)response.StatusCode == 401 || (int)response.StatusCode == 403)
+                if ((int)response.StatusCode == 401)
                     return CodexQuotaSnapshot.ErrorSnapshot("Codex login expired; run codex login");
+                if ((int)response.StatusCode == 403)
+                {
+                    var planType = await ReadPlanTypeAsync(response.Content, cancellationToken).ConfigureAwait(false);
+                    return string.IsNullOrWhiteSpace(planType)
+                        ? CodexQuotaSnapshot.ErrorSnapshot("Codex login expired; run codex login")
+                        : CodexQuotaSnapshot.ProfileOnly(planType!,
+                            "Codex usage windows are unavailable for this account");
+                }
                 if (!response.IsSuccessStatusCode)
                     return CodexQuotaSnapshot.ErrorSnapshot($"Codex usage request failed ({(int)response.StatusCode})");
 
@@ -202,12 +216,15 @@ namespace CCPad.CodexQuota
                 credits = Math.Max(0, parsedCredits);
             }
 
-            var planType = root.TryGetProperty("plan_type", out var planElement)
+            var planType = NormalizePlanType(root.TryGetProperty("plan_type", out var planElement)
                 ? planElement.GetString()
-                : null;
+                : null);
 
             if (windows.Count == 0)
-                return CodexQuotaSnapshot.ErrorSnapshot("Codex did not report a usage window");
+                return string.IsNullOrWhiteSpace(planType)
+                    ? CodexQuotaSnapshot.ErrorSnapshot("Codex did not report a usage window")
+                    : CodexQuotaSnapshot.ProfileOnly(planType!,
+                        "Codex usage windows are unavailable for this account");
 
             return new CodexQuotaSnapshot(
                 CodexQuotaState.Ready,
@@ -216,6 +233,33 @@ namespace CCPad.CodexQuota
                 credits,
                 DateTimeOffset.UtcNow,
                 null);
+        }
+
+        private static string? NormalizePlanType(string? raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return null;
+            var value = raw.Trim();
+            return value.Equals("free", StringComparison.OrdinalIgnoreCase) ||
+                   value.Equals("free_workspace", StringComparison.OrdinalIgnoreCase)
+                ? "Free" : value;
+        }
+
+        private static async Task<string?> ReadPlanTypeAsync(
+            HttpContent content, CancellationToken cancellationToken)
+        {
+            try
+            {
+                await using var body = await content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+                using var document = JsonDocument.Parse(body);
+                return document.RootElement.TryGetProperty("plan_type", out var planElement) &&
+                    planElement.ValueKind == JsonValueKind.String
+                    ? NormalizePlanType(planElement.GetString())
+                    : null;
+            }
+            catch (Exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                return null;
+            }
         }
 
         private static void AddWindow(

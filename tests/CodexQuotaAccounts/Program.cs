@@ -167,6 +167,41 @@ await Check("missing additional login causes zero requests instead of fallback",
     using var service = new CodexQuotaService(fixture.Data("no-login"), http);
     Require((await service.RefreshAsync()).State == CodexQuotaState.Unavailable && handler.Requests.Count == 0);
 });
+await Check("Free plan remains visible when no usage window is reported", async () =>
+{
+    var handler = new OfflineHandler(_ => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+    {
+        Content = new StringContent("{\"plan_type\":\"free_workspace\",\"rate_limit\":null}")
+    }));
+    using var http = new HttpClient(handler);
+    using var service = new CodexQuotaService(fixture.Default, http);
+    var snapshot = await service.RefreshAsync();
+    Require(snapshot.State == CodexQuotaState.ProfileOnly && snapshot.PlanType == "Free" &&
+        snapshot.Windows.Length == 0);
+});
+await Check("Codex Free plan is normalized when usage windows are present", async () =>
+{
+    var handler = new OfflineHandler(_ => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+    {
+        Content = new StringContent("{\"plan_type\":\"free\",\"rate_limit\":{\"primary_window\":{\"used_percent\":5,\"limit_window_seconds\":18000}}}")
+    }));
+    using var http = new HttpClient(handler);
+    using var service = new CodexQuotaService(fixture.Default, http);
+    var snapshot = await service.RefreshAsync();
+    Require(snapshot.State == CodexQuotaState.Ready && snapshot.PlanType == "Free" &&
+        snapshot.TightestUsedPercent == 5);
+});
+await Check("Free plan survives a usage endpoint 403 response", async () =>
+{
+    var handler = new OfflineHandler(_ => Task.FromResult(new HttpResponseMessage(HttpStatusCode.Forbidden)
+    {
+        Content = new StringContent("{\"plan_type\":\"free_workspace\"}")
+    }));
+    using var http = new HttpClient(handler);
+    using var service = new CodexQuotaService(fixture.Default, http);
+    var snapshot = await service.RefreshAsync();
+    Require(snapshot.State == CodexQuotaState.ProfileOnly && snapshot.PlanType == "Free");
+});
 await Check("credential renewal is read from the original directory on each refresh", async () =>
 {
     var home = fixture.Login("renew", "renew-account");

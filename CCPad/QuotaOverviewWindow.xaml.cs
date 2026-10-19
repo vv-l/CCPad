@@ -172,7 +172,8 @@ namespace CCPad
                 var entries = await _service.RefreshAsync(profiles, new Progress<CodexQuotaOverviewEntry>(Apply), _closedCts.Token);
                 if (_closed) return;
                 foreach (var entry in entries) Apply(entry);
-                var ready = entries.Count(entry => entry.Snapshot.State == CodexQuotaState.Ready);
+                var ready = entries.Count(entry => entry.Snapshot.State is
+                    CodexQuotaState.Ready or CodexQuotaState.ProfileOnly);
                 OverviewStatus.Text = Loc.T("quota_overview_status", ready, entries.Length);
                 App.LogDiag($"quota-overview refresh accounts={entries.Length} ready={ready} failed={entries.Length - ready} cards={OverviewCards.Children.Count}");
             }
@@ -191,7 +192,8 @@ namespace CCPad
         {
             foreach (var card in _cards) RenderCard(card);
             if (!_refreshing && _cards.Count > 0)
-                OverviewStatus.Text = Loc.T("quota_overview_status", _cards.Count(card => card.Snapshot.State == CodexQuotaState.Ready), _cards.Count);
+                OverviewStatus.Text = Loc.T("quota_overview_status", _cards.Count(card =>
+                    card.Snapshot.State is CodexQuotaState.Ready or CodexQuotaState.ProfileOnly), _cards.Count);
         }
 
         private void RenderCard(QuotaCard card)
@@ -243,6 +245,7 @@ namespace CCPad
                 panel.Children.Add(new TextBlock
                 {
                     Text = snapshot.State == CodexQuotaState.Loading ? Loc.T("quota_loading") :
+                        snapshot.State == CodexQuotaState.ProfileOnly ? Loc.T("quota_plan_only") :
                         snapshot.State == CodexQuotaState.Unavailable ? Loc.T("quota_not_signed_in") :
                         snapshot.Error == "Codex login expired; run codex login" ? Loc.T("quota_account_expired") : Loc.T("quota_unavailable"),
                     FontSize = 12, TextWrapping = TextWrapping.Wrap,

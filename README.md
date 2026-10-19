@@ -18,7 +18,7 @@
 
 ---
 
-> Current source version: **v1.10.45**
+> Current source version: **v1.10.47**
 
 ## Demo videos
 
@@ -442,7 +442,13 @@ CCPad/
 
 This is a community fork of [nuomiaa/CCPad](https://github.com/nuomiaa/CCPad) (based on upstream **v1.0.2**). Changes made in this fork:
 
-### v1.10.45 (current source update)
+### v1.10.47 (current source update)
+
+- **Codex execution observer** — Open Observe from a local Codex tab to inspect the bound conversation and explicitly linked agents, tool calls and returns, public progress, and cumulative token usage. Filter events or follow the latest activity. Reading is bounded and read-only; instructions stay in the original terminal, and external workers' internal progress is not collected.
+- **Free account plan display** — Keep the Free plan visible when no usage window is reported, including a usage endpoint 403 response that contains plan information. The quota panel and overview distinguish this state from an expired login.
+- **Verification** — The x64 Release project build succeeds with zero errors and four CS8604 warning reports at two existing call sites. All 14 observation checks and 28 quota-account checks pass using synthetic logs, fictional credentials, and injected HTTP handlers; no live API, Codex CLI, or reset-credit transport is used by these tests.
+
+### v1.10.45 (previous source update)
 
 - **Capacity status fix** ? A Codex `Selected model is at capacity` response is a recoverable waiting state: CCPad keeps the pane amber, shows a yellow capacity notice, and leaves red for actual API failure or CLI exit. Configured capacity auto-reply still owns its retry gate.
 

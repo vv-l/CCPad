@@ -272,6 +272,28 @@ namespace CCPad
                 return;
             }
 
+            if (cmdArgs.Length == 4 && cmdArgs[1] == "--codex-observer")
+            {
+                // Read-only standalone view, also usable with synthetic logs for UI verification.
+                try
+                {
+                    var home = Path.GetFullPath(cmdArgs[2]);
+                    var id = Guid.Parse(cmdArgs[3]).ToString("D");
+                    var paths = Directory.EnumerateFiles(Path.Combine(home, "sessions"),
+                        "rollout-*-" + id + ".jsonl", SearchOption.AllDirectories);
+                    Terminal.ObservedAgent? meta = null;
+                    foreach (var path in paths) { meta = Terminal.CodexObservationReader.ReadMetadata(path); if (meta != null) break; }
+                    if (meta == null || meta.ParentId != null) throw new ArgumentException("Root session metadata not found.");
+                    Loc.Init();
+                    Settings.ThemeManager.Init();
+                    _window = new CodexObserverWindow(home, meta.Cwd, () => id, () => true);
+                    _window.Activate();
+                    LogDiag("codex-observer standalone: read-only; no terminal created");
+                }
+                catch (Exception ex) { LogStartupError("CodexObserver/startup", ex); Exit(); }
+                return;
+            }
+
             if (cmdArgs.Length > 1 && cmdArgs[1] == "--quota-overview")
             {
                 // Standalone read-only tool: no terminal, workspace recovery, hooks or login actions.

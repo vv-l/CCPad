@@ -196,6 +196,35 @@ try:
             assert sent()[1]['data'] == 'case one'
         check('failed item returns once in original order and pauses until explicit resume', failure)
 
+        def deferred_before_write():
+            for phase in ('not_ready', 'busy'):
+                reset(); status(); wait(); expect_count(1)
+                msg = {'type': 'stagedInputFailed', 'requestId': sent()[0]['requestId'],
+                       'data': 'case one', 'phase': phase}
+                host(msg); host(msg); wait(); expect_count(1)
+                assert queued() == ['case one', 'case two', 'case three']
+                status('working'); wait(); expect_count(1)
+                status(pending=True); wait(); expect_count(1)
+                status(); wait(); expect_count(2)
+                assert sent()[1]['data'] == 'case one'
+        check('host rejection before writing waits for fresh idle and resumes without toggling', deferred_before_write)
+
+        def interrupted_resume():
+            reset(remote=True); status(); wait(); expect_count(1)
+            screen(draft='case one')
+            host({'type': 'stagedInputFailed', 'requestId': sent()[0]['requestId'],
+                  'data': 'case one', 'phase': 'interrupted'})
+            status(); wait(); expect_count(1)
+            assert '发送中断' in page.locator('#stage-status').inner_text()
+            assert page.locator('#stage-resume').is_visible()
+            # A status poll or new queued entry cannot authorize a repeat.
+            enqueue(['case four']); status(); wait(); expect_count(1)
+            page.locator('#stage-resume').click(); wait(); expect_count(1)
+            assert not page.locator('#stage-resume').is_visible()
+            screen(); wait(); expect_count(2)
+            assert sent()[1]['data'] == 'case one'
+        check('interrupted paste explains the pause and resumes directly after composer review', interrupted_resume)
+
         def automation():
             reset(); status(pending=True); wait(); expect_count(0)
             status(); wait(); expect_count(1)
@@ -253,6 +282,22 @@ try:
             assert key['data'] == '\x1b[1;2R' and key.get('source') == 'keyboard'
             input_cases.append({**key, 'interrupt': True})
         check('real xterm focus/query reports remain distinct from a physical CPR-shaped key', terminal_reports)
+
+        def mouse_motion():
+            reset(items=('one message',)); status(); wait(); expect_count(1)
+            output('\x1b[?1003h\x1b[?1006h')
+            rect = page.locator('.xterm-screen').bounding_box()
+            page.mouse.move(rect['x'] + 50, rect['y'] + 40)
+            page.mouse.move(rect['x'] + 80, rect['y'] + 60)
+            reports = page.evaluate("__sent.filter(m=>m.type==='input' && m.data.startsWith('\\x1b[<'))")
+            assert reports, 'real xterm did not emit mouse motion'
+            for msg in reports:
+                input_cases.append({**msg, 'interrupt': False})
+            page.mouse.down(); page.mouse.up()
+            reports = page.evaluate("__sent.filter(m=>m.type==='input' && m.data.startsWith('\\x1b[<')).slice(-2)")
+            assert reports[0]['data'].endswith('M') and reports[1]['data'].endswith('m')
+            input_cases.extend([{**reports[0], 'interrupt': True}, {**reports[1], 'interrupt': False}])
+        check('real xterm mouse movement and release are distinct from an intentional button press', mouse_motion)
         def restore_queue_and_panel():
             reset(items=('执行完成并且登记好以后给我发飞书通知', '第二条\n保留换行'))
             host({'type': 'restoreStaging', 'generation': 7, 'state': {
@@ -303,6 +348,46 @@ try:
             status(); wait(); expect_count(1)
             assert sent()[0]['data'] == 'second'
         check('acknowledged content is not requeued and remaining content resumes on fresh idle', confirmed_delivery)
+
+        def restored_failure_reason():
+            restored(); status(); wait(); expect_count(1)
+            host({'type': 'stagedInputFailed', 'requestId': sent()[0]['requestId'],
+                  'data': 'first', 'phase': 'interrupted'})
+            saved = persisted()
+            assert saved['Paused'] and saved['PauseReason'] == 'interrupted'
+            reopen(saved); status(); wait(); expect_count(0)
+            assert '发送中断' in page.locator('#stage-status').inner_text()
+            page.locator('#stage-resume').click(); wait(); expect_count(1)
+            assert not persisted()['Paused'] and persisted()['PauseReason'] == ''
+        check('actual pause reason survives reopening and direct resume is persisted', restored_failure_reason)
+
+        def restored_terminal_error():
+            for remote in (False, True):
+                reset(items=(), remote=remote)
+                host({'type': 'restoreStaging', 'generation': 2, 'state': {
+                    'Enabled': True, 'Queue': ['first', 'second'],
+                    'Paused': True, 'PauseReason': 'terminal_error'}})
+                assert not persisted()['Paused'] and persisted()['PauseReason'] == ''
+                assert not page.locator('#stage-resume').is_visible()
+                status('working'); wait(); expect_count(0)
+                screen(busy='Selected model is at capacity. Please try a different model.')
+                status(); wait(); expect_count(1)
+                assert sent()[0]['data'] == 'first'
+                ack(); status('working'); wait(); expect_count(1)
+                screen(busy='API Error: 529 Overloaded')
+                status(); wait(); expect_count(2)
+                assert sent()[1]['data'] == 'second'
+        check('legacy terminal-error pause clears and error banners allow ordered local and remote sends', restored_terminal_error)
+
+        def terminal_error_with_pending_delivery():
+            reset(items=())
+            host({'type': 'restoreStaging', 'generation': 2, 'state': {
+                'Enabled': True, 'Queue': ['second'], 'PendingCommand': 'first',
+                'Paused': True, 'PauseReason': 'terminal_error'}})
+            status(); wait(); expect_count(0)
+            assert queued() == ['first', 'second']
+            assert persisted()['PauseReason'] == 'uncertain_delivery'
+        check('legacy error migration still preserves an unacknowledged send for review', terminal_error_with_pending_delivery)
 
         def stale_renderer_receipt():
             restored(items=('first', 'second', 'third')); status(); wait(); expect_count(1)

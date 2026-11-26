@@ -61,3 +61,8 @@
 #*.PDF   diff=astextplain
 #*.rtf   diff=astextplain
 #*.RTF   diff=astextplain
+
+# Preserve the byte hashes of the vendored CardKit modules and Git Bash scripts.
+tools/r5_cards/vendor/*.py text eol=lf
+CCPad/Assets/claude-shell/grep text eol=lf
+CCPad/Assets/claude-shell/ccpad-log-commands text eol=lf

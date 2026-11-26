@@ -133,6 +133,7 @@ namespace CCPad
                 {
                     if (CtxOf(item) is not TabCtx ctx) continue;
                     ApplyLocalizedTabContextMenu(ctx);
+                    UpdateClaudeTabTitle(ctx);
                     if (ctx.FrozenHint != null)
                         ctx.FrozenHint.Text = Loc.T(ctx.FrozenHintKey);
                     if (ctx.FrozenTitle != null)
@@ -455,12 +456,12 @@ namespace CCPad
         public async Task AddFirstTab(string? projectName = null, string? workingDir = null,
             string? cliMode = null, string? resumeSessionId = null, string? tag = null,
             string? remoteProfileId = null, string? remoteWorkingDir = null,
-            string? codexAccountId = null, StagingState? staging = null)
+            string? codexAccountId = null, StagingState? staging = null, string? claudeApiProfileId = null)
         {
             if (workingDir != null)
                 _defaultWorkingDir = workingDir;
             await AddNewTab(projectName, workingDir, cliMode, resumeSessionId, tag,
-                remoteProfileId, remoteWorkingDir, codexAccountId: codexAccountId, staging: staging);
+                remoteProfileId, remoteWorkingDir, codexAccountId: codexAccountId, staging: staging, claudeApiProfileId: claudeApiProfileId);
         }
 
         public void FocusCurrentTab()
@@ -473,6 +474,18 @@ namespace CCPad
         public TerminalPane? CurrentPane => Tabs.SelectedItem is TabViewItem item
             ? CtxOf(item)?.Pane
             : null;
+
+        private string? CurrentLocalWorkingDir
+        {
+            get
+            {
+                var ctx = Tabs.SelectedItem is TabViewItem item ? CtxOf(item) : null;
+                var mode = ctx?.FrozenState?.CliMode ?? ctx?.Pane?.CliMode;
+                var dir = mode == CliMode.CodexRemote ? null
+                    : ctx?.FrozenState?.WorkingDir ?? ctx?.Pane?.WorkingDir;
+                return string.IsNullOrWhiteSpace(dir) ? _defaultWorkingDir : dir;
+            }
+        }
 
         public void RefitAllTerminals()
         {
@@ -505,7 +518,8 @@ namespace CCPad
             string? cliMode = null, string? resumeSessionId = null, string? tag = null,
             string? remoteProfileId = null, string? remoteWorkingDir = null,
             bool remoteResumePicker = false, bool resumePicker = false,
-            string? codexAccountId = null, StagingState? staging = null)
+            string? codexAccountId = null, StagingState? staging = null,
+            bool resumeAllProjects = true, string? claudeApiProfileId = null)
         {
             _tabCounter++;
             string mode = ResolveCliMode(cliMode);
@@ -541,11 +555,14 @@ namespace CCPad
             bool resumed;
             try
             {
+                if (mode == CliMode.Claude && (Application.Current as App)?.MainWnd is MainWindow owner)
+                    pane.ClaudeApiConnection = owner.ResolveClaudeApiForLaunch(claudeApiProfileId);
                 (cmd, resumed) = await BuildLaunchCommandAsync(
                     mode, extra, resumeSessionId, pane, remoteWorkingDir, remoteResumePicker,
                     resumePicker: resumePicker, codexHome: codexAccount.Home,
                     codexAccountId: codexAccount.Id,
-                    codexAccountAvailable: codexAccount.Available);
+                    codexAccountAvailable: codexAccount.Available,
+                    resumeAllProjects: resumeAllProjects);
             }
             catch
             {
@@ -611,7 +628,7 @@ namespace CCPad
             string? remoteWorkingDir = null, bool remoteResumePicker = false,
             bool forkCodexSession = false, bool resumePicker = false,
             string? codexHome = null, string? codexAccountId = null,
-            bool codexAccountAvailable = true)
+            bool codexAccountAvailable = true, bool resumeAllProjects = true)
         {
             if (mode == CliMode.CodexRemote)
             {
@@ -640,7 +657,7 @@ namespace CCPad
                     return (CliMode.BuildCommand(mode, extra), false);
 
                 if (resumePicker)
-                    return (CliMode.BuildResumePickerCommand(mode, extra), false);
+                    return (CliMode.BuildResumePickerCommand(mode, extra, resumeAllProjects), false);
 
                 if (resumeSessionId != null)
                 {
@@ -655,7 +672,7 @@ namespace CCPad
                     {
                         if (!pane.TryClaimCodexSession(codexHome!, resumeSessionId))
                             throw new InvalidOperationException(Loc.T("account_resume_busy"));
-                        pane.SessionId = resumeSessionId;
+                        pane.PrepareConfirmedCodexResume(resumeSessionId);
                     }
                     return (forkCodexSession
                         ? CliMode.BuildForkCommand(resumeSessionId, extra)
@@ -664,8 +681,10 @@ namespace CCPad
                 return (CliMode.BuildCommand(mode, extra), false);
             }
 
+            pane.ClaudeGitBash = await ClaudeGrepShell.PrepareAsync();
+            if (pane.ClaudeGitBash != null) extra = (extra + " " + ClaudeGrepShell.LogSearchArgs).TrimStart();
             if (resumePicker)
-                return (CliMode.BuildResumePickerCommand(mode, extra), false);
+                return (CliMode.BuildResumePickerCommand(mode, extra, resumeAllProjects), false);
 
             if (resumeSessionId != null &&
                 await Task.Run(() => CliSessions.ClaudeSessionExists(resumeSessionId)))
@@ -755,6 +774,7 @@ namespace CCPad
         {
             ctx.UnhookPane?.Invoke();
             ctx.Pane = null;
+            UpdateClaudeTabTitle(ctx);
         }
 
         public event Action<TabPanel, Direction>? NavigateRequested;
@@ -865,6 +885,7 @@ namespace CCPad
             public string HeaderBase = "";
             public string Mode = "";
             public string TagValue = "";        // single source of truth for the tab tag
+            public TextBlock Title = null!;
             public Microsoft.UI.Xaml.Shapes.Ellipse Dot = null!;
             public Border TagBadge = null!;
             public TextBlock TagText = null!;
@@ -933,6 +954,7 @@ namespace CCPad
             };
             Grid.SetColumn(title, 1);
             headerPanel.Children.Add(title);
+            tabCtx.Title = title;
 
             // User tag badge: a small pill after the title. Ellipsized past MaxWidth;
             // the full text is available via tooltip (set in ApplyTag).
@@ -1101,8 +1123,25 @@ namespace CCPad
             ctx.FrozenTitle = null;
             ctx.FrozenShot = null;
             pane.Label = HeaderFor(ctx.HeaderBase, ctx.Mode);
+            UpdateClaudeTabTitle(ctx);
             pane.TabTag = ctx.TagValue;
             HookPane(item, ctx, pane);
+        }
+
+        internal void RefreshClaudeTabTitles()
+        {
+            foreach (var item in Tabs.TabItems.OfType<TabViewItem>())
+                if (CtxOf(item) is { } ctx) UpdateClaudeTabTitle(ctx);
+        }
+
+        private static void UpdateClaudeTabTitle(TabCtx ctx)
+        {
+            if (ctx.Mode != CliMode.Claude) return;
+            var title = ctx.HeaderBase;
+            if (ctx.Pane is { } pane && (Application.Current as App)?.MainWnd is MainWindow owner)
+                title = $"{owner.ClaudeSessionProfileName(pane.ClaudeApiConnection)} · {title}";
+            ctx.Title.Text = title;
+            ToolTipService.SetToolTip(ctx.Title, ctx.Pane == null ? null : title);
         }
 
         // ── Tab tag badge ───────────────────────────────────────────────
@@ -1381,6 +1420,8 @@ namespace CCPad
                     RemoteWorkingDir = pane.RemoteWorkingDir ?? "",
                     CliMode = string.IsNullOrEmpty(pane.CliMode) ? ctx.Mode : pane.CliMode,
                     CodexAccountId = pane.CliMode == CliMode.Codex ? pane.CodexAccountId : "",
+                    ClaudeApiProfileId = pane.ClaudeRestoreProfileId,
+                    UseWindowClaudeProfileOnThaw = pane.CliMode == CliMode.Claude,
                     // Exclude IDs owned by every other tab in the window, so two
                     // same-cwd tabs can't freeze onto the same conversation.
                     SessionId = ResolveSessionId(pane, dir, ClaimedFor(item)),
@@ -1456,6 +1497,9 @@ namespace CCPad
 
                 var (pane, prewarmed) = await AcquirePaneAsync();
                 acquired = pane;
+                if (mode == CliMode.Claude && (Application.Current as App)?.MainWnd is MainWindow owner)
+                    pane.ClaudeApiConnection = owner.ResolveClaudeApiForLaunch(
+                        state.UseWindowClaudeProfileOnThaw ? null : state.ClaudeApiProfileId);
                 pane.RestoreStaging(state.Staging);
                 pane.RemoteProfileId = string.IsNullOrEmpty(state.RemoteProfileId)
                     ? RemoteDeviceConfig.Load().SelectedDeviceId
@@ -1663,6 +1707,7 @@ namespace CCPad
                 CliMode = mode,
                 SessionId = state.SessionId,
                 CodexAccountId = mode == CliMode.Codex ? state.CodexAccountId : "",
+                ClaudeApiProfileId = mode == CliMode.Claude ? state.ClaudeApiProfileId : null,
                 Tag = ctx.TagValue,
                 Frozen = true,
                 ForkOnThaw = state.ForkOnThaw
@@ -2221,7 +2266,7 @@ namespace CCPad
                 Icon = new FontIcon { Glyph = "\uE8C6" }
             };
             resumeClaude.Click += async (_, _) => await AddNewTab(
-                null, _defaultWorkingDir, CliMode.Claude, resumePicker: true);
+                null, CurrentLocalWorkingDir, CliMode.Claude, resumePicker: true);
             ProjectFlyout.Items.Add(resumeClaude);
 
             var resumeCodex = new MenuFlyoutItem
@@ -2230,7 +2275,7 @@ namespace CCPad
                 Icon = new FontIcon { Glyph = "\uE8C6" }
             };
             resumeCodex.Click += async (_, _) => await AddNewTab(
-                null, _defaultWorkingDir, CliMode.Codex, resumePicker: true);
+                null, CurrentLocalWorkingDir, CliMode.Codex, resumePicker: true);
             ProjectFlyout.Items.Add(resumeCodex);
 
             if (_projects.Count > 0)
@@ -2253,6 +2298,14 @@ namespace CCPad
 
                 var openCodex = new MenuFlyoutItem { Text = Loc.T("proj_open_codex"), Icon = new FontIcon { Glyph = "\uE756" } };
                 openCodex.Click += async (_, _) => await AddNewTab(entry.Name, entry.Path, CliMode.Codex);
+
+                var resumeProjectClaude = new MenuFlyoutItem { Text = Loc.T("proj_resume_claude"), Icon = new FontIcon { Glyph = "\uE8C6" } };
+                resumeProjectClaude.Click += async (_, _) => await AddNewTab(
+                    entry.Name, entry.Path, CliMode.Claude, resumePicker: true, resumeAllProjects: false);
+
+                var resumeProjectCodex = new MenuFlyoutItem { Text = Loc.T("proj_resume_codex"), Icon = new FontIcon { Glyph = "\uE8C6" } };
+                resumeProjectCodex.Click += async (_, _) => await AddNewTab(
+                    entry.Name, entry.Path, CliMode.Codex, resumePicker: true, resumeAllProjects: false);
 
                 var openInExplorer = new MenuFlyoutItem
                 {
@@ -2291,6 +2344,9 @@ namespace CCPad
                 var subFlyout = new MenuFlyout();
                 subFlyout.Items.Add(openClaude);
                 subFlyout.Items.Add(openCodex);
+                subFlyout.Items.Add(new MenuFlyoutSeparator());
+                subFlyout.Items.Add(resumeProjectClaude);
+                subFlyout.Items.Add(resumeProjectCodex);
                 subFlyout.Items.Add(new MenuFlyoutSeparator());
                 subFlyout.Items.Add(openInExplorer);
                 subFlyout.Items.Add(new MenuFlyoutSeparator());
@@ -2504,10 +2560,8 @@ namespace CCPad
 
         private async Task CopyExternalOnboardingPromptAsync()
         {
-            const string skillPath = @"D:\CC Pad\.agents\skills\ccpad-onboard-linux-device\SKILL.md";
             string prompt =
                 "请使用 $ccpad-onboard-linux-device 帮我将一台 Linux SSH 设备接入 CC Pad。\r\n" +
-                $"Skill 文件：{skillPath}\r\n\r\n" +
                 "接入方式：优先使用快速自动配置；如果不能自动写入，再返回半手动配置清单。\r\n" +
                 "IP/主机：<请填写>\r\n" +
                 "SSH 用户：root\r\n" +
@@ -2839,6 +2893,7 @@ namespace CCPad
                         CliMode = frozen.CliMode,
                         SessionId = frozen.SessionId,
                         CodexAccountId = frozen.CodexAccountId,
+                        ClaudeApiProfileId = frozen.ClaudeApiProfileId,
                         Tag = ctx.TagValue,
                         Frozen = true,
                         CustomWidth = CustomWidthOf(tvi)
@@ -2887,6 +2942,7 @@ namespace CCPad
                     CliMode = pane?.CliMode ?? "",
                     SessionId = sessionId,
                     CodexAccountId = pane?.CliMode == CliMode.Codex ? pane.CodexAccountId : "",
+                    ClaudeApiProfileId = pane?.ClaudeRestoreProfileId,
                     Tag = ctx?.TagValue ?? pane?.TabTag ?? "",
                     CustomWidth = CustomWidthOf(tvi)
                 });
@@ -3002,12 +3058,13 @@ namespace CCPad
                 {
                     if (i == 0)
                         await AddFirstTab(name, dir, mode, session, tag, remoteProfile, remoteDir,
-                            codexAccountId: CodexQuotaProfileStore.DefaultId, staging: s.Staging);
+                            codexAccountId: CodexQuotaProfileStore.DefaultId, staging: s.Staging, claudeApiProfileId: s.ClaudeApiProfileId);
                     else
                         await AddNewTab(name, dir, mode, session, tag, remoteProfile, remoteDir,
-                            codexAccountId: CodexQuotaProfileStore.DefaultId, staging: s.Staging);
+                            codexAccountId: CodexQuotaProfileStore.DefaultId, staging: s.Staging, claudeApiProfileId: s.ClaudeApiProfileId);
                 }
-                catch (InvalidOperationException ex) when (ResolveCliMode(mode) == CliMode.Codex && session != null)
+                catch (InvalidOperationException ex) when ((ResolveCliMode(mode) == CliMode.Codex && session != null) ||
+                    ResolveCliMode(mode) == CliMode.Claude)
                 {
                     s.Frozen = true;
                     AddFrozenTab(s);

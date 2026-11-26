@@ -11,11 +11,15 @@ namespace CCPad.Terminal
     public sealed record CodexTurnObservation(
         CodexTurnActivity Activity,
         DateTimeOffset At,
-        string? Error = null)
+        string? Error = null,
+        string? TurnId = null)
     {
         // An earlier completion must never release a command submitted after it.
         public bool CanApplyAfter(DateTime lastSubmissionUtc) =>
             lastSubmissionUtc == DateTime.MinValue || At.UtcDateTime >= lastSubmissionUtc;
+
+        public bool CanAbort(string expectedTurnId) => Activity == CodexTurnActivity.Working &&
+            !string.IsNullOrWhiteSpace(TurnId) && TurnId == expectedTurnId;
     }
 
     /// <summary>
@@ -50,8 +54,9 @@ namespace CCPad.Terminal
                     if (DateTime.UtcNow < _nextFindUtc) return null;
                     _nextFindUtc = DateTime.UtcNow.AddSeconds(10);
                     if (!Directory.Exists(_sessionsDirectory)) return null;
-                    _path = Directory.EnumerateFiles(_sessionsDirectory,
-                        "rollout-*-" + _sessionId + ".jsonl", SearchOption.AllDirectories).FirstOrDefault();
+                    var matches = Directory.EnumerateFiles(_sessionsDirectory,
+                        "rollout-*-" + _sessionId + ".jsonl", SearchOption.AllDirectories).Take(2).ToArray();
+                    _path = matches.Length == 1 ? matches[0] : null;
                     if (_path == null) return null;
                 }
 
@@ -71,6 +76,33 @@ namespace CCPad.Terminal
                 _writeUtc = info.LastWriteTimeUtc;
                 _cached = observation;
                 return observation;
+            }
+            catch { return null; }
+        }
+
+        public CodexTurnObservation? ReadForAbort()
+        {
+            var observation = Read();
+            if (observation == null || _path == null) return null;
+            try
+            {
+                using var stream = new FileStream(_path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                using var header = new MemoryStream();
+                for (int i = 0; i < 65536; i++)
+                {
+                    int value = stream.ReadByte();
+                    if (value < 0) return null;
+                    if (value == '\n')
+                    {
+                        using var meta = JsonDocument.Parse(header.ToArray());
+                        var root = meta.RootElement;
+                        if (root.GetProperty("type").GetString() != "session_meta") return null;
+                        var id = root.GetProperty("payload").GetProperty("id").GetString();
+                        return Guid.TryParse(id, out var uuid) && uuid.ToString("D") == _sessionId ? observation : null;
+                    }
+                    header.WriteByte((byte)value);
+                }
+                return null;
             }
             catch { return null; }
         }
@@ -117,7 +149,9 @@ namespace CCPad.Terminal
                             {
                                 error = message.GetString();
                             }
-                            return new CodexTurnObservation(activity.Value, at, error);
+                            var turnId = payload.TryGetProperty("turn_id", out var turn) && turn.ValueKind == JsonValueKind.String
+                                ? turn.GetString() : null;
+                            return new CodexTurnObservation(activity.Value, at, error, turnId);
                         }
                     }
                 }

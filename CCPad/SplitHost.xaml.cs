@@ -99,6 +99,9 @@ namespace CCPad
                 ForEachPanel(_root, p => p.RefreshLocalizedUi());
         }
 
+        internal void RefreshClaudeTabTitles()
+            => ForEachPanel(_root, panel => panel.RefreshClaudeTabTitles());
+
         // ── Split / Close / Navigate ────────────────────────────────────
 
         public async Task SplitPanel(TabPanel source, SplitOrientation orientation)

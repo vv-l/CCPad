@@ -28,6 +28,9 @@ namespace CCPad
         private ConPtySession? _session;
         private bool _disposed;
         private bool _awaitingRestart;
+        internal CCPad.CodexQuota.ClaudeApiConnection? ClaudeApiConnection { get; set; }
+        internal string? ClaudeGitBash { get; set; }
+        internal string? ClaudeRestoreProfileId => CliMode == Settings.CliMode.Claude ? ClaudeApiConnection?.ProfileId ?? "" : null;
         private bool _inShell;
         // Plain CLI resume command for the current dropped-to-cmd state, or null
         // when there's nothing to resume (not in shell / no session file). Used
@@ -148,6 +151,19 @@ namespace CCPad
         public event Action? PaneFocused;
         public event Action<double, double>? ContextMenuRequested;
 
+        // Opt in only when a remote client translates swipes into left-button
+        // drags. Real touch is handled automatically; ordinary mouse selection
+        // stays unchanged. Keep the choice across this pane's WebView recovery.
+        public bool RemoteScrollOn { get; private set; }
+
+        public void SetRemoteScroll(bool on)
+        {
+            if (_disposed) return;
+            RemoteScrollOn = on;
+            string json = JsonSerializer.Serialize(new { type = "setRemoteScroll", on });
+            WebView.CoreWebView2?.PostWebMessageAsString(json);
+        }
+
         /// <summary>Raised (on the UI thread) when the tab status light should change.</summary>
         public event Action<TerminalPane>? StatusChanged;
         /// <summary>Raised (on the UI thread) when a toast asks to reveal this pane's tab.</summary>
@@ -157,6 +173,16 @@ namespace CCPad
         // its prompt waiting for you. Green means the AI is actively working.
         private PaneStatus _status = PaneStatus.Waiting;
         public PaneStatus Status => _status;
+        internal bool FeishuInputOwned { get; set; }
+
+        internal void AcquireFeishuInput()
+        {
+            if (_disposed || _status != PaneStatus.Waiting || _automationSendInFlight ||
+                Interlocked.CompareExchange(ref _stagedSubmitCts, null, null) != null)
+                throw new InvalidOperationException("Wait for the current turn before connecting Feishu");
+            FeishuInputOwned = true;
+            ResetAutoConfirmState();
+        }
 
         // Self-correction for a stale amber light in a hookless/legacy session.
         // A dropped or old callback can leave us Waiting mid-turn, with nothing to
@@ -257,6 +283,7 @@ namespace CCPad
             {
                 entry.CliMode = CliMode;
                 entry.CliSessionId = SessionId;
+                entry.SessionProvenance = SessionProvenance;
                 entry.CodexAccountId = CodexAccountId;
                 entry.RemoteProfileId = RemoteProfileId;
                 entry.RemoteWorkingDir = RemoteWorkingDir;
@@ -615,17 +642,11 @@ namespace CCPad
         private void SendStagedInput(string data, int settleMs, long requestId, bool bracketedPaste)
         {
             if (_disposed || data.Length == 0) return;
-            // A fatal CLI/API banner leaves the process alive at its prompt, but
-            // it cannot accept the next queued task safely. Put the item back in
-            // the page queue and require a manual retry (or the configured
-            // capacity shortcut) before staging can continue.
-            if (_apiErrored)
+            if (FeishuInputOwned)
             {
-                NotifyStagedInputFailure(data, "terminal_error", requestId);
-                SendPaneStatus();
+                NotifyStagedInputFailure(data, "not_ready", requestId);
                 return;
             }
-
             var session = _session;
             if (session == null)
             {
@@ -635,7 +656,7 @@ namespace CCPad
 
             // The page may have made its decision from an old waiting snapshot.
             // Recheck here before any copy-mode key, paste, or Enter reaches PTY.
-            if (_status != PaneStatus.Waiting || _automationSendInFlight ||
+            if (!IsStagedInputIdle || _automationSendInFlight ||
                 _autoConfirmTimer != null || _autoReplyPending != null)
             {
                 NotifyStagedInputFailure(data, "not_ready", requestId);
@@ -691,11 +712,6 @@ namespace CCPad
                     NotifyStagedInputFailure(data, "session_changed", requestId);
                     return;
                 }
-                if (_apiErrored)
-                {
-                    NotifyStagedInputFailure(data, "terminal_error", requestId);
-                    return;
-                }
                 phase = "text_write";
                 if (!session.TryWriteInput(StagedInputProtocol.Paste(data, bracketedPaste)))
                 {
@@ -711,16 +727,15 @@ namespace CCPad
                     NotifyStagedInputFailure(data, "session_changed", requestId);
                     return;
                 }
-                if (_apiErrored)
-                {
-                    NotifyStagedInputFailure(data, "terminal_error", requestId);
-                    return;
-                }
-
                 _lastUserInputUtc = DateTime.UtcNow;
                 OnRealSubmitResetAutoReply();
-                if (_status == PaneStatus.Waiting && !_apiErrored)
+                // Submitting a queued entry is the same handoff as pressing
+                // Enter manually, including recovery from a CLI/API error.
+                if (_status == PaneStatus.Waiting || _apiErrored)
+                {
+                    _apiErrored = false;
                     SetStatus(PaneStatus.Working, explicitTransition: true);
+                }
                 phase = "enter_write";
                 if (!session.TryWriteInput(StagedInputProtocol.Submit(nativeCodex)))
                 {
@@ -784,6 +799,12 @@ namespace CCPad
             DispatcherQueue.TryEnqueue(() => WebView.CoreWebView2?.PostWebMessageAsString(json));
         }
 
+        // An API error leaves a live CLI at its prompt. Its error indicator must
+        // not block queued input; a genuinely disconnected session still waits.
+        private bool IsStagedInputIdle => _status == PaneStatus.Waiting ||
+            (_status == PaneStatus.Disconnected && _apiErrored &&
+             _session != null && !_awaitingRestart);
+
         /// <summary>Push the current pane status to the xterm front-end (for command staging).</summary>
         private void SendPaneStatus()
         {
@@ -794,7 +815,7 @@ namespace CCPad
             DispatcherQueue.TryEnqueue(() =>
             {
                 if (_disposed) return;
-                string s = _status switch
+                string s = IsStagedInputIdle ? "waiting" : _status switch
                 {
                     PaneStatus.Working => "working",
                     PaneStatus.Waiting => "waiting",
@@ -842,7 +863,9 @@ namespace CCPad
             // claude relaunched from the fallback shell — the --session-id assigned
             // at launch goes stale in all of those, and a stale ID makes the next
             // restore silently start a fresh conversation.
-            if (!string.IsNullOrEmpty(cliSessionId) &&
+            if (CliMode == Settings.CliMode.Codex && Guid.TryParse(cliSessionId, out _))
+                ConfirmCodexSession(cliSessionId!, "official_notify");
+            else if (!string.IsNullOrEmpty(cliSessionId) &&
                 !string.Equals(cliSessionId, SessionId, StringComparison.OrdinalIgnoreCase))
                 SessionId = cliSessionId;
 
@@ -934,6 +957,7 @@ namespace CCPad
                 _sessionId = value;
                 if (CliMode == Settings.CliMode.Codex && CodexHome != null && value != null)
                     TryClaimCodexSession(CodexHome, value);
+                SessionProvenance = "";
                 SyncWebSessionMetadata(notify: true);
             }
         }
@@ -945,6 +969,64 @@ namespace CCPad
             !_awaitingRestart && (!_inShell || _shellCliActive);
         internal void ConfirmObservationSession(string? sessionId)
             => ObservationSessionId = Guid.TryParse(sessionId, out var id) ? id.ToString("D") : null;
+        public string SessionProvenance { get; private set; } = "";
+        private string? _confirmedResumeForNextLaunch;
+
+        internal void PrepareConfirmedCodexResume(string sessionId)
+        {
+            ConfirmCodexSession(sessionId, "explicit_resume");
+            _confirmedResumeForNextLaunch = sessionId;
+        }
+
+        internal void ConfirmCodexSession(string sessionId, string provenance)
+        {
+            if (!Guid.TryParse(sessionId, out var id) ||
+                provenance is not ("official_notify" or "explicit_resume"))
+                throw new InvalidOperationException("Invalid confirmed Codex identity");
+            if (string.Equals(_sessionId, id.ToString("D"), StringComparison.OrdinalIgnoreCase) &&
+                SessionProvenance is "official_notify" or "explicit_resume") return;
+            SessionId = id.ToString("D");
+            SessionProvenance = provenance;
+            SyncWebSessionMetadata(notify: true);
+        }
+
+        private Func<string, string, string, string?, Task<BoundInputResult>> CreateBoundInputWriter(
+            ConPtySession session, string? home)
+        {
+            return (text, expectedSession, expectedProvenance, expectedTurn) =>
+            {
+                var completion = new TaskCompletionSource<BoundInputResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+                if (!DispatcherQueue.TryEnqueue(() =>
+                {
+                    try
+                    {
+                        // Validate and write in one dispatcher turn; no pre-check/PTY race.
+                        if (_disposed || _inShell || !ReferenceEquals(_session, session) ||
+                            !ReferenceEquals(TerminalSessionRegistry.Get(PaneId)?.Session, session) ||
+                            CliMode != Settings.CliMode.Codex ||
+                            !string.Equals(CodexHome, home, StringComparison.OrdinalIgnoreCase) ||
+                            !string.Equals(SessionId, expectedSession, StringComparison.OrdinalIgnoreCase) ||
+                            SessionProvenance != expectedProvenance)
+                            completion.TrySetResult(new(false, false));
+                        else
+                        {
+                            if (expectedTurn != null)
+                            {
+                                var observed = new CodexTurnActivityReader(home!, expectedSession).ReadForAbort();
+                                if (text != "\x03" || observed?.CanAbort(expectedTurn) != true)
+                                {
+                                    completion.TrySetResult(new(false, false));
+                                    return;
+                                }
+                            }
+                            completion.TrySetResult(new(true, session.TryWriteInput(text)));
+                        }
+                    }
+                    catch { completion.TrySetResult(new(true, false)); }
+                })) completion.TrySetResult(new(false, false));
+                return completion.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            };
+        }
 
         /// <summary>When the CLI process was started — used to scope the Codex
         /// session-file scan to files this pane could have produced.</summary>
@@ -1062,8 +1144,10 @@ namespace CCPad
                 stageStatusWaiting = Localization.Loc.T("stage_status_waiting"),
                 stageStatusWorking = Localization.Loc.T("stage_status_working"),
                 stageStatusDisconnected = Localization.Loc.T("stage_status_disc"),
-                stageSendFailed = Localization.Loc.T("stage_status_disc"),
+                stageSendFailed = Localization.Loc.T("stage_send_failed"),
                 stageRecoveryPaused = Localization.Loc.T("stage_recovery_paused"),
+                stageInterrupted = Localization.Loc.T("stage_interrupted"),
+                stageResume = Localization.Loc.T("stage_resume"),
                 stageBulkToggle = Localization.Loc.T("stage_bulk_toggle"),
                 stageQueued = Localization.Loc.T("stage_queued"),
                 stageEmpty = Localization.Loc.T("stage_empty"),
@@ -1253,8 +1337,31 @@ namespace CCPad
             {
                 if (_disposed) return;
                 App.LogDiag($"webview2 ProcessFailed pane={PaneId} kind={args.ProcessFailedKind}");
+                if (args.ProcessFailedKind == CoreWebView2ProcessFailedKind.RenderProcessUnresponsive)
+                {
+                    // A busy renderer can recover before this event is handled.
+                    // Reloading it unconditionally discards xterm scrollback and
+                    // makes a brief stall look like a permanently stuck scrollbar.
+                    var failedPage = _readyTcs;
+                    bool responsive = await PingAsync(2000);
+                    // Another recovery (or disposal) may have replaced this page
+                    // while the probe was pending. Do not reload its replacement.
+                    if (_disposed || !ReferenceEquals(failedPage, _readyTcs)) return;
+                    if (responsive)
+                    {
+                        App.LogDiag($"webview2 responsive pane={PaneId} history=preserved");
+                        return;
+                    }
+                }
                 switch (args.ProcessFailedKind)
                 {
+                    case CoreWebView2ProcessFailedKind.GpuProcessExited:
+                        // WebView2 recreates its GPU process automatically. The
+                        // terminal renderer and its scrollback remain valid;
+                        // offering a reload here needlessly discards that history.
+                        App.LogDiag($"webview2 gpu-recovering pane={PaneId} history=preserved");
+                        break;
+
                     case CoreWebView2ProcessFailedKind.RenderProcessExited:
                     case CoreWebView2ProcessFailedKind.RenderProcessUnresponsive:
                     case CoreWebView2ProcessFailedKind.FrameRenderProcessExited:
@@ -1322,6 +1429,18 @@ namespace CCPad
             ErrorOverlay.Visibility = Visibility.Collapsed;
             try
             {
+                var failedPage = _readyTcs;
+                bool responsive = await PingAsync(2000);
+                if (_disposed || !ReferenceEquals(failedPage, _readyTcs)) return;
+                if (responsive)
+                {
+                    // The runtime may have recovered while the error overlay was
+                    // visible. Reuse the live page rather than erase scrollback.
+                    Refit();
+                    FocusTerminal();
+                    App.LogDiag($"webview2 retry-responsive pane={PaneId} history=preserved");
+                    return;
+                }
                 await PrewarmAsync();
                 OnPageRecovered();
             }
@@ -1405,6 +1524,10 @@ namespace CCPad
 
         private void StartSession()
         {
+            SessionProvenance = CliMode == Settings.CliMode.Codex
+                ? FeishuSessionBinding.ProvenanceAfterLaunch(SessionId, _confirmedResumeForNextLaunch) : "";
+            _confirmedResumeForNextLaunch = null;
+            SyncWebSessionMetadata(notify: true);
             _sessionPending = false;
             ConfirmObservationSession(CliMode == Settings.CliMode.Codex ? ExtractCodexResumeId(_command) : null);
             CancelStagedSubmit();
@@ -1439,14 +1562,19 @@ namespace CCPad
             try
             {
                 _cliStartedUtc = DateTime.UtcNow;
-                IReadOnlyDictionary<string, string>? environment =
-                    string.Equals(CliMode, Settings.CliMode.Codex, StringComparison.OrdinalIgnoreCase) &&
-                    !string.IsNullOrWhiteSpace(CodexHome)
-                        ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-                        {
-                            ["CODEX_HOME"] = CodexHome!
-                        }
-                        : null;
+                var environment = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                if (CliMode == Settings.CliMode.Claude && ClaudeGitBash != null)
+                    environment["CLAUDE_CODE_GIT_BASH_PATH"] = ClaudeGitBash;
+                if (string.Equals(CliMode, Settings.CliMode.Claude, StringComparison.OrdinalIgnoreCase) && ClaudeApiConnection != null)
+                    foreach (var pair in ClaudeApiConnection.CreateEnvironment()) environment[pair.Key] = pair.Value;
+                if (string.Equals(CliMode, Settings.CliMode.Codex, StringComparison.OrdinalIgnoreCase) &&
+                    !string.IsNullOrWhiteSpace(CodexHome))
+                    environment["CODEX_HOME"] = CodexHome!;
+                if (string.Equals(CliMode, Settings.CliMode.Claude, StringComparison.OrdinalIgnoreCase) &&
+                    Settings.CliMode.ClaudeNativeDirectory() is string nativeDir)
+                    // This is private to the pane and its fallback shell. A manually
+                    // typed `claude --resume` must not re-enter the legacy npm shim.
+                    environment["PATH"] = nativeDir + ";" + Environment.GetEnvironmentVariable("PATH");
                 _session = ConPtySession.Start(_command, _cols, _rows, _workingDir, environment);
                 _session.OutputReceived += OnOutput;
                 _session.InputSending += OnSessionInputSending;
@@ -1460,13 +1588,15 @@ namespace CCPad
                     WorkingDir = _workingDir,
                     CliMode = CliMode,
                     CliSessionId = SessionId,
+                    SessionProvenance = SessionProvenance,
                     CodexAccountId = CodexAccountId,
                     RemoteProfileId = RemoteProfileId,
                     RemoteWorkingDir = RemoteWorkingDir,
                     Status = BridgeStatus(_status),
                     LaunchedAtUtc = LaunchedAtUtc,
                     LastActivityUtc = LastActivityUtc,
-                    Session = _session
+                    Session = _session,
+                    WriteBoundInputAsync = CreateBoundInputWriter(_session, CodexHome)
                 });
                 TerminalSessionRegistry.NotifyChanged();
 
@@ -1880,7 +2010,7 @@ namespace CCPad
                 // which conversation this pane owns. Keep that id through the
                 // next snapshot instead of letting a same-cwd disk scan choose a
                 // newer sibling session that happened to receive a later write.
-                SessionId = explicitSessionId;
+                ConfirmCodexSession(explicitSessionId, "explicit_resume");
                 ConfirmObservationSession(explicitSessionId);
                 ShellRelaunchUtc = null;
             }
@@ -1888,6 +2018,8 @@ namespace CCPad
             {
                 ShellRelaunchUtc = DateTime.UtcNow;
                 ConfirmObservationSession(null);
+                SessionProvenance = "";
+                SyncWebSessionMetadata(notify: true);
             }
             // The ↑ resume offer is stale now — a later ↑ must reach the CLI
             // (prompt history), not paste a resume command into its input box.
@@ -2174,7 +2306,7 @@ namespace CCPad
             _automationSendInFlight = true;
             try
             {
-                if (_autoConfirm && _session != null && !_disposed &&
+                if (_autoConfirm && _session != null && !_disposed && !FeishuInputOwned &&
                     Interlocked.CompareExchange(ref _stagedSubmitCts, null, null) == null)
                 {
                     // Flip green before writing so command staging cannot enter
@@ -2328,6 +2460,7 @@ namespace CCPad
         // panes get the F12 copy-mode-exit prefix, mirroring the staged flush.
         private void FireAutoReplyNow(Settings.AutoReplyRule rule)
         {
+            if (FeishuInputOwned) return;
             var session = _session;
             if (session == null || _disposed || _inShell || _awaitingRestart ||
                 !Settings.AutoReplyManager.IsOn)
@@ -2353,9 +2486,8 @@ namespace CCPad
                 }
                 if (IsCodexCapacityRule(rule))
                 {
-                    // Do not let a maxed-out capacity retry leave the staging
-                    // queue in an apparently idle state. The next item must wait
-                    // for a deliberate manual retry/model change.
+                    // Keep the capacity error indicator after this rule reaches
+                    // its retry cap. Queued input has its own readiness gate.
                     _apiErrored = true;
                     SetStatus(PaneStatus.Disconnected);
                 }
@@ -2463,9 +2595,9 @@ namespace CCPad
                 //
                 // Don't rely on Claude having printed its own "claude --resume
                 // <id>" banner: on an abnormal exit (API error / crash / idle
-                // disconnect) it never gets the chance. Instead, look up the
-                // latest session file on disk ourselves and print the exact
-                // resume command, so recovery works even when Claude died hard.
+                // disconnect) it never gets the chance. Use this pane's tracked
+                // conversation ID to print the exact resume command, so recovery
+                // cannot switch to a newer conversation in another tab.
                 _inShell = true;
                 _shellCliActive = false;
                 _shellLineBuf = "";
@@ -2505,9 +2637,8 @@ namespace CCPad
 
         /// <summary>
         /// Build the gray banner shown when the CLI exits and we drop to cmd.
-        /// For Claude, append the exact "claude --resume &lt;id&gt;" command by
-        /// reading the latest session file from disk, since an abnormal exit
-        /// won't have printed Claude's own banner.
+        /// For Claude, use the conversation ID tracked at launch and by hooks.
+        /// If it is unknown, offer the picker instead of guessing by file recency.
         /// </summary>
         private string BuildExitBanner()
         {
@@ -2548,67 +2679,23 @@ namespace CCPad
             // clean; only the typed/↑-recalled command carries the --settings arg.
             string settings = CliNotify.ClaudeSettingsArg(PaneId);
             string claude = settings.Length > 0 ? "claude " + settings : "claude";
+            if (ClaudeGitBash != null) claude += " " + Settings.ClaudeGrepShell.LogSearchArgs;
 
-            var id = FindLatestClaudeSessionId();
+            var id = Guid.TryParse(SessionId, out var sessionId) ? sessionId.ToString("D") : null;
             if (id == null)
             {
-                // No session file found — still point the user at --continue.
-                _resumeCommand = claude + " --continue";
+                // No confirmed target: let the user choose. --continue or a
+                // newest-file scan can silently select a sibling pane's session.
+                _resumeCommand = claude + " --resume";
                 return head +
-                    "\x1b[36mResume the last conversation:\x1b[0m \x1b[33mclaude --continue\x1b[0m" +
+                    "\x1b[36mChoose a Claude conversation:\x1b[0m \x1b[33mclaude --resume\x1b[0m" +
                     "  \x1b[90m(or press ↑)\x1b[0m\r\n";
             }
 
             _resumeCommand = claude + " --resume " + id;
             return head +
                 "\x1b[36mResume this conversation:\x1b[0m \x1b[33mclaude --resume " + id + "\x1b[0m" +
-                "  \x1b[90m(or: claude --continue, or press ↑)\x1b[0m\r\n";
-        }
-
-        /// <summary>
-        /// Find the most recently written Claude session id for the pane's
-        /// working directory. Claude stores transcripts under
-        /// %USERPROFILE%\.claude\projects\&lt;encoded-cwd&gt;\&lt;session-id&gt;.jsonl,
-        /// where the cwd is encoded by replacing every non-[A-Za-z0-9] char
-        /// with '-' (non-collapsing). Returns null on any failure.
-        /// </summary>
-        private string? FindLatestClaudeSessionId()
-        {
-            try
-            {
-                if (string.IsNullOrEmpty(_workingDir)) return null;
-
-                string dir = System.IO.Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                    ".claude", "projects", EncodeProjectDir(_workingDir));
-                if (!System.IO.Directory.Exists(dir)) return null;
-
-                string? latest = null;
-                DateTime latestTime = DateTime.MinValue;
-                foreach (var f in System.IO.Directory.GetFiles(dir, "*.jsonl"))
-                {
-                    var t = System.IO.File.GetLastWriteTimeUtc(f);
-                    if (t > latestTime) { latestTime = t; latest = f; }
-                }
-                return latest == null ? null : System.IO.Path.GetFileNameWithoutExtension(latest);
-            }
-            catch { return null; }
-        }
-
-        /// <summary>
-        /// Encode a working directory the way Claude Code names its project
-        /// folders: every character that is not an ASCII letter or digit becomes
-        /// '-'. Dashes are NOT collapsed (e.g. "C:\Users" -> "C--Users").
-        /// </summary>
-        private static string EncodeProjectDir(string path)
-        {
-            var sb = new StringBuilder(path.Length);
-            foreach (char c in path)
-            {
-                bool ascii = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
-                sb.Append(ascii ? c : '-');
-            }
-            return sb.ToString();
+                "  \x1b[90m(or press ↑)\x1b[0m\r\n";
         }
 
         private void SendOutput(byte[] data)
@@ -2644,6 +2731,11 @@ namespace CCPad
             // Queue the banner before starting cmd.exe. Otherwise cmd's first
             // prompt can race the banner and paint its input on top of the
             // recovery command, especially on the first exit.
+            // A crashed TUI may leave mouse/focus reporting and application cursor
+            // mode enabled. cmd treats those reports as command text.
+            SendOutput(Encoding.UTF8.GetBytes(
+                "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l" +
+                "\x1b[?1004l\x1b[?2004l\x1b[?1l"));
             SendOutput(banner);
             await Task.Delay(120).ConfigureAwait(true);
             if (_disposed || !_inShell || !ReferenceEquals(_session, session)) return;
@@ -2690,6 +2782,7 @@ namespace CCPad
                         }
                         _readyTcs?.TrySetResult();
                         SendPageLocale();
+                        SetRemoteScroll(RemoteScrollOn);
                         if (_sessionPending)
                         {
                             StartSession();
@@ -2735,6 +2828,11 @@ namespace CCPad
                         break;
 
                     case "input":
+                        if (FeishuInputOwned)
+                        {
+                            ShowNotice(Localization.Loc.T("feishu_desktop_input_locked"));
+                            break;
+                        }
                         string data = doc.RootElement.GetProperty("data").GetString() ?? "";
                         string? inputOrigin = doc.RootElement.TryGetProperty("source", out var inputSource) &&
                             inputSource.ValueKind == JsonValueKind.String ? inputSource.GetString() : null;
@@ -2747,6 +2845,8 @@ namespace CCPad
                             // Focus notifications, terminal replies and scrolling
                             // must not cancel the pending Enter. Actual typing,
                             // paste, editing keys and Escape still take ownership.
+                            if (Interlocked.CompareExchange(ref _stagedSubmitCts, null, null) != null)
+                                App.LogDiag($"staged-input pane={PaneId} phase=cancel outcome=interactive_input source={(inputOrigin == "keyboard" ? "keyboard" : "other")}");
                             CancelStagedSubmit();
                             _lastUserInputUtc = DateTime.UtcNow;
                             _lastRealInputUtc = DateTime.UtcNow;
@@ -2852,7 +2952,10 @@ namespace CCPad
                         // Windows launcher instead, so a normal click opens the
                         // user's default browser without an in-pane prompt.
                         string link = doc.RootElement.GetProperty("url").GetString() ?? "";
-                        if (TryParseBrowserUri(TrimRemoteBrowserUrl(link), out var linkUri))
+                        // Explicit link targets have already been resolved by
+                        // the frontend. Trimming prose punctuation here corrupts
+                        // valid paths such as /Topic_(one) and query values.
+                        if (TryParseBrowserUri(link, out var linkUri))
                         {
                             DispatcherQueue.TryEnqueue(() => _ = OpenLocalBrowserAsync(linkUri));
                         }
@@ -3043,6 +3146,16 @@ namespace CCPad
                 html, body { width: 100%; height: 100%; background: #0c0c0c; overflow: clip; }
                 body { display: flex; flex-direction: column; position: relative; }
                 #terminal { width: 100%; flex: 1 1 auto; min-height: 0; overflow: hidden; }
+                /* Own vertical touch panning, but leave native pinch zoom enabled.
+                   Limit this to the screen: staging editors and scrollbars keep
+                   their normal gestures. */
+                #terminal .xterm-screen { touch-action: pinch-zoom; }
+                /* Text rows are redrawn during scroll. Hit the stable screen
+                   instead so a touch stream never targets a detached span.
+                   xterm's selection and link handlers use screen coordinates. */
+                #terminal .xterm-rows { pointer-events: none; }
+                #terminal.remote-scroll-enabled .xterm-screen { cursor: grab; }
+                #terminal.swipe-scrolling .xterm-screen { cursor: grabbing; }
                 /* Browser-style middle-button autoscroll. Keep the affordance in
                    the WebView so it never changes the PTY's measured dimensions. */
                 #terminal.middle-scroll-active,
@@ -3140,6 +3253,14 @@ namespace CCPad
                 #stage-head .dot.working { background: #4feba0; }   /* green */
                 #stage-head .dot.disconnected { background: #e05555; } /* red */
                 #stage-head .spacer { flex: 1; }
+                #stage-status { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+                #stage-resume {
+                  flex: 0 0 auto; border: 1px solid #b68b43; border-radius: 4px;
+                  background: transparent; color: #e8b860; padding: 2px 8px;
+                  font: inherit; cursor: pointer;
+                }
+                #stage-resume:hover { background: #b68b4326; }
+                #stage-resume[hidden] { display: none; }
                 #stage-list {
                   list-style: none;
                   margin: 0; padding: 2px 0;
@@ -3327,6 +3448,7 @@ namespace CCPad
                 <div id="stage-head">
                   <span class="dot" id="stage-dot"></span>
                   <span id="stage-status">等待中 · 进入等待自动发送</span>
+                  <button id="stage-resume" type="button" hidden>继续发送</button>
                   <span class="spacer"></span>
                   <span id="stage-bulk-toggle">＋ 批量导入</span>
                   <span id="stage-count">0 条待发</span>
@@ -3350,27 +3472,33 @@ namespace CCPad
               <script src="https://xterm.local/xterm-addon-fit.js"></script>
               <script src="https://xterm.local/ccpad-input-compat.js"></script>
               <script>
+                function openTerminalBrowserLink(event, text) {
+                  // Preserve context menus, middle-button scrolling and text
+                  // selection (Shift also enables selection under tmux mouse mode).
+                  if (event.button !== 0 || event.shiftKey ||
+                      (term.modes.mouseTrackingMode === 'none' && term.hasSelection())) return;
+                  try {
+                    const url = new URL(text);
+                    if ((url.protocol !== 'http:' && url.protocol !== 'https:') ||
+                        url.username || url.password) return;
+                    window.chrome.webview.postMessage(JSON.stringify({ type: 'openLink', url: url.href }));
+                  } catch (_) { /* malformed links are ignored */ }
+                }
+
                 const term = new Terminal({
                   // Keep terminal OSC-8 links clickable, but hand them to the
                   // native host. xterm's fallback handler calls confirm() and
                   // window.open(), which is both disruptive and unreliable in
                   // an embedded WebView2 (especially for LAN URLs).
-                  linkHandler: {
-                    activate: (_event, text) => {
-                      try {
-                        const url = new URL(text);
-                        if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
-                        window.chrome.webview.postMessage(JSON.stringify({
-                          type: 'openLink', url: url.href
-                        }));
-                      } catch (_) { /* malformed links are ignored */ }
-                    }
-                  },
+                  linkHandler: { activate: openTerminalBrowserLink },
                   fontFamily: "'Cascadia Code', 'Cascadia Mono', Consolas, monospace",
                   fontSize: 14,
                   lineHeight: 1.2,
                   theme: { background: '#0c0c0c' },
                   cursorBlink: true,
+                  // A background TUI leaves its cursor at the last redraw cell.
+                  // Do not paint a moving hollow cursor in unfocused panes.
+                  cursorInactiveStyle: 'none',
                   allowProposedApi: true
                 });
 
@@ -3378,45 +3506,210 @@ namespace CCPad
                 // usually contains ordinary https:// text, so provide the
                 // same click behavior for those URLs as well.  Build matches
                 // across soft-wrapped rows so long LAN links remain clickable.
+                function trimTerminalUrl(text) {
+                  // Remove surrounding prose, but keep balanced URL brackets
+                  // (including IPv6 hosts and paths such as /Topic_(one)).
+                  const opening = { ')': '(', ']': '[', '}': '{' };
+                  for (;;) {
+                    const last = text.slice(-1);
+                    if (last && /[.,;:!?]/.test(last)) {
+                      text = text.slice(0, -1);
+                    } else if (opening[last] &&
+                        text.split(last).length > text.split(opening[last]).length) {
+                      text = text.slice(0, -1);
+                    } else {
+                      return text;
+                    }
+                  }
+                }
+                const terminalUrlPattern = /https?:\/\/[^\s<>"'`，。；：！？、（）【】《》“”‘’]+/gi;
+                function readTerminalLinkRows(buffer, first, last) {
+                    const parts = [];
+                    const starts = [];
+                    const ends = [];
+                    for (let line = first; line <= last; line++) {
+                      const row = buffer.getLine(line);
+                      if (!row) break;
+                      const next = buffer.getLine(line + 1);
+                      // Match JS string offsets back to terminal cells. Chinese,
+                      // emoji and combining marks do not occupy one cell per
+                      // UTF-16 code unit. Keep row-end spaces as delimiters.
+                      for (let x = 0; x < row.length; x++) {
+                        const cell = row.getCell(x);
+                        const width = cell.getWidth();
+                        if (width === 0) continue;
+                        const chars = cell.getChars();
+                        // A wide character wrapping to the next row leaves an
+                        // unused final cell, which is not part of the text.
+                        if (!chars && x === row.length - 1 && next?.isWrapped &&
+                            next.getCell(0)?.getWidth() === 2) continue;
+                        const value = chars || ' ';
+                        parts.push(value);
+                        for (let i = 0; i < value.length; i++) {
+                          starts.push({ x: x + 1, y: line + 1 });
+                          ends.push({ x: x + width, y: line + 1 });
+                        }
+                      }
+                    }
+                    return { text: parts.join(''), starts, ends };
+                }
+                function proseWrappedTerminalLink(buffer, first, match, readRow, maxRows) {
+                    // CLI renderers also hard-wrap ordinary paragraphs, without
+                    // parentheses or underline. Only join fragments at the right
+                    // margin, with the same paragraph indent and text attributes.
+                    const head = readRow(first);
+                    const indent = head.text.search(/\S/);
+                    const style = buffer.getLine(first).getCell(head.starts[match.index].x - 1);
+                    const chunks = [];
+                    let text = '', right = 0;
+                    for (let line = first; line < first + maxRows; line++) {
+                      const row = buffer.getLine(line);
+                      if (!row || row.isWrapped) return null;
+                      const data = readRow(line);
+                      const start = line === first ? match.index : data.text.search(/\S/);
+                      if (start < 0 || (line > first && start !== indent)) return null;
+                      const rest = data.text.slice(start);
+                      if (line > first && /^[a-z][a-z0-9+.-]*:\/\//i.test(rest)) return null;
+                      const token = rest.match(/^[^\s<>"'`，。；：！？、（）【】《》“”‘’●•\u2500-\u257f]+/)?.[0];
+                      if (!token) return null;
+                      const end = start + token.length;
+                      chunks.push({ row, data, start, end, offset: text.length });
+                      text += token;
+                      const lastColumn = data.ends[end - 1].x;
+                      if (line === first) right = lastColumn;
+                      const closed = /[,;!]$/.test(text) || [[')', '('], [']', '['], ['}', '{']]
+                        .some(([close, open]) => text.split(close).length > text.split(open).length);
+                      const atMargin = lastColumn >= term.cols - 2 &&
+                        Math.abs(lastColumn - right) <= 1 && !data.text.slice(end).trim();
+                      if (atMargin && !closed) continue;
+                      if (line === first) return null;
+
+                      const target = trimTerminalUrl(text);
+                      const ranges = [];
+                      for (const chunk of chunks) {
+                        const limit = Math.min(chunk.end, chunk.start + target.length - chunk.offset);
+                        if (limit <= chunk.start) continue;
+                        for (let i = chunk.start; i < limit; i++) {
+                          const cell = chunk.row.getCell(chunk.data.starts[i].x - 1);
+                          if (cell.getFgColorMode() !== style.getFgColorMode() ||
+                              cell.getFgColor() !== style.getFgColor() ||
+                              cell.getBgColorMode() !== style.getBgColorMode() ||
+                              cell.getBgColor() !== style.getBgColor() ||
+                              cell.isBold() !== style.isBold() ||
+                              cell.isItalic() !== style.isItalic() ||
+                              cell.isUnderline() !== style.isUnderline()) return null;
+                        }
+                        ranges.push({ start: chunk.data.starts[chunk.start], end: chunk.data.ends[limit - 1] });
+                      }
+                      return { text: target, ranges };
+                    }
+                    return null;
+                }
+                function hardWrappedTerminalLinks(buffer, y) {
+                    // TUI paragraphs and tables use explicit line breaks rather
+                    // than xterm soft wraps. Recover their fragments separately.
+                    // Bound the scan so hover never walks the entire scrollback.
+                    const maxRows = 16;
+                    const rows = new Map();
+                    const readRow = line => {
+                      if (!rows.has(line)) rows.set(line, readTerminalLinkRows(buffer, line, line));
+                      return rows.get(line);
+                    };
+                    const links = [];
+                    for (let first = Math.max(0, y - maxRows); first < y; first++) {
+                      if (!buffer.getLine(first) || buffer.getLine(first).isWrapped) continue;
+                      const head = readRow(first);
+                      for (const match of head.text.matchAll(terminalUrlPattern)) {
+                        const prose = proseWrappedTerminalLink(buffer, first, match, readRow, maxRows);
+                        if (prose) {
+                          for (const range of prose.ranges.filter(s => s.start.y === y))
+                            links.push({ range, text: prose.text, activate: openTerminalBrowserLink });
+                          continue;
+                        }
+                        if (head.text[match.index - 1] !== '(') continue;
+                        const style = buffer.getLine(first).getCell(head.starts[match.index].x - 1);
+                        if (!style.isUnderline()) continue;
+                        // A table cell starts after its last border or padding
+                        // gap. A label and its opening parenthesis may precede
+                        // the URL, as in "AINAS-14294 (https://...)".
+                        const prefix = head.text.slice(0, match.index - 1);
+                        let leftOffset = 0;
+                        for (const gap of prefix.matchAll(/[|│┃]|\s{2,}/g))
+                          leftOffset = gap.index + gap[0].length;
+                        while (/\s/.test(head.text[leftOffset] || '') && leftOffset < match.index) leftOffset++;
+                        const left = head.starts[leftOffset].x;
+                        const segments = [];
+                        let url = '', depth = 1, right = term.cols;
+                        for (let line = first; line < first + maxRows; line++) {
+                          const row = buffer.getLine(line);
+                          if (!row || row.isWrapped || buffer.getLine(line + 1)?.isWrapped) break;
+                          const data = readRow(line);
+                          const start = line === first ? match.index : data.starts.findIndex(p => p.x === left);
+                          if (start < 0 || (line > first && /^https?:\/\//i.test(data.text.slice(start)))) break;
+                          if (line > first && start > 0 && !/[\s|│┃]/.test(data.text[start - 1])) break;
+                          let end = start, closed = false;
+                          for (; end < data.text.length; end++) {
+                            const char = data.text[end];
+                            // The enclosing ')' is normally unstyled. Balanced
+                            // parentheses inside the URL remain part of its path.
+                            if (char === ')' && depth === 1 && data.starts[end].x <= right + 1) {
+                              closed = true; break;
+                            }
+                            if (data.ends[end].x > right) break;
+                            if (/[\s<>"'`，。；：！？、（）【】《》“”‘’│┃]/.test(char)) break;
+                            const cell = row.getCell(data.starts[end].x - 1);
+                            if (!cell.isUnderline() || cell.getFgColorMode() !== style.getFgColorMode() ||
+                                cell.getFgColor() !== style.getFgColor()) break;
+                            if (char === '(') depth++;
+                            if (char === ')') depth--;
+                          }
+                          if (end > start) {
+                            url += data.text.slice(start, end);
+                            segments.push({ start: data.starts[start], end: data.ends[end - 1] });
+                          } else if (!closed) break;
+                          if (closed) {
+                            if (line > first) {
+                              // Separate ranges are essential: one multi-row
+                              // range would also make the right-hand column and
+                              // padding clickable in xterm's linear cell space.
+                              for (const range of segments.filter(s => s.start.y === y))
+                                links.push({ range, text: url, activate: openTerminalBrowserLink });
+                            }
+                            break;
+                          }
+                          if (line === first) right = data.ends[end - 1].x;
+                          // An unfinished fragment must reach blank cell padding,
+                          // not another label, punctuation or URL on this row.
+                          const boundary = data.ends.findIndex(p => p.x > right);
+                          const remainder = data.text.slice(end, boundary < 0 ? undefined : boundary);
+                          if (remainder.trim() || (data.text[end] && !/[\s|│┃]/.test(data.text[end]))) break;
+                        }
+                      }
+                    }
+                    return links;
+                }
                 term.registerLinkProvider({
                   provideLinks: (y, callback) => {
                     const buffer = term.buffer.active;
-                    let first = y;
+                    // The link API is 1-based; buffer.getLine/getCell are 0-based.
+                    let first = y - 1, last = y - 1;
                     while (first > 0 && buffer.getLine(first)?.isWrapped) first--;
-                    const parts = [];
-                    let last = first;
-                    for (;;) {
-                      const row = buffer.getLine(last);
-                      if (!row) break;
-                      parts.push(row.translateToString(false).replace(/\s+$/g, ''));
-                      if (!buffer.getLine(last + 1)?.isWrapped) break;
-                      last++;
-                    }
-                    const text = parts.join('');
-                    const links = [];
-                    const urlPattern = /https?:\/\/[^\s<>"'`]+/gi;
-                    let match;
-                    while ((match = urlPattern.exec(text)) !== null) {
-                      let urlText = match[0].replace(/[.,;:!?\]}]+$/g, '');
+                    while (buffer.getLine(last + 1)?.isWrapped) last++;
+                    const { text, starts, ends } = readTerminalLinkRows(buffer, first, last);
+                    const links = hardWrappedTerminalLinks(buffer, y);
+                    for (const match of text.matchAll(terminalUrlPattern)) {
+                      const urlText = trimTerminalUrl(match[0]);
                       if (!urlText) continue;
-                      const startOffset = match.index;
-                      const endOffset = startOffset + urlText.length - 1;
-                      const startRow = first + Math.floor(startOffset / term.cols);
-                      const endRow = first + Math.floor(endOffset / term.cols);
-                      if (y < startRow || y > endRow) continue;
+                      const start = starts[match.index];
+                      const end = ends[match.index + urlText.length - 1];
+                      if (y < start.y || y > end.y) continue;
+                      // A recovered fragment already carries the full target.
+                      if (links.some(link => (start.y < y || start.x <= link.range.end.x) &&
+                          (end.y > y || end.x >= link.range.start.x))) continue;
                       links.push({
-                        range: {
-                          start: { x: startOffset % term.cols, y: startRow },
-                          end: { x: endOffset % term.cols, y: endRow }
-                        },
+                        range: { start, end },
                         text: urlText,
-                        activate: (_event, linkText) => {
-                          try {
-                            const url = new URL(linkText);
-                            if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
-                            window.chrome.webview.postMessage(JSON.stringify({ type: 'openLink', url: url.href }));
-                          } catch (_) { /* malformed links are ignored */ }
-                        }
+                        activate: openTerminalBrowserLink
                       });
                     }
                     callback(links);
@@ -3452,7 +3745,7 @@ namespace CCPad
                   if (target && target.closest('#stage, #lastcmd, input, textarea, button, select')) return false;
                   return true;
                 }
-                function middleScrollLineHeight() {
+                function terminalScrollLineHeight() {
                   const row = terminalElement.querySelector('.xterm-rows > div');
                   const rectHeight = row ? row.getBoundingClientRect().height : 0;
                   if (Number.isFinite(rectHeight) && rectHeight > 0) return rectHeight;
@@ -3465,9 +3758,9 @@ namespace CCPad
                 // mouse protocol (or alternate-screen arrow fallback) reaches the
                 // CLI. Mouse reports need real screen coordinates: a WheelEvent
                 // without clientX/clientY is interpreted at the top-left cell.
-                const middleScrollWheelTarget =
+                const terminalWheelTarget =
                   terminalElement.querySelector('.xterm-screen') || terminalElement;
-                let dispatchingMiddleScrollWheel = false;
+                let terminalScrollSource = null;
                 let terminalWheelEventsInFlight = 0;
                 terminalElement.addEventListener('wheel', () => {
                   // xterm emits mouse reports or alternate-screen arrows during
@@ -3475,25 +3768,25 @@ namespace CCPad
                   terminalWheelEventsInFlight++;
                   queueMicrotask(() => terminalWheelEventsInFlight--);
                 }, true);
-                function dispatchMiddleScrollWheel(deltaLines) {
+                function dispatchTerminalScroll(deltaLines, startX, startY, source = 'wheel-scroll') {
                   if (!deltaLines) return;
                   if (term.buffer.active.type === 'normal' &&
                       term.modes.mouseTrackingMode === 'none') {
                     term.scrollLines(deltaLines);
                     return;
                   }
-                  const rect = middleScrollWheelTarget.getBoundingClientRect();
+                  const rect = terminalWheelTarget.getBoundingClientRect();
                   // Keep the report over the content where the gesture began.
                   // Dragging up across a header should still scroll that content.
-                  const clientX = Math.min(Math.max(middleScroll.startX, rect.left + 1), rect.right - 1);
-                  const clientY = Math.min(Math.max(middleScroll.startY, rect.top + 1), rect.bottom - 1);
+                  const clientX = Math.min(Math.max(startX, rect.left + 1), rect.right - 1);
+                  const clientY = Math.min(Math.max(startY, rect.top + 1), rect.bottom - 1);
                   const direction = Math.sign(deltaLines);
                   // xterm's mouse protocol sends one wheel report per event even
                   // when deltaY is large, so emit one event for each line.
                   for (let line = 0; line < Math.abs(deltaLines); line++) {
-                    dispatchingMiddleScrollWheel = true;
+                    terminalScrollSource = source;
                     try {
-                      middleScrollWheelTarget.dispatchEvent(new WheelEvent('wheel', {
+                      terminalWheelTarget.dispatchEvent(new WheelEvent('wheel', {
                         clientX, clientY,
                         deltaY: direction,
                         deltaMode: WheelEvent.DOM_DELTA_LINE,
@@ -3501,7 +3794,7 @@ namespace CCPad
                         cancelable: true
                       }));
                     } finally {
-                      dispatchingMiddleScrollWheel = false;
+                      terminalScrollSource = null;
                     }
                   }
                 }
@@ -3524,13 +3817,13 @@ namespace CCPad
                     if (Math.sign(middleScroll.partialLines) !== direction)
                       middleScroll.partialLines = 0;
                     const linesPerSecond = Math.min(
-                      80, (Math.abs(distance) - deadZone) / middleScrollLineHeight() * 5
+                      80, (Math.abs(distance) - deadZone) / terminalScrollLineHeight() * 5
                     );
                     middleScroll.partialLines += direction * linesPerSecond * seconds;
                     const lines = Math.trunc(middleScroll.partialLines);
                     if (lines !== 0) {
                       middleScroll.partialLines -= lines;
-                      dispatchMiddleScrollWheel(lines);
+                      dispatchTerminalScroll(lines, middleScroll.startX, middleScroll.startY, 'middle-scroll');
                     }
                   }
                   middleScroll.raf = requestAnimationFrame(applyMiddleScroll);
@@ -3559,6 +3852,172 @@ namespace CCPad
                   terminalElement.classList.remove('middle-scroll-active');
                   middleScrollIndicator.classList.remove('active');
                 }
+
+                /* Native one/two-finger pan plus opt-in remote left-drag pan.
+                   TouchEvent supplies both fingers together; the stable screen
+                   remains their target across terminal redraws. Let Chromium
+                   handle pinch; claim only a recognized vertical pan. */
+                let remoteScrollOn = false;
+                let terminalSwipe = null;
+                let swipeClickUntil = 0;
+                let replayingSwipeTap = false;
+                function isTerminalSwipeTarget(e) {
+                  return isMiddleScrollTarget(e) && terminalWheelTarget.contains(e.target);
+                }
+                function touchSample(touches) {
+                  const a = touches[0], b = touches[1] || a;
+                  return { x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2,
+                    span: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) };
+                }
+                function resetSwipeOrigin(sample) {
+                  Object.assign(terminalSwipe, { startX: sample.x, startY: sample.y,
+                    lastY: sample.y, span: sample.span || 0, partialLines: 0, scrolling: false });
+                }
+                function beginTerminalSwipe(e, sample, kind) {
+                  endMiddleScroll();
+                  terminalSwipe = { kind, target: e.target, tapEvent: e,
+                    pointerId: kind === 'mouse' ? e.pointerId : null,
+                    moved: false, cancelled: false };
+                  resetSwipeOrigin(sample);
+                }
+                function moveTerminalSwipe(sample) {
+                  const g = terminalSwipe;
+                  if (!g || g.cancelled) return;
+                  const dx = sample.x - g.startX, dy = sample.y - g.startY;
+                  if (Math.hypot(dx, dy) >= 8) g.moved = true;
+                  // Leave spreading/pinching fingers entirely to native zoom.
+                  // Once recognized, don't resume pan when one finger lifts.
+                  if (g.span && Math.abs(sample.span - g.span) > Math.max(12, g.span * 0.08)) {
+                    g.cancelled = true;
+                    return;
+                  }
+                  if (!g.scrolling) {
+                    if (Math.abs(dy) < 8 || Math.abs(dy) < Math.abs(dx)) return;
+                    g.scrolling = true;
+                    terminalElement.classList.add('swipe-scrolling');
+                  }
+                  // Natural scrolling: the content follows the finger. Keep
+                  // fractional rows so slow/short movements still accumulate.
+                  g.partialLines += (g.lastY - sample.y) / terminalScrollLineHeight();
+                  g.lastY = sample.y;
+                  const lines = Math.trunc(g.partialLines);
+                  if (lines) {
+                    g.partialLines -= lines;
+                    dispatchTerminalScroll(lines, g.startX, g.startY);
+                  }
+                }
+                function endTerminalSwipe(allowTap = false) {
+                  const g = terminalSwipe;
+                  if (!g) return;
+                  terminalSwipe = null;
+                  terminalElement.classList.remove('swipe-scrolling');
+                  swipeClickUntil = performance.now() + 700;
+                  if (g.pointerId !== null && terminalWheelTarget.hasPointerCapture(g.pointerId)) {
+                    try { terminalWheelTarget.releasePointerCapture(g.pointerId); } catch (_) { }
+                  }
+                  if (!allowTap || g.moved || g.cancelled || !g.target.isConnected) return;
+                  // Defer a tap's mouse reports until we know it wasn't a swipe.
+                  // Feed the usual xterm path once, preserving focus and links.
+                  term.focus();
+                  const e = g.tapEvent;
+                  replayingSwipeTap = true;
+                  try {
+                    for (const type of ['mousemove', 'mousedown', 'mouseup', 'click']) {
+                      g.target.dispatchEvent(new MouseEvent(type, {
+                        clientX: g.startX, clientY: g.startY, screenX: e.screenX, screenY: e.screenY,
+                        button: 0, buttons: type === 'mousedown' ? 1 : 0, detail: 1,
+                        ctrlKey: e.ctrlKey, altKey: e.altKey, shiftKey: e.shiftKey, metaKey: e.metaKey,
+                        view: window, bubbles: true, cancelable: true
+                      }));
+                    }
+                  } finally { replayingSwipeTap = false; }
+                }
+                document.addEventListener('pointerdown', e => {
+                  if (!terminalSwipe) swipeClickUntil = 0;
+                  if (e.pointerType === 'touch') {
+                    if (isTerminalSwipeTarget(e) || terminalSwipe?.kind === 'touch') {
+                      // Cancel only compatibility mouse events, never native
+                      // pan/zoom (which is governed by CSS touch-action).
+                      stopMiddleScrollEvent(e);
+                      endMiddleScroll();
+                    }
+                    return;
+                  }
+                  if (terminalSwipe) endTerminalSwipe();
+                  if (!remoteScrollOn || e.pointerType !== 'mouse' || e.button !== 0 ||
+                      e.shiftKey || e.ctrlKey || e.altKey || e.metaKey || !isTerminalSwipeTarget(e)) return;
+                  stopMiddleScrollEvent(e);
+                  beginTerminalSwipe(e, { x: e.clientX, y: e.clientY }, 'mouse');
+                  try { terminalWheelTarget.setPointerCapture(e.pointerId); } catch (_) { }
+                }, true);
+                document.addEventListener('pointermove', e => {
+                  if (terminalSwipe?.kind !== 'mouse' || terminalSwipe.pointerId !== e.pointerId) return;
+                  stopMiddleScrollEvent(e);
+                  if (!(e.buttons & 1)) { endTerminalSwipe(); return; }
+                  moveTerminalSwipe({ x: e.clientX, y: e.clientY });
+                }, true);
+                document.addEventListener('pointerup', e => {
+                  if (terminalSwipe?.kind !== 'mouse' || terminalSwipe.pointerId !== e.pointerId) return;
+                  stopMiddleScrollEvent(e);
+                  moveTerminalSwipe({ x: e.clientX, y: e.clientY });
+                  endTerminalSwipe(true);
+                }, true);
+                document.addEventListener('touchstart', e => {
+                  if (terminalSwipe?.kind === 'mouse') endTerminalSwipe();
+                  if (!terminalSwipe && !isTerminalSwipeTarget(e)) return;
+                  e.stopImmediatePropagation();
+                  const sample = touchSample(e.touches);
+                  if (!terminalSwipe) beginTerminalSwipe(e, sample, 'touch');
+                  else resetSwipeOrigin(sample);
+                  if (e.touches.length > 1) terminalSwipe.moved = true;
+                  if (e.touches.length > 2) terminalSwipe.cancelled = true;
+                }, { capture: true, passive: true });
+                document.addEventListener('touchmove', e => {
+                  if (terminalSwipe?.kind !== 'touch') return;
+                  e.stopImmediatePropagation();
+                  moveTerminalSwipe(touchSample(e.touches));
+                  // Chromium otherwise claims parallel two-finger movement as
+                  // viewport pan during pinch. Cancel only after recognizing a
+                  // pan; spreading fingers never enter this branch.
+                  if (e.touches.length > 1 && terminalSwipe.scrolling &&
+                      !terminalSwipe.cancelled && e.cancelable) e.preventDefault();
+                }, { capture: true, passive: false });
+                document.addEventListener('touchend', e => {
+                  if (terminalSwipe?.kind !== 'touch') return;
+                  e.stopImmediatePropagation();
+                  if (e.touches.length) {
+                    terminalSwipe.cancelled = true; // no jump as a second finger lifts
+                  } else endTerminalSwipe(true);
+                }, { capture: true, passive: true });
+                document.addEventListener('touchcancel', e => {
+                  if (terminalSwipe?.kind !== 'touch') return;
+                  e.stopImmediatePropagation();
+                  endTerminalSwipe();
+                }, { capture: true, passive: true });
+                document.addEventListener('pointercancel', e => {
+                  // A native pinch cancels pointers but TouchEvents continue;
+                  // leave those alive to recognize zoom and finish the gesture.
+                  if (terminalSwipe?.kind === 'mouse' && terminalSwipe.pointerId === e.pointerId) endTerminalSwipe();
+                }, true);
+                terminalElement.addEventListener('lostpointercapture', e => {
+                  if (terminalSwipe?.pointerId === e.pointerId) endTerminalSwipe();
+                });
+                // A cancelled pointerdown suppresses most compatibility mouse
+                // events, but click still fires. Some remote injectors also send
+                // mousemove separately: don't leak drag reports or copy a swipe.
+                for (const type of ['mousedown', 'mousemove', 'mouseup', 'click']) {
+                  document.addEventListener(type, e => {
+                    if (replayingSwipeTap || !terminalElement.contains(e.target)) return;
+                    if (type !== 'mousemove' && (e.button !== 0 || (type === 'click' && !e.detail))) return;
+                    if (terminalSwipe || performance.now() < swipeClickUntil) stopMiddleScrollEvent(e);
+                  }, true);
+                }
+                document.addEventListener('contextmenu', () => endTerminalSwipe(), true);
+                window.addEventListener('blur', () => endTerminalSwipe());
+                document.addEventListener('visibilitychange', () => {
+                  if (document.hidden) endTerminalSwipe();
+                });
+
                 document.addEventListener('pointerdown', e => {
                   if (middleScroll.active) {
                     endMiddleScroll();
@@ -3691,8 +4150,9 @@ namespace CCPad
                 document.addEventListener('wheel', e => {
                   if (!e.ctrlKey) return;
                   e.preventDefault();
+                  e.stopImmediatePropagation();
                   setFontSize(term.options.fontSize + (e.deltaY < 0 ? 1 : -1));
-                }, { passive: false });
+                }, { capture: true, passive: false });
 
                 /* ── Last-command info bar (上一条命令) ──────────────────────
                    A shadow buffer mirrors what the user types into the CLI —
@@ -3806,6 +4266,8 @@ namespace CCPad
                 const stageCount = document.getElementById('stage-count');
                 const stageDot = document.getElementById('stage-dot');
                 const stageStatus = document.getElementById('stage-status');
+                const stageResume = document.getElementById('stage-resume');
+                stageResume.addEventListener('click', () => applyStaging(true));
 
                 let pageLocale = {
                   lastCmdTitle: '点击复制全文 · Alt+L 关闭',
@@ -3814,8 +4276,10 @@ namespace CCPad
                   stageStatusWaiting: '等待中 · 空闲时发送',
                   stageStatusWorking: '工作中 · 等待空闲',
                   stageStatusDisconnected: '已断开 · 暂停发送',
-                  stageSendFailed: '发送失败 · 已放回队列，请检查终端后重试',
-                  stageRecoveryPaused: '已恢复 · 请确认发送状态，重新开启寄存后继续',
+                  stageSendFailed: '发送失败 · 请检查终端输入后继续',
+                  stageRecoveryPaused: '已暂停 · 请确认发送状态，移除已发送的条目后继续',
+                  stageInterrupted: '发送中断 · 请检查终端输入，避免重复发送',
+                  stageResume: '继续发送',
                   stageBulkToggle: '＋ 批量导入',
                   stageQueued: '待发',
                   stageEmpty: '队列为空 · 在下方输入并按 Enter',
@@ -3842,7 +4306,13 @@ namespace CCPad
                   const displayStatus = stagedInFlight && lastStatus !== 'disconnected' ? 'working' : lastStatus;
                   stageDot.className = 'dot' + (displayStatus === 'working' ? ' working'
                     : displayStatus === 'disconnected' ? ' disconnected' : '');
-                  stageStatus.textContent = stagingPaused ? pageLocale.stageRecoveryPaused : statusLabel(displayStatus);
+                  const pauseLabel = stagingPauseReason === 'interrupted' ? pageLocale.stageInterrupted :
+                    ['uncertain_delivery', 'restored'].includes(stagingPauseReason) ? pageLocale.stageRecoveryPaused :
+                    pageLocale.stageSendFailed;
+                  stageStatus.textContent = stagingPaused ? pauseLabel : statusLabel(displayStatus);
+                  stageStatus.title = stageStatus.textContent;
+                  stageResume.textContent = pageLocale.stageResume;
+                  stageResume.hidden = !stagingPaused;
                 }
                 // Index of the queue item being edited inline, or null. While an
                 // edit is open the flush machinery is PAUSED (see maybeFlush) so a
@@ -4249,6 +4719,7 @@ namespace CCPad
                   if (stagingOn) {
                     stagingPaused = false;
                     stagingPauseReason = '';
+                    clearStageHint();
                   }
                   stagePanel.classList.toggle('open', stagingOn);
                   fit.fit();
@@ -4379,7 +4850,7 @@ namespace CCPad
                     Enabled: stagingOn, Queue: queue.slice(), Draft: stageInput.value,
                     BulkOpen: bulkRow.classList.contains('open'), BulkDraft: bulkInput.value,
                     EditingIndex: editingIdx, EditingDraft: editor?.value || '',
-                    Paused: stagingPaused,
+                    Paused: stagingPaused, PauseReason: stagingPauseReason,
                     PendingCommand: stagedInFlight && !stagedInFlight.submitted ? stagedInFlight.command : null
                   };
                 }
@@ -4412,9 +4883,11 @@ namespace CCPad
                   // turn boundary is observed, the command may already have
                   // executed. Keep it visible but require an explicit resume so
                   // a renderer reload can never duplicate that command.
-                  stagingPaused = pending || !!state.Paused;
+                  // Older versions paused on CLI/API error banners. Those
+                  // pauses no longer block the queue after restoring a session.
+                  stagingPaused = pending || (!!state.Paused && state.PauseReason !== 'terminal_error');
                   stagingPauseReason = pending ? 'uncertain_delivery' :
-                    (stagingPaused ? 'restored' : '');
+                    (stagingPaused ? (state.PauseReason || 'restored') : '');
                   stageInput.value = state.Draft || '';
                   bulkInput.value = state.BulkDraft || '';
                   bulkRow.classList.toggle('open', !!state.BulkOpen);
@@ -4532,14 +5005,14 @@ namespace CCPad
                 let physicalKeyData = null;
                 term.onKey(({ key }) => { physicalKeyData = key; });
                 function sendTerminalInput(data) {
-                  const scrollInput = dispatchingMiddleScrollWheel || terminalWheelEventsInFlight > 0;
+                  const scrollInput = terminalScrollSource !== null || terminalWheelEventsInFlight > 0;
                   const physicalKey = physicalKeyData === data;
                   physicalKeyData = null;
                   if (!scrollInput)
                     shadowFeed(data);   // mouse scroll is navigation, not typed text
                   window.chrome.webview.postMessage(JSON.stringify({
                     type: 'input', data,
-                    source: dispatchingMiddleScrollWheel ? 'middle-scroll' :
+                    source: terminalScrollSource !== null ? terminalScrollSource :
                             scrollInput ? 'wheel-scroll' : physicalKey ? 'keyboard' : 'user'
                   }));
                 }
@@ -4569,14 +5042,6 @@ namespace CCPad
                     const wasPending = pendingAutomation;
                     lastStatus = msg.status;
                     pendingAutomation = !!msg.automationPending;
-                    // A capacity/API failure pauses the queue deliberately. Once
-                    // the user or the configured retry hands the pane back to the
-                    // CLI, the working transition is the explicit recovery signal.
-                    if (lastStatus === 'working' && stagingPaused &&
-                        stagingPauseReason === 'terminal_error') {
-                      stagingPaused = false;
-                      stagingPauseReason = '';
-                    }
                     if (pendingAutomation && flushTimer) {
                       clearTimeout(flushTimer); flushTimer = null;
                     }
@@ -4593,11 +5058,18 @@ namespace CCPad
                     if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
                     if (typeof msg.data === 'string' && msg.data.length)
                       queue.unshift(msg.data);
-                    stagingPaused = true;
-                    stagingPauseReason = msg.phase || 'unknown';
+                    // These host gates reject BEFORE any PTY write. Requeue and
+                    // wait for fresh readiness; they are not uncertain delivery.
+                    // All failures after a possible write still require review.
+                    const deferred = msg.phase === 'not_ready' || msg.phase === 'busy';
+                    stagingPaused = !deferred;
+                    stagingPauseReason = deferred ? '' : (msg.phase || 'unknown');
+                    if (deferred) lastStatus = 'disconnected';
                     renderQueue();
                     renderStatus();
-                    flashHint(pageLocale.stageSendFailed);
+                    if (!deferred) flashHint(stagingPauseReason === 'interrupted' ?
+                      pageLocale.stageInterrupted : pageLocale.stageSendFailed);
+                    window.chrome.webview.postMessage(JSON.stringify({ type: 'requestStatus' }));
                   } else if (msg.type === 'resumeStaging') {
                     stagingSuspended = false;
                     maybeFlush();
@@ -4607,6 +5079,10 @@ namespace CCPad
                     applyStaging(!!msg.on);
                   } else if (msg.type === 'setLastCmdBar') {
                     applyLastCmdBar(!!msg.on);
+                  } else if (msg.type === 'setRemoteScroll') {
+                    endTerminalSwipe();
+                    remoteScrollOn = !!msg.on;
+                    terminalElement.classList.toggle('remote-scroll-enabled', remoteScrollOn);
                   } else if (msg.type === 'stageImagePasted') {
                     receiveStageImage(msg);
                   } else if (msg.type === 'locale') {

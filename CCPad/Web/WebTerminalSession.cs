@@ -1,5 +1,8 @@
 using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Net.WebSockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -17,6 +20,10 @@ namespace CCPad.Web
         private SessionEntry? _entry;
         private volatile bool _disposed;
         private readonly SemaphoreSlim _sendLock = new(1, 1);
+        internal const int MaxInputMessageBytes = 1024 * 1024;
+        private const int MaxInputHistory = 4096;
+        private readonly Dictionary<string, (string Fingerprint, string Ack)> _inputHistory = new();
+        private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
         public string? AttachedSessionId { get; private set; }
 
@@ -28,6 +35,7 @@ namespace CCPad.Web
         {
             _socket = socket;
             var buffer = new byte[8192];
+            using var message = new MemoryStream();
 
             try
             {
@@ -37,8 +45,27 @@ namespace CCPad.Web
                     if (result.MessageType == WebSocketMessageType.Close) break;
                     if (result.MessageType != WebSocketMessageType.Text) continue;
 
-                    var json = Encoding.UTF8.GetString(buffer, 0, result.Count);
-                    HandleClientMessage(json);
+                    if (message.Length + result.Count > MaxInputMessageBytes)
+                    {
+                        await socket.CloseOutputAsync(WebSocketCloseStatus.MessageTooBig,
+                            "input_message_too_large", ct);
+                        break;
+                    }
+                    message.Write(buffer, 0, result.Count);
+                    if (!result.EndOfMessage) continue;
+                    try
+                    {
+                        var json = StrictUtf8.GetString(message.GetBuffer(), 0, (int)message.Length);
+                        await HandleClientMessageAsync(json);
+                    }
+                    catch (DecoderFallbackException)
+                    {
+                        await socket.CloseOutputAsync(WebSocketCloseStatus.InvalidPayloadData,
+                            "invalid_utf8", ct);
+                        break;
+                    }
+                    message.SetLength(0);
+                    message.Position = 0;
                 }
             }
             catch (OperationCanceledException) { }
@@ -49,7 +76,7 @@ namespace CCPad.Web
             }
         }
 
-        private void HandleClientMessage(string json)
+        private async Task HandleClientMessageAsync(string json)
         {
             try
             {
@@ -64,8 +91,7 @@ namespace CCPad.Web
                         break;
 
                     case "input":
-                        var data = doc.RootElement.GetProperty("data").GetString() ?? "";
-                        _entry?.WriteInput(data);
+                        await HandleInputAsync(doc.RootElement);
                         break;
 
                     case "ping":
@@ -81,6 +107,94 @@ namespace CCPad.Web
             }
             catch { }
         }
+
+        private async Task HandleInputAsync(JsonElement body)
+        {
+            var data = body.GetProperty("data").GetString() ?? "";
+            if (!body.TryGetProperty("inputId", out var idValue))
+            {
+                if (body.TryGetProperty("expectedCliSessionId", out _) ||
+                    body.TryGetProperty("expectedSessionProvenance", out _) || body.TryGetProperty("expectedTurnId", out _))
+                {
+                    await SendAsync("{\"type\":\"error\",\"message\":\"bound_input_id_required\"}");
+                    return;
+                }
+                _entry?.WriteInput(data); // preserve the existing browser protocol
+                return;
+            }
+            var inputId = idValue.GetString() ?? "";
+            if (inputId.Length is < 1 or > 128)
+            {
+                await SendAsync("{\"type\":\"error\",\"message\":\"invalid_input_id\"}");
+                return;
+            }
+            var pane = body.TryGetProperty("sessionId", out var paneValue) ? paneValue.GetString() ?? "" : "";
+            bool hasIdentity = body.TryGetProperty("expectedCliSessionId", out var expectedValue);
+            bool hasProvenance = body.TryGetProperty("expectedSessionProvenance", out var provenanceValue);
+            var expected = hasIdentity && expectedValue.ValueKind == JsonValueKind.String ? expectedValue.GetString() : null;
+            var provenance = hasProvenance && provenanceValue.ValueKind == JsonValueKind.String ? provenanceValue.GetString() : null;
+            bool hasTurn = body.TryGetProperty("expectedTurnId", out var turnValue);
+            var expectedTurn = hasTurn && turnValue.ValueKind == JsonValueKind.String ? turnValue.GetString() : null;
+            var fingerprint = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+                JsonSerializer.Serialize(new { sessionId = pane, data, hasIdentity, hasProvenance, hasTurn,
+                    expected, provenance, expectedTurn }))));
+            if (_inputHistory.TryGetValue(inputId, out var previous))
+            {
+                await SendAsync(previous.Fingerprint == fingerprint ? previous.Ack :
+                    InputAck(inputId, pane, "rejected", "input_id_conflict"));
+                return;
+            }
+            if (_inputHistory.Count >= MaxInputHistory)
+            {
+                await SendAsync(InputAck(inputId, pane, "rejected", "input_history_full"));
+                return;
+            }
+            string ack;
+            if (_entry == null || AttachedSessionId == null)
+                ack = InputAck(inputId, pane, "rejected", "not_attached");
+            else if (pane != AttachedSessionId || TerminalSessionRegistry.Get(pane) != _entry)
+                ack = InputAck(inputId, pane, "rejected", "pane_mismatch");
+            else if (hasIdentity || hasProvenance || hasTurn)
+            {
+                if (!Guid.TryParse(expected, out _) || provenance is not ("official_notify" or "explicit_resume") ||
+                    _entry.WriteBoundInputAsync == null ||
+                    (data == "\x03" && !hasTurn) ||
+                    (hasTurn && (data != "\x03" || string.IsNullOrWhiteSpace(expectedTurn) || expectedTurn.Length > 128)))
+                    ack = InputAck(inputId, pane, "rejected", "cli_identity_mismatch");
+                else
+                {
+                    try
+                    {
+                        var result = await _entry.WriteBoundInputAsync(data, expected!, provenance, expectedTurn);
+                        ack = !result.IdentityMatched ? InputAck(inputId, pane, "rejected", "cli_identity_mismatch") :
+                            result.Written ? InputAck(inputId, pane, "written", "", "pty_write") :
+                            InputAck(inputId, pane, "unknown", "input_delivery_unknown");
+                    }
+                    catch { ack = InputAck(inputId, pane, "unknown", "input_delivery_unknown"); }
+                }
+            }
+            else
+            {
+                try
+                {
+                    ack = _entry.Session.TryWriteInput(data)
+                        ? InputAck(inputId, pane, "written", "", "pty_write")
+                        : InputAck(inputId, pane, "unknown", "input_delivery_unknown");
+                }
+                catch
+                {
+                    ack = InputAck(inputId, pane, "unknown", "input_delivery_unknown");
+                }
+            }
+            // Retain all IDs for this connection; never evict and permit replay.
+            // The bridge's durable ledger owns cross-connection deduplication.
+            _inputHistory.Add(inputId, (fingerprint, ack));
+            await SendAsync(ack);
+        }
+
+        private static string InputAck(string inputId, string pane, string status,
+            string errorCode, string ackScope = "") => JsonSerializer.Serialize(new
+            { type = "input_ack", inputId, sessionId = pane, status, errorCode, ackScope });
 
         private void AttachTo(string sessionId)
         {
@@ -111,7 +225,8 @@ namespace CCPad.Web
             entry.Session.OutputReceived += OnOutput;
 
             // 4. Confirm attachment
-            _ = SendAsync("{\"type\":\"attached\",\"sessionId\":\"" + sessionId + "\"}");
+            _ = SendAsync(JsonSerializer.Serialize(new { type = "attached", sessionId,
+                inputAckVersion = 1, maxInputMessageBytes = MaxInputMessageBytes }));
         }
 
         private void Detach()

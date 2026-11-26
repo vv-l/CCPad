@@ -122,6 +122,7 @@ namespace CCPad.Web
                         ["workingDir"] = s.WorkingDir,
                         ["cliMode"] = s.CliMode ?? "",
                         ["sessionId"] = s.CliSessionId ?? "",
+                        ["sessionProvenance"] = s.SessionProvenance,
                         ["codexAccountId"] = s.CodexAccountId ?? "",
                         ["remoteProfileId"] = s.RemoteProfileId ?? "",
                         ["remoteWorkingDir"] = s.RemoteWorkingDir ?? "",

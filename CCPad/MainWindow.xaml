@@ -68,6 +68,8 @@
                     <Border Background="{ThemeResource LayerFillColorDefaultBrush}"
                             BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
                             BorderThickness="1" CornerRadius="8" Padding="14">
+                        <ScrollViewer MaxHeight="600" VerticalScrollBarVisibility="Auto" HorizontalScrollMode="Disabled"
+                                      HorizontalScrollBarVisibility="Disabled">
                         <StackPanel Width="320" Spacing="9">
                             <ComboBox x:Name="QuotaProviderSelector"
                                       Width="120"
@@ -77,6 +79,17 @@
                                 <ComboBoxItem x:Name="QuotaCodexItem" Content="Codex"/>
                                 <ComboBoxItem x:Name="QuotaClaudeItem" Content="Claude"/>
                             </ComboBox>
+                            <StackPanel x:Name="ClaudeApiPanel" Spacing="6" Visibility="Collapsed">
+                                <DropDownButton x:Name="ClaudeApiSelector" HorizontalAlignment="Stretch"
+                                                HorizontalContentAlignment="Left">
+                                    <DropDownButton.Flyout>
+                                        <MenuFlyout x:Name="ClaudeApiProfileMenu"/>
+                                    </DropDownButton.Flyout>
+                                </DropDownButton>
+                                <TextBlock x:Name="ClaudeApiNote" FontSize="12" Opacity="0.8" TextWrapping="Wrap"/>
+                                <Button x:Name="ClaudeApiAddButton" Content="Add API key…" Padding="8,4"
+                                        HorizontalAlignment="Left" Click="OnClaudeApiAddClick"/>
+                            </StackPanel>
                             <StackPanel x:Name="QuotaAccountPanel" Spacing="6">
                                 <ComboBox x:Name="QuotaAccountSelector" HorizontalAlignment="Stretch"
                                           SelectionChanged="OnQuotaAccountChanged"/>
@@ -107,7 +120,7 @@
                                     <TextBlock x:Name="QuotaFlyoutTitle" Text="Codex"
                                                FontSize="16" FontWeight="SemiBold" TextWrapping="Wrap"/>
                                     <TextBlock x:Name="QuotaFlyoutPlan" Text=""
-                                               FontSize="12" Opacity="0.7"/>
+                                               FontSize="12" Opacity="0.7" TextWrapping="Wrap" MaxWidth="220"/>
                                 </StackPanel>
                                 <TextBlock x:Name="QuotaFlyoutUpdated" Grid.Column="1"
                                            Text="" FontSize="11" Opacity="0.65"
@@ -127,6 +140,7 @@
                                     HorizontalAlignment="Right" Padding="12,5"
                                     Click="OnQuotaRefreshClick"/>
                         </StackPanel>
+                        </ScrollViewer>
                     </Border>
                 </Flyout>
             </Button.Flyout>
@@ -137,7 +151,7 @@
                 Click="OnClaudeQuotaButtonClick">
             <StackPanel Orientation="Horizontal" Spacing="6">
                 <TextBlock x:Name="ClaudeQuotaProviderLabel" Text="Claude"
-                           FontSize="12" VerticalAlignment="Center"/>
+                           FontSize="12" VerticalAlignment="Center" MaxWidth="150" TextTrimming="CharacterEllipsis"/>
                 <ProgressBar x:Name="ClaudeQuotaProgress" Width="54" Height="5"
                              Minimum="0" Maximum="100" Value="0"
                              VerticalAlignment="Center"/>
@@ -196,6 +210,19 @@
                 <StackPanel Orientation="Horizontal" Spacing="6">
                     <FontIcon Glyph="&#xE81C;" FontSize="14"/>
                     <TextBlock x:Name="LastCmdButtonLabel" Text="上条" FontSize="14" VerticalAlignment="Center"/>
+                </StackPanel>
+            </ToggleButton>
+
+            <ToggleButton x:Name="RemoteScrollButton"
+                          Width="74" Height="28" MinHeight="28" MinWidth="0"
+                          Padding="0" HorizontalContentAlignment="Center"
+                          VerticalContentAlignment="Center"
+                          IsEnabled="False"
+                          ToolTipService.ToolTip="远程滑动：将左键拖动转为上下滚动；关闭后恢复文字拖选。原生触摸无需开启。"
+                          Click="OnRemoteScrollButtonClick">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <FontIcon Glyph="&#xE927;" FontSize="14"/>
+                    <TextBlock x:Name="RemoteScrollButtonLabel" Text="滑动" FontSize="14" VerticalAlignment="Center"/>
                 </StackPanel>
             </ToggleButton>
 

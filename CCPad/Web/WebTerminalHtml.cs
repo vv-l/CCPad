@@ -205,7 +205,7 @@ namespace CCPad.Web
       fontFamily: "{{(CCPad.Settings.ThemeManager.IsDark ? "'Cascadia Code', 'Microsoft YaHei', 'Cascadia Mono', Consolas, monospace" : "'Cascadia Code', 'Cascadia Mono', Consolas, monospace")}}",
       fontSize: {{(CCPad.Settings.ThemeManager.IsDark ? 16 : 14)}}, lineHeight: {{(CCPad.Settings.ThemeManager.IsDark ? "1.25" : "1.2")}},
       theme: { background: '#0c0c0c' },
-      cursorBlink: true, allowProposedApi: true
+      cursorBlink: true, cursorInactiveStyle: 'none', allowProposedApi: true
     });
     const fit = new FitAddon.FitAddon();
     term.loadAddon(fit);

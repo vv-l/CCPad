@@ -1,0 +1,9 @@
+#!/usr/bin/bash
+# Git for Windows implements RLIMIT_AS with a Windows per-process commit limit.
+# Keep a tighter inherited limit. The calling shell and other pipeline stages
+# retain their own limits.
+limit=$(ulimit -v) || exit 2
+if [[ $limit == unlimited || $limit -gt 1048576 ]]; then
+    ulimit -v 1048576 || { printf '%s\n' 'grep: cannot apply the 1 GiB memory limit' >&2; exit 2; }
+fi
+exec /usr/bin/ccpad-gnu-grep.exe "$@"

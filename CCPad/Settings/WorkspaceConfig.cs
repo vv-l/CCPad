@@ -16,6 +16,7 @@ namespace CCPad.Settings
         public int? EditingIndex { get; init; }
         public string EditingDraft { get; init; } = "";
         public bool Paused { get; init; }
+        public string PauseReason { get; init; } = "";
         // A transport acknowledgement may have been lost during shutdown.
         public string? PendingCommand { get; init; }
     }
@@ -48,6 +49,13 @@ namespace CCPad.Settings
         /// history home and its currently signed-in account. Remote tabs leave this empty.
         /// </summary>
         public string CodexAccountId { get; set; } = "";
+
+        // Null in legacy snapshots: inherit the workspace's Claude selection.
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? ClaudeApiProfileId { get; set; }
+
+        // A same-window thaw follows its current selector. Disk restores retain the saved binding.
+        internal bool UseWindowClaudeProfileOnThaw { get; set; }
 
         /// <summary>User-defined tag shown as a badge next to the tab title. Empty → none.</summary>
         public string Tag { get; set; } = "";
@@ -87,6 +95,8 @@ namespace CCPad.Settings
 
     public class WorkspaceEntry
     {
+        // Window-local selection only. Keys remain in the DPAPI-protected profile store.
+        public string ClaudeApiProfileId { get; set; } = "";
         public int WindowWidth { get; set; } = 1200;
         public int WindowHeight { get; set; } = 800;
         public int WindowX { get; set; } = -1;

@@ -173,7 +173,7 @@ await Check("per-tab staging survives workspace save, frozen restore and IPC", a
     {
         Enabled = true, Queue = ["待发一", "待发二\n多行"], Draft = "草稿", BulkOpen = true,
         BulkDraft = "批量草稿", EditingIndex = 1, EditingDraft = "尚未确认的编辑", Paused = true,
-        PendingCommand = "发送未确认"
+        PendingCommand = "发送未确认", PauseReason = "interrupted"
     };
     var first = Payload().State;
     first.Staging = state;
@@ -192,7 +192,8 @@ await Check("per-tab staging survives workspace save, frozen restore and IPC", a
         var s = p.State.Staging!;
         return Task.FromResult(s.Enabled && s.Queue.SequenceEqual(state.Queue) && s.Draft == state.Draft &&
             s.BulkOpen && s.BulkDraft == state.BulkDraft && s.EditingIndex == state.EditingIndex &&
-            s.EditingDraft == state.EditingDraft && s.Paused && s.PendingCommand == state.PendingCommand);
+            s.EditingDraft == state.EditingDraft && s.Paused && s.PendingCommand == state.PendingCommand &&
+            s.PauseReason == state.PauseReason);
     });
     await offer.Completion;
     Require(result == TabTransferResult.Committed);

@@ -109,10 +109,10 @@ namespace CCPad.Settings
     /// </summary>
     public class RemoteCodexConfig
     {
-        public string Host { get; set; } = "192.168.32.167";
+        public string Host { get; set; } = "";
         public string User { get; set; } = "root";
         /// <summary>Private key file; %VAR% is expanded at launch time.</summary>
-        public string KeyPath { get; set; } = "%USERPROFILE%\\.ssh\\id_ed25519_167";
+        public string KeyPath { get; set; } = "";
         /// <summary>Remote working directory, substituted for {dir}.</summary>
         public string RemoteDir { get; set; } = RemoteProjectConfig.DefaultWorkingDir;
         /// <summary>Legacy shared session name from the single-session design.

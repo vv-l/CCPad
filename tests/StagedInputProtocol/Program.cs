@@ -43,14 +43,16 @@ Console.WriteLine("PASS non-bracketed single-line input still uses a separate En
 
 var passive = new[] { "\x1b[I", "\x1b[O", "\x1b[1;1R", "\x1b[?12;80R", "\x1b[?1;2c",
     "\x1b[>0;276;0c", "\x1b[0n", "\x1b[?2004;1$y", "\x1b[8;40;120t",
-    "\x1b]10;rgb:ffff/ffff/ffff\x1b\\", "\x1b[O\x1b[1;1R" };
+    "\x1b]10;rgb:ffff/ffff/ffff\x1b\\", "\x1b[O\x1b[1;1R",
+    "\x1b[<35;12;7M", "\x1b[<32;12;7M", "\x1b[<0;12;7m", "\x1b[<64;12;7M" };
 foreach (var data in passive)
     if (StagedInputProtocol.InterruptsSubmission(data, "user"))
         throw new Exception("Terminal report canceled a staged Enter");
 Console.WriteLine("PASS focus and protocol reports do not take ownership of a staged submit");
 
 var interactive = new[] { "hello", "涓枃", "\r", "\x03", "\x1b", "\x7f", "\x1b[A", "\x1b[F",
-    "\x1b[Oedited", "edited\x1b[I", "\x1b[200~pasted text\x1b[201~" };
+    "\x1b[Oedited", "edited\x1b[I", "\x1b[200~pasted text\x1b[201~",
+    "\x1b[<0;12;7M", "\x1b[<35;12;7Medited", "\x1b[<9999999999999;12;7M" };
 foreach (var data in interactive)
     if (!StagedInputProtocol.InterruptsSubmission(data, "user"))
         throw new Exception("Actual editing no longer cancels an automatic submit");

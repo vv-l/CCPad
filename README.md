@@ -18,7 +18,7 @@
 
 ---
 
-> Current source version: **v1.10.47**
+> Current source version: **v1.10.66**
 
 ## Demo videos
 
@@ -442,7 +442,17 @@ CCPad/
 
 This is a community fork of [nuomiaa/CCPad](https://github.com/nuomiaa/CCPad) (based on upstream **v1.0.2**). Changes made in this fork:
 
-### v1.10.47 (current source update)
+### v1.10.66
+
+Changes since the v1.10.47 source update:
+
+- **Claude API profiles.** Open the Claude quota panel, choose **Add Claude API…**, and select a profile before opening a terminal. Each window has its own selection. A running session keeps its launch credentials. Windows encrypts saved keys for the current user. Compatible providers can report balance, cost and token usage.
+- **Terminal links and scrolling.** Click HTTP(S) links across wrapped rows in terminal output, including tables and indented paragraphs. Remote desktop users can enable **Swipe** for one pane to turn mouse drags into scrolling. When WebView2 recovers with the terminal page still responding, scrollback is preserved.
+- **Staged input.** The queue now shows why it paused and offers **Resume sending**. Mouse movement and wheel events preserve a pending submit. If delivery was uncertain during recovery, review the entry before resuming.
+- **Feishu single-window demo.** Pair a configured bot with a confirmed local Codex session, hand over input and return control to the desktop. The bridge checks the pane and session identity before writing and acknowledges each write. [Setup and pairing](tools/FEISHU_SINGLE_WINDOW_DEMO.md)
+- **Claude on Windows.** CC Pad prefers the native Claude launcher when available and limits Git Bash grep processes in its Claude terminals to 1 GiB.
+
+### v1.10.47
 
 - **Codex execution observer** — Open Observe from a local Codex tab to inspect the bound conversation and explicitly linked agents, tool calls and returns, public progress, and cumulative token usage. Filter events or follow the latest activity. Reading is bounded and read-only; instructions stay in the original terminal, and external workers' internal progress is not collected.
 - **Free account plan display** — Keep the Free plan visible when no usage window is reported, including a usage endpoint 403 response that contains plan information. The quota panel and overview distinguish this state from an expired login.

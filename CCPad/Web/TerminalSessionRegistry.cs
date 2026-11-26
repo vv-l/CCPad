@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
 using CCPad.Terminal;
 
 namespace CCPad.Web
@@ -59,6 +60,8 @@ namespace CCPad.Web
         // second model process.
         public string? CliMode { get; set; }
         public string? CliSessionId { get; set; }
+        public string SessionProvenance { get; set; } = "";
+        public Func<string, string, string, string?, Task<BoundInputResult>>? WriteBoundInputAsync { get; init; }
         public string? CodexAccountId { get; set; }
         public string? RemoteProfileId { get; set; }
         public string? RemoteWorkingDir { get; set; }
@@ -96,6 +99,8 @@ namespace CCPad.Web
         /// <summary>Resize the underlying ConPTY process.</summary>
         public void Resize(int cols, int rows) => Session.Resize(cols, rows);
     }
+
+    internal sealed record BoundInputResult(bool IdentityMatched, bool Written);
 
     /// <summary>
     /// Lock-free-ish ring buffer for terminal output. Stores the most recent N bytes

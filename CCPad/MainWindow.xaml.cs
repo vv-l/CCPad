@@ -138,21 +138,24 @@ namespace CCPad
                 if (_claudeQuotaRefreshInFlight)
                     return;
                 _claudeQuotaRefreshInFlight = true;
+                string requestedProfile = _claudeApiProfileId;
                 try
                 {
-                    var snapshot = await _claudeQuotaService.RefreshAsync(_quotaRefreshCts.Token).ConfigureAwait(true);
-                    if (!_quotaRefreshCts.IsCancellationRequested && snapshot.State != ClaudeQuotaState.Loading)
+                    var snapshot = await _claudeQuotaService.RefreshAsync(_quotaRefreshCts.Token, requestedProfile).ConfigureAwait(true);
+                    if (!_quotaRefreshCts.IsCancellationRequested && requestedProfile == _claudeApiProfileId && snapshot.State != ClaudeQuotaState.Loading)
                         UpdateClaudeQuotaUi(snapshot);
                 }
                 catch
                 {
-                    if (!_quotaRefreshCts.IsCancellationRequested)
+                    if (!_quotaRefreshCts.IsCancellationRequested && requestedProfile == _claudeApiProfileId)
                         UpdateClaudeQuotaUi(ClaudeQuotaSnapshot.Unavailable(
                             Loc.T("quota_claude_unavailable")));
                 }
                 finally
                 {
                     _claudeQuotaRefreshInFlight = false;
+                    if (requestedProfile != _claudeApiProfileId && !_quotaRefreshCts.IsCancellationRequested)
+                        _ = RefreshQuotaAsync(QuotaProvider.Claude);
                 }
                 return;
             }
@@ -203,6 +206,7 @@ namespace CCPad
         private void UpdateQuotaUi()
         {
             UpdateQuotaAccountControls();
+            UpdateClaudeApiControls();
             UpdateCodexQuotaUi(_codexQuotaSnapshot);
             UpdateClaudeQuotaUi(_claudeQuotaSnapshot);
             UpdateQuotaToolbar();
@@ -259,6 +263,7 @@ namespace CCPad
                 QuotaWindowPanel is null)
                 return;
 
+            QuotaFlyoutProgress.Visibility = Visibility.Visible;
             QuotaFlyoutProgress.Value = percent;
             QuotaFlyoutTitle.Text = Loc.T("quota_account_badge", SelectedCodexQuotaName);
             // A Free account can have a plan but no readable usage window. Keep
@@ -299,6 +304,7 @@ namespace CCPad
         private void UpdateClaudeQuotaUi(ClaudeQuotaSnapshot snapshot)
         {
             _claudeQuotaSnapshot = snapshot;
+            UpdateClaudeApiControls();
             if (QuotaLaunchAccountLabel is not null)
                 QuotaLaunchAccountLabel.Visibility = Visibility.Collapsed;
             UpdateResetCreditButton();
@@ -307,13 +313,19 @@ namespace CCPad
             var percent = hasUsage ? snapshot.TightestUsedPercent : 0;
             var soonestReset = GetSoonestReset(snapshot);
             ClaudeQuotaProgress.Value = percent;
-            ClaudeQuotaPercentLabel.Text = hasUsage ? $"{percent:0}%" : "--";
+            var api = snapshot.Api;
+            ClaudeQuotaProgress.Visibility = api == null ? Visibility.Visible : Visibility.Collapsed;
+            ClaudeQuotaPercentLabel.Text = api?.DisplayBalance is decimal balance ? ClaudeApiUsage.Money(balance, api.Unit)
+                : api != null ? "API" : hasUsage ? $"{percent:0}%" : "--";
             ClaudeQuotaResetLabel.Text = soonestReset.HasValue
                 ? FormatCountdown(soonestReset.Value - DateTimeOffset.UtcNow)
                 : "";
-            ClaudeQuotaProviderLabel.Text = Loc.T("quota_claude");
+            ClaudeQuotaProviderLabel.Text = api != null && !string.IsNullOrWhiteSpace(api.Name)
+                ? "Claude · " + api.Name : Loc.T("quota_claude");
             ToolTipService.SetToolTip(ClaudeQuotaButton,
-                snapshot.State == ClaudeQuotaState.Unavailable
+                api != null ? (api.Name.Length > 0 ? api.Name + " · " : "") + api.Endpoint + "\n" +
+                    (api.DisplayBalance is decimal amount ? Loc.T(api.Balance.HasValue ? "claude_api_balance" : "claude_api_remaining") + " " + ClaudeApiUsage.Money(amount, api.Unit)
+                        : Loc.T(snapshot.Error ?? "claude_api_unavailable")) : snapshot.State == ClaudeQuotaState.Unavailable
                     ? Loc.T("quota_claude_not_signed_in")
                     : hasUsage
                         ? Loc.T("quota_claude_tooltip", percent)
@@ -333,15 +345,18 @@ namespace CCPad
                 return;
 
             QuotaFlyoutProgress.Value = percent;
-            QuotaFlyoutTitle.Text = Loc.T("quota_title");
+            QuotaFlyoutProgress.Visibility = api == null ? Visibility.Visible : Visibility.Collapsed;
+            QuotaFlyoutTitle.Text = api != null
+                ? (api.Name.Length > 0 ? api.Name + " · " : "") + Loc.T("claude_api_title")
+                : Loc.T("quota_title");
             QuotaFlyoutPlan.Text = hasPlan
-                ? Loc.T("quota_plan", snapshot.PlanLabel!)
+                ? api != null ? api.Endpoint : Loc.T("quota_plan", snapshot.PlanLabel!)
                 : "";
             QuotaFlyoutUpdated.Text = snapshot.UpdatedAt.HasValue
                 ? Loc.T("quota_updated", FormatClock(snapshot.UpdatedAt.Value))
                 : "";
             QuotaCreditsLabel.Text = "";
-            QuotaFlyoutStatus.Text = snapshot.State switch
+            QuotaFlyoutStatus.Text = api != null ? Loc.T(snapshot.Error ?? "claude_api_scope") : snapshot.State switch
             {
                 ClaudeQuotaState.Loading => Loc.T("quota_claude_loading"),
                 ClaudeQuotaState.Unavailable => Loc.T("quota_claude_not_signed_in"),
@@ -351,6 +366,7 @@ namespace CCPad
             };
             QuotaRefreshButton.Content = Loc.T("quota_refresh");
             QuotaWindowPanel.Children.Clear();
+            if (api != null) AddClaudeApiRows(api);
             if (hasUsage)
             {
                 foreach (var window in snapshot.Windows)
@@ -483,6 +499,7 @@ namespace CCPad
 
         private void OnQuotaFlyoutOpened(object sender, object e)
         {
+            RebuildClaudeApiSelector();
             SynchronizeCodexQuotaAccounts();
             // Flyout contents are created lazily. Their initial selector event
             // may fire before Opened and must not override the clicked badge.
@@ -744,6 +761,7 @@ namespace CCPad
             if (e.WindowActivationState != WindowActivationState.Deactivated)
             {
                 _splitHost?.FocusActive();
+                _splitHost?.RefreshClaudeTabTitles();
                 RefreshStageButton();
                 RefreshObserveButton();
             }
@@ -756,6 +774,11 @@ namespace CCPad
         {
             // ToggleButton has already flipped IsChecked; IsChecked is the intent.
             _splitHost?.ActiveTerminal?.SetStaging(StageButton.IsChecked == true);
+        }
+
+        private void OnRemoteScrollButtonClick(object sender, RoutedEventArgs e)
+        {
+            _splitHost?.ActiveTerminal?.SetRemoteScroll(RemoteScrollButton.IsChecked == true);
         }
 
         private void RefreshObserveButton()
@@ -995,6 +1018,8 @@ namespace CCPad
             var t = _splitHost?.ActiveTerminal;
             StageButton.IsChecked = t?.StagingOn == true;
             AutoButton.IsChecked = t?.AutoConfirmOn == true;
+            RemoteScrollButton.IsEnabled = t != null;
+            RemoteScrollButton.IsChecked = t?.RemoteScrollOn == true;
         }
 
         // ── File manager panel (right-docked) ────────────────────────────
@@ -1431,6 +1456,7 @@ namespace CCPad
             var isMaximized = presenter?.State == Microsoft.UI.Windowing.OverlappedPresenterState.Maximized;
             return new WorkspaceEntry
             {
+                ClaudeApiProfileId = _claudeApiProfileId,
                 WindowWidth = appWindow?.Size.Width ?? 1200,
                 WindowHeight = appWindow?.Size.Height ?? 800,
                 WindowX = appWindow?.Position.X ?? -1,
@@ -1442,6 +1468,7 @@ namespace CCPad
 
         private void RestoreWindowSize(WorkspaceEntry ws)
         {
+            RestoreClaudeApiSelection(ws.ClaudeApiProfileId);
             var appWindow = GetAppWindow();
             if (appWindow == null) return;
 
@@ -1518,6 +1545,10 @@ namespace CCPad
             };
             _remoteMenuItem.Click += (_, _) => OnRemoteTerminalClick();
             AboutFlyout.Items.Add(_remoteMenuItem);
+
+            var feishuBindingItem = new MenuFlyoutItem { Text = Loc.T("feishu_bind_menu") };
+            feishuBindingItem.Click += async (_, _) => await ShowFeishuBindingAsync();
+            AboutFlyout.Items.Add(feishuBindingItem);
 
             var remoteSessionsItem = new MenuFlyoutItem
             {
@@ -1868,6 +1899,8 @@ namespace CCPad
             WorkspaceLabel.Text = Loc.T("btn_workspace");
             ToolTipService.SetToolTip(LastCmdButton, Loc.T("tip_lastcmd"));
             LastCmdButtonLabel.Text = Loc.T("btn_lastcmd");
+            ToolTipService.SetToolTip(RemoteScrollButton, Loc.T("tip_remote_scroll"));
+            RemoteScrollButtonLabel.Text = Loc.T("btn_remote_scroll");
             ToolTipService.SetToolTip(FilesButton, Loc.T("tip_files"));
             FilesButtonLabel.Text = Loc.T("btn_files");
             ToolTipService.SetToolTip(AutoButton, Loc.T("tip_auto"));
@@ -2478,6 +2511,7 @@ namespace CCPad
                 return;
             }
 
+            StopOwnedFeishuSidecar();
             Loc.LanguageChanged -= OnLanguageChanged;
             ThemeManager.PrefChanged -= OnThemePrefChanged;
             LastCmdBarManager.Changed -= OnLastCmdBarManagerChanged;
@@ -2634,6 +2668,8 @@ namespace CCPad
             _splitHost.LayoutChanged += ScheduleAutosave;
             _splitHost.LayoutChanged += ScheduleTopRightAdjust; // re-reserve for new split panels
             _splitHost.ActivePaneChanged += RefreshObserveButton;
+            _splitHost.ActivePaneChanged += RefreshClaudeSessionProfile;
+            _splitHost.LayoutChanged += RefreshClaudeSessionProfile;
             _splitHost.ActivePaneChanged += RefreshStageButton; // keep the staging toggle in sync
             _splitHost.StagingChanged += RefreshStageButton;    // Alt+` hotkey re-syncs the button
             _splitHost.ActivePaneChanged += RefreshFilePanelRoot; // follow active project dir

@@ -32,6 +32,7 @@ namespace CCPad.CodexQuota
         DateTimeOffset? UpdatedAt,
         string? Error)
     {
+        public ClaudeApiUsage? Api { get; init; }
         public static ClaudeQuotaSnapshot Loading() =>
             new(ClaudeQuotaState.Loading, null, null, null, Array.Empty<ClaudeQuotaWindow>(), null, null);
 
@@ -62,7 +63,7 @@ namespace CCPad.CodexQuota
         private readonly SemaphoreSlim _refreshGate = new(1, 1);
         private bool _disposed;
 
-        public async Task<ClaudeQuotaSnapshot> RefreshAsync(CancellationToken cancellationToken = default)
+        public async Task<ClaudeQuotaSnapshot> RefreshAsync(CancellationToken cancellationToken = default, string? apiProfileId = null)
         {
             if (_disposed)
                 return ClaudeQuotaSnapshot.Unavailable("Claude quota service is closed");
@@ -71,6 +72,16 @@ namespace CCPad.CodexQuota
 
             try
             {
+                ClaudeApiConnection? api;
+                try { api = new ClaudeApiProfileStore().Resolve(apiProfileId); }
+                catch
+                {
+                    return new ClaudeQuotaSnapshot(ClaudeQuotaState.Error, "API", null, null,
+                        Array.Empty<ClaudeQuotaWindow>(), null, "claude_api_missing")
+                    { Api = ClaudeApiUsage.Empty(new ClaudeApiConnection()) };
+                }
+                if (api != null)
+                    return await ClaudeApiUsage.ReadAsync(Http, api, cancellationToken).ConfigureAwait(false);
                 var profile = ReadProfile();
                 if (profile == null)
                     return ClaudeQuotaSnapshot.Unavailable("Claude is not signed in");
@@ -152,7 +163,8 @@ namespace CCPad.CodexQuota
 
         private static HttpClient CreateHttpClient()
         {
-            var client = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
+            // Credentials must stay on the configured origin, including x-api-key on redirects.
+            var client = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(20) };
             client.DefaultRequestHeaders.UserAgent.ParseAdd("CCPad/1.0");
             return client;
         }

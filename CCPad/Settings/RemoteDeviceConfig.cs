@@ -67,6 +67,7 @@ namespace CCPad.Settings
             // object in prefs.json. It deliberately preserves customized launch
             // commands and key paths.
             var legacy = AppConfig.Load().RemoteCodex ?? new RemoteCodexConfig();
+            if (string.IsNullOrWhiteSpace(legacy.Host)) return new RemoteDeviceDocument();
             var migrated = new RemoteDeviceDocument
             {
                 SelectedDeviceId = LegacyDeviceId,

@@ -384,3 +384,12 @@ publish/
 installer/dist/
 *.zip
 !installer/installer.iss
+
+# Local credentials and Feishu bridge state
+.env
+.env.*
+!.env.example
+.ccpad-feishu-demo/
+feishu-demo-bots.json
+feishu-demo-webterminal.json
+claude-api-profiles/

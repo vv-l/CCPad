@@ -1,0 +1,27 @@
+{
+  "scope": "Feishu streaming card adapter and offline fixtures",
+  "files": [
+    {
+      "path": "tools/r5_cards/vendor/cardkit_streamer.py",
+      "sha256": "365e6af5fc0bff634a84ef704ac6df81213a4b9a697943e7550c7adc9d5e96e2",
+      "bytes": 86973
+    },
+    {
+      "path": "tools/r5_cards/vendor/token_usage.py",
+      "sha256": "69aa5a1f400704a35135808664d31b93a73b3e5ea9c6f3e27dc8bf4586c92879",
+      "bytes": 15390
+    }
+  ],
+  "tests": {
+    "command": "python -m unittest discover -s tools -p test_r5_cards.py",
+    "transport": "fake SDK only"
+  },
+  "preserved": [
+    "vendor byte SHA",
+    "default abort-only layout",
+    "CARDKIT_MS=2000",
+    "heartbeat=10s",
+    "no usage event/no fabricated token",
+    "no main/config import"
+  ]
+}

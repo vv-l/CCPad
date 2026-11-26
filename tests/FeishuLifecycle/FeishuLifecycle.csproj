@@ -1,0 +1,4 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup>
+  <ItemGroup><Compile Include="../../CCPad/FeishuOwnedSidecar.cs" Link="FeishuOwnedSidecar.cs" /><Compile Include="../../CCPad/FeishuSessionBinding.cs" Link="FeishuSessionBinding.cs" /><Compile Include="../../CCPad/FeishuBindingDescriptor.cs" Link="FeishuBindingDescriptor.cs" /><Compile Include="../../CCPad/FeishuDemoCatalog.cs" Link="FeishuDemoCatalog.cs" /></ItemGroup>
+</Project>

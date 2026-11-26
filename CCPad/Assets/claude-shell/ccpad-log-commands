@@ -1,0 +1,36 @@
+#!/usr/bin/env python
+"""Print the last matching Bash commands from one Claude session JSONL."""
+import argparse
+import json
+from collections import deque
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("session")
+parser.add_argument("text", nargs="?", default="")
+parser.add_argument("--last", type=int, default=2)
+args = parser.parse_args()
+if not 1 <= args.last <= 100:
+    parser.error("--last must be between 1 and 100")
+
+matches = deque(maxlen=args.last)
+with open(args.session, encoding="utf-8-sig") as stream:
+    for line in stream:
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue  # A live transcript can end in a partial record.
+        if not isinstance(entry, dict) or entry.get("type") != "assistant":
+            continue
+        message = entry.get("message")
+        blocks = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(blocks, list):
+            continue
+        for block in blocks:
+            if not isinstance(block, dict) or block.get("type") != "tool_use" or block.get("name") != "Bash":
+                continue
+            data = block.get("input")
+            command = data.get("command") if isinstance(data, dict) else None
+            if isinstance(command, str) and args.text in command:
+                matches.append(command)
+for command in matches:
+    print(command)

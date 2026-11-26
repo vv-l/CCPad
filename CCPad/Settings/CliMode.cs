@@ -12,7 +12,7 @@ namespace CCPad.Settings
     {
         public const string Claude = "claude";
         public const string Codex = "codex";
-        /// <summary>Codex on the 192.168.32.167 box: ssh + tmux attach. All
+        /// <summary>Codex on the configured Linux host: ssh + tmux attach. All
         /// connection parameters live in <see cref="AppPrefs.RemoteCodex"/>.</summary>
         public const string CodexRemote = "codex-remote";
 
@@ -77,11 +77,13 @@ namespace CCPad.Settings
         /// without an id opens its picker. The picker is intentionally separate
         /// from BuildResumeCommand because it has no conversation id to persist
         /// until the user makes a selection.</summary>
-        public static string BuildResumePickerCommand(string mode, string extraArgs = "") => Normalize(mode) switch
+        public static string BuildResumePickerCommand(string mode, string extraArgs = "", bool allProjects = true) => Normalize(mode) switch
         {
             Codex => ResolveLaunch("codex", JoinArgs(
-                    // A new window may open in a different directory from the original thread.
-                    JoinArgs("resume --all --no-daemon", CodexResumeSafetyArgs()), extraArgs)),
+                    // The general picker can cross projects; a project's context menu
+                    // must keep Codex's cwd filter enabled.
+                    JoinArgs(allProjects ? "resume --all --no-daemon" : "resume --no-daemon",
+                        CodexResumeSafetyArgs()), extraArgs)),
             _ => ResolveLaunch("claude", JoinArgs(
                     JoinArgs("--resume",
                         AppConfig.Load().BypassPermissions ? "--permission-mode bypassPermissions" : ""),
@@ -206,6 +208,8 @@ namespace CCPad.Settings
         {
             string trailing = string.IsNullOrEmpty(args) ? "" : " " + args;
             var resolved = FindOnPath(exeName);
+            if (exeName == "claude" && ClaudeNativeDirectory() is string nativeDir)
+                resolved = Path.Combine(nativeDir, "claude.exe");
             if (resolved == null)
             {
                 // Let cmd.exe do the PATH search at runtime (handles PATHEXT).
@@ -219,6 +223,21 @@ namespace CCPad.Settings
             }
             // .exe (or no extension / shell script) — run directly.
             return $"\"{resolved}\"{trailing}";
+        }
+
+        /// <summary>npm's native Claude binary avoids legacy console shims whose
+        /// exit can leave a nested cmd/CLI reading the same terminal as our shell.</summary>
+        internal static string? ClaudeNativeDirectory()
+        {
+            try
+            {
+                var launcher = FindOnPath("claude");
+                if (launcher == null) return null;
+                var dir = Path.Combine(Path.GetDirectoryName(launcher)!,
+                    "node_modules", "@anthropic-ai", "claude-code", "bin");
+                return File.Exists(Path.Combine(dir, "claude.exe")) ? dir : null;
+            }
+            catch { return null; }
         }
 
         private static string? FindOnPath(string name)

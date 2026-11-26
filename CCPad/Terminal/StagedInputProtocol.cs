@@ -36,10 +36,22 @@ namespace CCPad.Terminal
             @"\x1b\](?:[0-9]+;)+(?:rgb:[0-9a-fA-F/]+)(?:\x07|\x1b\\))+\z",
             RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
+        private static readonly Regex MouseReport = new(
+            @"\A\x1b\[<(\d+);\d+;\d+([Mm])\z",
+            RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
         internal static bool InterruptsSubmission(string data, string? source)
         {
             if (data.Length == 0 || source is "middle-scroll" or "wheel-scroll") return false;
-            return source == "keyboard" || !PassiveInput.IsMatch(data);
+            if (source == "keyboard") return true;
+            if (PassiveInput.IsMatch(data)) return false;
+            // tmux/xterm can report mouse motion even with no button held. It
+            // must not cancel the delayed Enter after a staged paste. A button
+            // press still takes ownership because it may act on a CLI control.
+            var mouse = MouseReport.Match(data);
+            if (mouse.Success && int.TryParse(mouse.Groups[1].Value, out int buttons) && buttons < 128 &&
+                (mouse.Groups[2].Value == "m" || (buttons & (32 | 64)) != 0)) return false;
+            return true;
         }
     }
 }
